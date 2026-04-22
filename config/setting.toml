@@ -33,7 +33,7 @@ enabled = false
 log_requests = true
 log_responses = true
 mask_token = true
-recaptcha_trace = false
+recaptcha_trace = true
 recaptcha_console = true
 recaptcha_banner = true
 
