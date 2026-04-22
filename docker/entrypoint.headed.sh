@@ -44,6 +44,34 @@ if [ "${ALLOW_DOCKER_HEADED_CAPTCHA:-true}" = "true" ] || [ "${ALLOW_DOCKER_HEAD
 
     echo "[entrypoint] starting Fluxbox on DISPLAY=${DISPLAY}"
     fluxbox >/tmp/fluxbox.log 2>&1 &
+
+    # Optional VNC server so you can view :99 with RealVNC/TigerVNC (localhost:5900 by default).
+    # Set ENABLE_HEADED_VNC=0 to disable. Set VNC_PASSWORD for auth; otherwise -nopw (dev only).
+    case "${ENABLE_HEADED_VNC:-1}" in
+        0|false|FALSE|no|NO|off|OFF)
+            echo "[entrypoint] headed VNC disabled (ENABLE_HEADED_VNC=${ENABLE_HEADED_VNC:-})"
+            ;;
+        *)
+            VNC_PORT_VALUE="${VNC_PORT:-5900}"
+            if [ -n "${VNC_PASSWORD:-}" ]; then
+                rm -f /tmp/x11vnc.pass
+                if x11vnc -storepasswd "${VNC_PASSWORD}" /tmp/x11vnc.pass 2>/dev/null; then
+                    VNC_AUTH_OPTS="-rfbauth /tmp/x11vnc.pass"
+                else
+                    echo "[entrypoint] VNC_PASSWORD set but -storepasswd failed; falling back to -nopw" >&2
+                    VNC_AUTH_OPTS="-nopw"
+                fi
+            else
+                VNC_AUTH_OPTS="-nopw"
+                echo "[entrypoint] VNC: no VNC_PASSWORD set (passwordless). Do not expose port 5900 to the internet." >&2
+            fi
+            echo "[entrypoint] starting x11vnc on 0.0.0.0:${VNC_PORT_VALUE} for DISPLAY=${DISPLAY}"
+            x11vnc -display "${DISPLAY}" -forever -shared -noxdamage \
+                ${VNC_AUTH_OPTS} \
+                -listen 0.0.0.0 -rfbport "${VNC_PORT_VALUE}" \
+                >/tmp/x11vnc.log 2>&1 &
+            ;;
+    esac
 fi
 
 echo "[entrypoint] starting flow2api (headed browser mode)"

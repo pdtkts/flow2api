@@ -13,6 +13,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         fluxbox \
         x11-utils \
+        x11vnc \
         xauth \
         xvfb \
     && rm -rf /var/lib/apt/lists/*
@@ -27,6 +28,10 @@ COPY . .
 COPY docker/entrypoint.headed.sh /usr/local/bin/entrypoint.headed.sh
 RUN sed -i 's/\r$//' /usr/local/bin/entrypoint.headed.sh && chmod +x /usr/local/bin/entrypoint.headed.sh
 
-EXPOSE 8000
+COPY docker/fluxbox/fluxbox-chromium /usr/local/bin/fluxbox-chromium
+RUN chmod +x /usr/local/bin/fluxbox-chromium
+COPY docker/fluxbox/menu /root/.fluxbox/menu
+
+EXPOSE 8000 5900
 
 CMD ["/usr/local/bin/entrypoint.headed.sh"]

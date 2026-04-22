@@ -1,0 +1,28 @@
+# flow2api headed image: Debian-style Fluxbox menu + Playwright Chromium (Applications menu).
+
+[begin] (Fluxbox)
+
+   [submenu] (Applications) {}
+      [submenu] (Shells) {}
+         [exec] (Bash) { x-terminal-emulator -T "Bash" -e /bin/bash --login} <>
+         [exec] (Dash) { x-terminal-emulator -T "Dash" -e /bin/dash -i} <>
+         [exec] (Sh) { x-terminal-emulator -T "Sh" -e /bin/sh --login} <>
+      [end]
+      [exec] (Chromium) {/usr/local/bin/fluxbox-chromium}
+   [end]
+   [submenu] (Window Managers) {}
+      [restart] (FluxBox)  {/usr/bin/startfluxbox}
+   [end]
+
+   [config] (Configuration)
+   [submenu] (Styles) {}
+      [stylesdir] (/usr/share/fluxbox/styles)
+      [stylesdir] (~/.fluxbox/styles)
+      
+   [end]
+   [workspaces] (Workspaces)
+   [reconfig] (Reconfigure)
+   [restart] (Restart)
+   [exit] (Exit)
+
+[end]

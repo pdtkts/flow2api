@@ -1,0 +1,7 @@
+#!/bin/sh
+set -eu
+if [ -z "${BROWSER_EXECUTABLE_PATH:-}" ] || [ ! -x "${BROWSER_EXECUTABLE_PATH}" ]; then
+    echo "fluxbox-chromium: BROWSER_EXECUTABLE_PATH is not set or not executable" >&2
+    exit 1
+fi
+exec "${BROWSER_EXECUTABLE_PATH}" "$@"
