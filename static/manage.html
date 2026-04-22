@@ -434,11 +434,13 @@
                             </div>
 
                             <div>
-                                <label class="text-sm font-medium mb-2 block">打码页面 URL</label>
-                                <input id="cfgBrowserCaptchaPageUrl" type="text" class="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm" placeholder="https://labs.google/fx/tools/flow">
+                                <label class="text-sm font-medium mb-2 block">打码页面 URL · Captcha page URL</label>
+                                <input id="cfgBrowserCaptchaPageUrl" type="text" class="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm" placeholder="https://labs.google/fx/tools/flow" autocomplete="off">
                                 <p class="text-xs text-muted-foreground mt-1">
-                                    打开该页面后执行 reCAPTCHA Enterprise。默认 <code class="bg-muted px-1 py-0.5 rounded">https://labs.google/fx/api/auth/providers</code>（轻量）；需要更接近真实环境（如有头 Docker）可改为
-                                    <code class="bg-muted px-1 py-0.5 rounded">https://labs.google/fx/tools/flow</code> 等。
+                                    Playwright opens this page before <code class="bg-muted px-1 py-0.5 rounded">grecaptcha.enterprise.execute</code>.
+                                    Default (lightweight): <code class="bg-muted px-1 py-0.5 rounded">https://labs.google/fx/api/auth/providers</code>.
+                                    For a real Flow UI (e.g. headed Docker): <code class="bg-muted px-1 py-0.5 rounded">https://labs.google/fx/tools/flow</code>.
+                                    若界面中看不到本项，请更新到包含该字段的版本并强制刷新浏览器缓存（Ctrl+F5）。
                                 </p>
                             </div>
 
