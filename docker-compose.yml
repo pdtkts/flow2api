@@ -1,8 +1,8 @@
 version: '3.8'
 
 services:
-  # Prebuilt image (UI may be older than your git frontend). To bake current UI from source:
-  #   docker compose -f docker-compose.yml -f docker-compose.local-build.yml build flow2api && ... up -d
+  # Prebuilt image (UI may be older than your git). Build app + agent-gateway from source:
+  #   merge docker-compose.local-build.yml (see that file; tags flow2api:local, flow2api-agent-gateway:local)
   flow2api:
     image: ghcr.io/thesmallhancat/flow2api:latest
     container_name: flow2api

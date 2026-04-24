@@ -12,6 +12,14 @@ cp .env.agent-gateway.example .env.agent-gateway
 docker compose -f docker-compose.yml -f docker-compose.agent-gateway.yml --env-file .env.agent-gateway up -d --build
 ```
 
+**Build the main app and agent-gateway from your git tree** (current frontend + `src/agent_gateway/`), not only the pre-pulled `ghcr.io/.../flow2api` image: merge [`docker-compose.local-build.yml`](../docker-compose.local-build.yml). It tags **`flow2api:local`** and **`flow2api-agent-gateway:local`**.
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.agent-gateway.yml -f docker-compose.local-build.yml up -d --build
+```
+
+With tunnel: add `-f docker-compose.tunnel.yml -f docker-compose.agent-gateway.tunnel.yml` to that command, or run `make pull-up-agent-tunnel-local` / `scripts/pull-up-agent-tunnel-local.ps1`.
+
 Services:
 
 - **agent-gateway** — port **9080** (host and container).
