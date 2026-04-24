@@ -1541,6 +1541,16 @@ async def get_cache_stats(token: str = Depends(verify_admin_token)):
     return {"success": True, **stats}
 
 
+@router.get("/api/cache/files")
+async def list_cache_files(token: str = Depends(verify_admin_token)):
+    """List cached files for admin gallery (names, sizes, image/video/other)."""
+    from . import routes
+    if not routes.generation_handler or not routes.generation_handler.file_cache:
+        raise HTTPException(status_code=503, detail="File cache not initialized")
+    files = routes.generation_handler.file_cache.list_gallery_files()
+    return {"success": True, "files": files}
+
+
 @router.post("/api/cache/clear")
 async def clear_cache_files(token: str = Depends(verify_admin_token)):
     """Delete all files in the cache directory (admin only)."""

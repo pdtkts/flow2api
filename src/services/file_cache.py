@@ -5,12 +5,15 @@ import hashlib
 import time
 import mimetypes
 from pathlib import Path
-from typing import Optional, Dict, Any, Tuple
-from datetime import datetime, timedelta
+from typing import Optional, Dict, Any, Tuple, List
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 from curl_cffi.requests import AsyncSession
 from ..core.config import config
 from ..core.logger import debug_logger
+
+_IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp", ".gif", ".avif", ".bmp", ".jpe"})
+_VIDEO_SUFFIXES = frozenset({".mp4", ".webm", ".mov", ".mkv", ".m4v"})
 
 
 class FileCache:
@@ -515,6 +518,41 @@ class FileCache:
             "file_count": file_count,
             "total_bytes": total_bytes,
         }
+
+    def list_gallery_files(self) -> List[Dict[str, Any]]:
+        """List cache files with media kind for admin gallery (newest first)."""
+        rows: List[Dict[str, Any]] = []
+        try:
+            if not self.cache_dir.exists():
+                return rows
+            for path in self.cache_dir.iterdir():
+                if not path.is_file():
+                    continue
+                suffix = path.suffix.lower()
+                if suffix in _IMAGE_SUFFIXES:
+                    kind = "image"
+                elif suffix in _VIDEO_SUFFIXES:
+                    kind = "video"
+                else:
+                    kind = "other"
+                try:
+                    st = path.stat()
+                except OSError:
+                    continue
+                mtime = st.st_mtime
+                rows.append({
+                    "name": path.name,
+                    "size_bytes": st.st_size,
+                    "kind": kind,
+                    "modified_at": datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat(),
+                    "_mtime": mtime,
+                })
+        except OSError as e:
+            debug_logger.log_warning(f"list_gallery_files: {e}")
+        rows.sort(key=lambda r: r.get("_mtime", 0), reverse=True)
+        for r in rows:
+            r.pop("_mtime", None)
+        return rows
 
     def clear_all_files(self) -> Tuple[int, int]:
         """Delete all files in cache_dir. Returns (removed_count, removed_bytes)."""

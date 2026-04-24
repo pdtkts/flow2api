@@ -85,6 +85,18 @@ export interface CacheStatsResponse {
   total_bytes?: number
 }
 
+export interface CacheFileItem {
+  name: string
+  size_bytes: number
+  kind: "image" | "video" | "other"
+  modified_at?: string | null
+}
+
+export interface CacheFilesResponse {
+  success?: boolean
+  files?: CacheFileItem[]
+}
+
 export interface TokenProjectRow {
   id?: number
   project_id: string

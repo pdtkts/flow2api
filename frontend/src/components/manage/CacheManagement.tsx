@@ -7,13 +7,76 @@ import { Input } from "../ui/input"
 import { Label } from "../ui/label"
 import { Switch } from "../ui/switch"
 import { toast } from "sonner"
-import { RefreshCw, Trash2 } from "lucide-react"
-import type { CacheStatsResponse, CacheConfigResponse } from "../../types/admin"
+import { RefreshCw, Trash2, File } from "lucide-react"
+import type { CacheStatsResponse, CacheConfigResponse, CacheFilesResponse, CacheFileItem } from "../../types/admin"
 
 function formatBytes(n: number) {
   if (n < 1024) return `${n} B`
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
   return `${(n / 1024 / 1024).toFixed(2)} MB`
+}
+
+/** Public URL for a file under the API static /tmp mount (dev: Vite proxies /tmp → backend). */
+function cacheFilePublicUrl(fileName: string) {
+  return `/tmp/${encodeURIComponent(fileName)}`
+}
+
+function MediaTile({ file }: { file: CacheFileItem }) {
+  const url = cacheFilePublicUrl(file.name)
+  const meta = (
+    <div className="border-t bg-muted/40 px-2 py-1.5 text-xs">
+      <p className="truncate font-mono text-[10px] text-muted-foreground" title={file.name}>
+        {file.name}
+      </p>
+      <p className="text-muted-foreground">{formatBytes(file.size_bytes)}</p>
+    </div>
+  )
+
+  if (file.kind === "image") {
+    return (
+      <div className="overflow-hidden rounded-lg border bg-card shadow-sm">
+        <a href={url} target="_blank" rel="noreferrer" className="block aspect-[4/3] bg-muted">
+          <img src={url} alt="" className="h-full w-full object-cover" loading="lazy" decoding="async" />
+        </a>
+        {meta}
+      </div>
+    )
+  }
+
+  if (file.kind === "video") {
+    return (
+      <div className="overflow-hidden rounded-lg border bg-card shadow-sm">
+        <div className="aspect-video bg-black">
+          <video
+            src={url}
+            className="h-full w-full object-contain"
+            controls
+            playsInline
+            preload="metadata"
+            muted
+          />
+        </div>
+        {meta}
+      </div>
+    )
+  }
+
+  return (
+    <div className="flex h-full min-h-[11rem] flex-col overflow-hidden rounded-lg border bg-card shadow-sm">
+      <div className="flex flex-1 flex-col items-center justify-center gap-2 bg-muted/30 p-3">
+        <File className="h-10 w-10 text-muted-foreground" />
+        <a
+          href={url}
+          target="_blank"
+          rel="noreferrer"
+          className="line-clamp-2 break-all text-center text-xs text-primary hover:underline"
+        >
+          {file.name}
+        </a>
+      </div>
+      {meta}
+    </div>
+  )
 }
 
 export function CacheManagement({ active }: { active: boolean }) {
@@ -23,10 +86,11 @@ export function CacheManagement({ active }: { active: boolean }) {
   const [cacheBaseUrl, setCacheBaseUrl] = useState("")
   const [cacheEffectiveUrl, setCacheEffectiveUrl] = useState("")
 
-  const [statsLoading, setStatsLoading] = useState(false)
+  const [storeLoading, setStoreLoading] = useState(false)
   const [fileCount, setFileCount] = useState<number | null>(null)
   const [totalBytes, setTotalBytes] = useState<number | null>(null)
   const [cacheDir, setCacheDir] = useState("")
+  const [galleryFiles, setGalleryFiles] = useState<CacheFileItem[]>([])
 
   const [busy, setBusy] = useState(false)
 
@@ -41,26 +105,37 @@ export function CacheManagement({ active }: { active: boolean }) {
     }
   }, [token, active])
 
-  const loadStats = useCallback(async () => {
+  const refreshStore = useCallback(async () => {
     if (!token || !active) return
-    setStatsLoading(true)
+    setStoreLoading(true)
     try {
-      const r = await adminJson<CacheStatsResponse>("/api/cache/stats", token)
-      if (r.ok && r.data?.success) {
-        setFileCount(r.data.file_count ?? 0)
-        setTotalBytes(r.data.total_bytes ?? 0)
-        setCacheDir(r.data.cache_dir || "")
+      const [stats, files] = await Promise.all([
+        adminJson<CacheStatsResponse>("/api/cache/stats", token),
+        adminJson<CacheFilesResponse>("/api/cache/files", token),
+      ])
+      if (stats.ok && stats.data?.success) {
+        setFileCount(stats.data.file_count ?? 0)
+        setTotalBytes(stats.data.total_bytes ?? 0)
+        setCacheDir(stats.data.cache_dir || "")
       } else toast.error("Failed to load cache stats")
+      if (files.ok && files.data?.success && Array.isArray(files.data.files)) {
+        setGalleryFiles(files.data.files)
+      } else if (files.ok) {
+        setGalleryFiles([])
+      } else {
+        toast.error("Failed to load cache files list")
+        setGalleryFiles([])
+      }
     } catch {
-      toast.error("Failed to load cache stats")
+      toast.error("Failed to refresh cache store")
     } finally {
-      setStatsLoading(false)
+      setStoreLoading(false)
     }
   }, [token, active])
 
   const loadAll = useCallback(async () => {
-    await Promise.all([loadConfig(), loadStats()])
-  }, [loadConfig, loadStats])
+    await Promise.all([loadConfig(), refreshStore()])
+  }, [loadConfig, refreshStore])
 
   useEffect(() => {
     if (!active) return
@@ -119,7 +194,7 @@ export function CacheManagement({ active }: { active: boolean }) {
       if (d.success) {
         const n = d.removed_count ?? 0
         toast.success(`Removed ${n} file(s)`)
-        await loadStats()
+        await refreshStore()
       } else toast.error(d.detail || d.message || "Clear failed")
     } finally {
       setBusy(false)
@@ -127,7 +202,7 @@ export function CacheManagement({ active }: { active: boolean }) {
   }
 
   return (
-    <div className="space-y-6 max-w-4xl">
+    <div className="space-y-6 max-w-6xl">
       <Card>
         <CardHeader>
           <CardTitle>File cache</CardTitle>
@@ -161,34 +236,49 @@ export function CacheManagement({ active }: { active: boolean }) {
       </Card>
 
       <Card>
-        <CardHeader className="flex flex-row items-center justify-between">
-          <CardTitle>Cache store</CardTitle>
+        <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-2">
+          <div>
+            <CardTitle>Cache store</CardTitle>
+            {cacheDir ? (
+              <p className="text-xs text-muted-foreground font-normal mt-1 break-all">
+                Path: {cacheDir}
+              </p>
+            ) : null}
+          </div>
           <div className="flex gap-2">
-            <Button type="button" variant="outline" size="sm" onClick={() => void loadStats()} disabled={statsLoading || busy}>
-              <RefreshCw className={`h-4 w-4 mr-1 ${statsLoading ? "animate-spin" : ""}`} />
+            <Button type="button" variant="outline" size="sm" onClick={() => void refreshStore()} disabled={storeLoading || busy}>
+              <RefreshCw className={`h-4 w-4 mr-1 ${storeLoading ? "animate-spin" : ""}`} />
               Refresh
             </Button>
-            <Button type="button" variant="destructive" size="sm" onClick={clearCache} disabled={busy || statsLoading}>
+            <Button type="button" variant="destructive" size="sm" onClick={clearCache} disabled={busy || storeLoading}>
               <Trash2 className="h-4 w-4 mr-1" />
               Clear cache
             </Button>
           </div>
         </CardHeader>
-        <CardContent className="space-y-2 text-sm">
-          {cacheDir ? (
-            <p className="text-muted-foreground break-all">
-              <span className="text-foreground font-medium">Path: </span>
-              {cacheDir}
-            </p>
-          ) : null}
-          <p>
-            <span className="text-muted-foreground">Files: </span>
-            {fileCount !== null ? fileCount : "—"}
-          </p>
-          <p>
-            <span className="text-muted-foreground">Size: </span>
-            {totalBytes !== null ? formatBytes(totalBytes) : "—"}
-          </p>
+        <CardContent className="space-y-4">
+          <div className="flex flex-wrap gap-4 text-sm text-muted-foreground">
+            <span>
+              <span className="text-foreground font-medium">Files: </span>
+              {fileCount !== null ? fileCount : "—"}
+            </span>
+            <span>
+              <span className="text-foreground font-medium">Size: </span>
+              {totalBytes !== null ? formatBytes(totalBytes) : "—"}
+            </span>
+          </div>
+
+          {storeLoading && !galleryFiles.length && fileCount === null ? (
+            <p className="text-sm text-muted-foreground">Loading gallery…</p>
+          ) : galleryFiles.length === 0 ? (
+            <p className="text-sm text-muted-foreground py-6 text-center border rounded-lg border-dashed">No files in cache</p>
+          ) : (
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+              {galleryFiles.map((f) => (
+                <MediaTile key={f.name} file={f} />
+              ))}
+            </div>
+          )}
         </CardContent>
       </Card>
     </div>
