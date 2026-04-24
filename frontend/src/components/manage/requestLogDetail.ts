@@ -195,7 +195,7 @@ export function isImageUrl(url: string): boolean {
 
 /** Matches static `formatLogProgress` */
 export function formatLogProgressField(l: LogListItem): string {
-  if (l.progress === null || l.progress === undefined || l.progress === "") return "-"
+  if (l.progress === null || l.progress === undefined) return "-"
   const progress = Number(l.progress)
   return Number.isFinite(progress) ? `${Math.max(0, Math.min(100, progress))}%` : "-"
 }
