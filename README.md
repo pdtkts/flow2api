@@ -96,19 +96,20 @@ docker compose -f docker-compose.headed.yml logs -f
    - 仅 **API**（不开放管理台/前端）：`https://flow-api.prismacreative.online` → `http://flow2api:8000`  
    - **管理台 + 前端**（与 API 用不同子域）：`https://admin-flow.prismacreative.online` → `http://flow2api:8000`  
    在 Docker 同网络内解析 `flow2api` 为应用容器；**不要**填主机上的 `38000` 等映射端口。  
-3. 根目录 `cp .env.example .env`，写入 `TUNNEL_TOKEN=...`；`docker-compose.tunnel.yml` 会默认为应用设置 `FLOW2API_API_ONLY_HOST=flow-api.prismacreative.online`。在该 **API 子域**上仅允许**对外**两类同一进程内的能力：**OpenAI 兼容**（`/v1/...`，如 `chat/completions`、`models`）与 **Gemini 风格**（`/v1beta/models/...:generateContent`、`:streamGenerateContent` 及 `/models/...` 等），以及缓存 `/tmp`、`/openapi.json`、`/health`；**不**提供网页界面、`/api` 管理接口与 `/assets` 静态资源（见 `src/main.py` 中 `ApiOnlyHostMiddleware`）。**管理台**请始终使用 `admin-flow.*` 等未列入 `FLOW2API_API_ONLY_HOST` 的 hostname。可覆盖为：`FLOW2API_API_ONLY_HOST=你的api子域`。**不要**在宿主机再跑一个相同 Token 的 `cloudflared`（一隧道一连接器）。  
+3. 根目录 `cp .env.example .env`，写入 `TUNNEL_TOKEN=...`；[`docker-compose.yml`](./docker-compose.yml) 含 **flow2api** + **cloudflared**（Tunnel）；可选合并 [`docker-compose.agent.yml`](./docker-compose.agent.yml) 得到 **agent-gateway** + **redis**。`FLOW2API_API_ONLY_HOST` 见 `docker-compose.yml` 中 `flow2api` 的 `environment`。在该 **API 子域**上仅允许**对外**两类同一进程内的能力：**OpenAI 兼容**（`/v1/...`，如 `chat/completions`、`models`）与 **Gemini 风格**（`/v1beta/models/...:generateContent`、`:streamGenerateContent` 及 `/models/...` 等），以及缓存 `/tmp`、`/openapi.json`、`/health`；**不**提供网页界面、`/api` 管理接口与 `/assets` 静态资源（见 `src/main.py` 中 `ApiOnlyHostMiddleware`）。**管理台**请始终使用 `admin-flow.*` 等未列入 `FLOW2API_API_ONLY_HOST` 的 hostname。可覆盖为：`FLOW2API_API_ONLY_HOST=你的api子域`。**不要**在宿主机再跑一个相同 Token 的 `cloudflared`（一隧道一连接器）。  
 4. 启动：  
-   `docker compose -f docker-compose.yml -f docker-compose.tunnel.yml up -d`  
-5. 管理台在浏览器打开 **admin-flow** 域名；OpenAI 兼容 API 的 Base URL 使用 **flow-api** 域名（如 `https://flow-api.prismacreative.online/v1/...`）。  
+   `docker compose -f docker-compose.yml -f docker-compose.agent.yml up -d`（或加 `--build` 构建 **agent-gateway**；仅应用+隧道、不要 agent：`docker compose up -d`）  
+   从源码构建主应用镜像：项目根执行 `docker build -t flow2api:local -f Dockerfile .`，再在 compose 中将 `flow2api` 的 `image` 改为 `flow2api:local` 后 `up`。
+5. 管理台在浏览器打开 **admin-flow** 域名；OpenAI 兼容 API 的 Base URL 使用 **flow-api** 域名（如 `https://flow-api.prismacreative.online/v1/...`）。**Agent 网关**公网见 [`docs/agent-gateway.md`](./docs/agent-gateway.md)。  
 6. 在 `config/setting.toml` 的 `[cache]` 中设置与公网一致的 `base_url`（见 `config/setting_example.toml` 注释），例如 `base_url = "https://flow-api.prismacreative.online"`。  
-7. `FLOW2API_API_ONLY_HOST` 仅在**环境变量**中配置（根目录 `.env` 与 `docker-compose.tunnel.yml` 默认已带 `flow-api.prismacreative.online`；`docker compose` 会读 `.env`）。
+7. `FLOW2API_API_ONLY_HOST` 在 **环境变量**中配置；默认见 `docker-compose.yml` 中 `flow2api` 的 `environment`；`docker compose` 会读根目录 `.env`。
 
 **若 `flow-api` 子域仍能打开 /login 等页面：** 表示当前映像**未包含**本仓库的 `ApiOnlyHostMiddleware`（例如只拉了旧版 `ghcr.io/.../flow2api:latest`）。需**使用本仓库代码构建**再部署，例如在本项目根目录执行 `docker build -t flow2api:local -f Dockerfile .`，在 `docker-compose` 里把 `flow2api` 服务的 `image` 改为 `flow2api:local` 后重新 `up -d`，并确认容器日志启动行有 `API-only host(s)`。也可在宿主机上 `python main.py` 时设置环境变量。若已用新映像仍异常，在 Cloudflare 对该子域**关闭针对 HTML 的强缓存**或做一次 **Purge Cache**，避免边缘缓存了旧的 `index.html`。
 
-有头打码时合并隧道覆盖文件，并把隧道里的源改为 `flow2api-headed` 对应容器的 **8000 端口**：
+有头打码时单独使用 `docker-compose.headed.yml`（**内已含** Cloudflare Tunnel 与 `flow2api-headed`）：
 
 ```bash
-docker compose -f docker-compose.headed.yml -f docker-compose.headed.tunnel.yml up -d
+docker compose -f docker-compose.headed.yml up -d
 ```
 
 在 Zero Trust 里两条公网 hostname 的源地址应填 `http://flow2api-headed:8000`（与 `docker-compose.headed.yml` 中服务名一致）。

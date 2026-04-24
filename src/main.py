@@ -28,7 +28,7 @@ def _normalize_host(host: str) -> str:
 
 
 def _api_only_hostnames() -> set[str]:
-    """Comma-separated FQDNs from env FLOW2API_API_ONLY_HOST only (see docker-compose.tunnel.yml, .env)."""
+    """Comma-separated FQDNs from env FLOW2API_API_ONLY_HOST only (see docker-compose.yml, .env)."""
     raw = (os.environ.get("FLOW2API_API_ONLY_HOST") or "").strip()
     if not raw:
         return set()

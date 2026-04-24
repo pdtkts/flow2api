@@ -5,7 +5,7 @@ FastAPI service that implements the same **HTTP** contract as Flow2API’s `remo
 ## Data model (MVP)
 
 - **In-process only:** `token_id` → one active agent connection (last registration wins).
-- **Redis** is started by `docker-compose.agent-gateway.yml` for Phase 3 (multi-worker); the gateway does not require it yet.
+- **Redis** is in the default `docker-compose.yml` (Phase 3); the gateway MVP does not require it yet.
 - Optional Pydantic shapes: [`schemas.py`](schemas.py).
 
 ## Run (local)

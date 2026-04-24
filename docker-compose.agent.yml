@@ -1,0 +1,26 @@
+# Agent Gateway + Redis (merge with docker-compose.yml for the full default stack).
+#   docker compose -f docker-compose.yml -f docker-compose.agent.yml up -d --build
+#
+# Captcha: admin → remote_browser_base_url = http://agent-gateway:9080, key = GATEWAY_FLOW2API_BEARER
+
+services:
+  agent-gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile.agent-gateway
+    container_name: agent-gateway
+    ports:
+      - "9080:9080"
+    environment:
+      GATEWAY_FLOW2API_BEARER: ${GATEWAY_FLOW2API_BEARER:-change-me-match-flow2api}
+      GATEWAY_AGENT_DEVICE_TOKEN: ${GATEWAY_AGENT_DEVICE_TOKEN:-change-me-device-secret}
+      SOLVE_TIMEOUT_SECONDS: ${SOLVE_TIMEOUT_SECONDS:-120}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: agent-gateway-redis
+    restart: unless-stopped

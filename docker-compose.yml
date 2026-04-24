@@ -1,8 +1,15 @@
-version: '3.8'
+# Core: Flow2API + Cloudflare Tunnel. Merge with docker-compose.agent.yml for reCAPTCHA agent gateway.
+#   docker compose -f docker-compose.yml -f docker-compose.agent.yml up -d
+#
+# App-only (no agent):  docker compose up -d
+# Headed:               docker compose -f docker-compose.headed.yml up -d
+# Local + frontend:     docker compose -f docker-compose.local.yml up -d
+# WARP:                 docker compose -f docker-compose.proxy.yml up -d
+#
+# Build main image from this repo:  docker build -t flow2api:local -f Dockerfile .
+#   then set flow2api image to flow2api:local in an override or temporary compose edit.
 
 services:
-  # Prebuilt image (UI may be older than your git). Build app + agent-gateway from source:
-  #   merge docker-compose.local-build.yml (see that file; tags flow2api:local, flow2api-agent-gateway:local)
   flow2api:
     image: ghcr.io/thesmallhancat/flow2api:latest
     container_name: flow2api
@@ -14,4 +21,15 @@ services:
       - ./config/setting.toml:/app/config/setting.toml
     environment:
       - PYTHONUNBUFFERED=1
+      - FLOW2API_API_ONLY_HOST=${FLOW2API_API_ONLY_HOST:-flow-api.prismacreative.online}
+    restart: unless-stopped
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: flow2api-cloudflared
+    command: tunnel run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN}
+    depends_on:
+      - flow2api
     restart: unless-stopped

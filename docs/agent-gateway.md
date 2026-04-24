@@ -2,76 +2,68 @@
 
 When `captcha_method` is `remote_browser`, Flow2API calls `remote_browser_base_url` with Bearer `remote_browser_api_key` (see [`src/services/flow_client.py`](../src/services/flow_client.py)). The **agent gateway** implements that HTTP API and forwards work to PCs over **WebSocket** (`/ws/agents`), so home users do not expose inbound HTTP.
 
-## Docker (gateway + Redis)
+## Docker
 
-From the repo root:
-
-```bash
-cp .env.agent-gateway.example .env.agent-gateway
-# Edit secrets, then:
-docker compose -f docker-compose.yml -f docker-compose.agent-gateway.yml --env-file .env.agent-gateway up -d --build
-```
-
-**Build the main app and agent-gateway from your git tree** (current frontend + `src/agent_gateway/`), not only the pre-pulled `ghcr.io/.../flow2api` image: merge [`docker-compose.local-build.yml`](../docker-compose.local-build.yml). It tags **`flow2api:local`** and **`flow2api-agent-gateway:local`**.
+**Core** is [`docker-compose.yml`](../docker-compose.yml) (Flow2API + `cloudflared`). **Agent stack** is [`docker-compose.agent.yml`](../docker-compose.agent.yml) (agent-gateway + redis). Merge both for the usual deployment:
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.agent-gateway.yml -f docker-compose.local-build.yml up -d --build
+docker compose -f docker-compose.yml -f docker-compose.agent.yml up -d --build
+# or: make pull-up-docker
 ```
 
-With tunnel: add `-f docker-compose.tunnel.yml -f docker-compose.agent-gateway.tunnel.yml` to that command, or run `make pull-up-agent-tunnel-local` / `scripts/pull-up-agent-tunnel-local.ps1`.
+`GATEWAY_*` in `.env` (see [`.env.agent-gateway.example`](../.env.agent-gateway.example)) and `TUNNEL_TOKEN` in [`.env`](../.env.example).
 
-Services:
+**App + tunnel only** (no agent): `docker compose up -d` (single file).
 
-- **agent-gateway** — port **9080** (host and container).
-- **redis** — for future horizontal scale (Phase 3); the gateway MVP does not require Redis to function.
+**Build the main `flow2api` image from this repo** (fresh UI, not only `ghcr`):
 
-## Flow2API configuration
+```bash
+docker build -t flow2api:local -f Dockerfile .
+# Then override `flow2api` image to flow2api:local (e.g. small override compose or edit docker-compose.yml temporarily).
+```
 
-Set in the admin UI (Captcha / 打码) or database:
+Services (merge `docker-compose.yml` + `docker-compose.agent.yml`):
 
-| Field | Value (Docker same network) |
-|--------|-----------------------------|
+- **flow2api** — main app; internal `http://flow2api:8000`
+- **cloudflared** — in `docker-compose.yml`
+- **agent-gateway** — in `docker-compose.agent.yml`; port **9080**
+- **redis** — in `docker-compose.agent.yml` (Phase 3)
+
+## Flow2API configuration (admin / 打码)
+
+| Field | Value (Docker) |
+|--------|----------------|
 | `captcha_method` | `remote_browser` |
 | `remote_browser_base_url` | `http://agent-gateway:9080` |
-| `remote_browser_api_key` | Same string as **`GATEWAY_FLOW2API_BEARER`** |
-| `remote_browser_timeout` | ≤ gateway `SOLVE_TIMEOUT_SECONDS` (default 120) |
+| `remote_browser_api_key` | Same as **`GATEWAY_FLOW2API_BEARER`** |
+| `remote_browser_timeout` | ≤ `SOLVE_TIMEOUT_SECONDS` (default 120) |
 
-If Flow2API runs on the host and the gateway only in Docker, use `http://127.0.0.1:9080` instead.
-
-## Environment variables (gateway container)
+## Environment variables (gateway)
 
 | Variable | Purpose |
 |----------|---------|
 | `GATEWAY_FLOW2API_BEARER` | Must match Flow2API `remote_browser_api_key`. |
 | `GATEWAY_AGENT_DEVICE_TOKEN` | Secret agents send in the WebSocket `register` message. |
-| `SOLVE_TIMEOUT_SECONDS` | Max wait for an agent to return a token (default 120). |
+| `SOLVE_TIMEOUT_SECONDS` | Max wait for a token (default 120). |
 | `REDIS_URL` | Reserved for Phase 3 (optional). |
+| `TUNNEL_TOKEN` | See root `.env` — for `cloudflared` in the same compose file. |
 
 ## Source layout
 
-- [`src/agent_gateway/`](../src/agent_gateway/) — FastAPI app, HTTP routes, WebSocket handler, in-memory registry.
+- [`src/agent_gateway/`](../src/agent_gateway/) — FastAPI, HTTP, WebSocket, in-memory registry.
 
-## Cloudflare Tunnel (agent gateway on the internet)
+## Cloudflare Tunnel (gateway on the public internet)
 
-Use the **same** `TUNNEL_TOKEN` as the main Flow2API tunnel (one `cloudflared` container; do not run two tunnels with the same token).
+**One** `cloudflared` in `docker-compose.yml`. In [Zero Trust](https://one.dash.cloudflare.com/) → **Tunnels** → **Public hostnames** (in addition to `flow-api` / `admin-flow` if used):
 
-```bash
-docker compose -f docker-compose.yml -f docker-compose.agent-gateway.yml -f docker-compose.tunnel.yml -f docker-compose.agent-gateway.tunnel.yml up -d --build
-```
+| Public hostname | Internal URL |
+|-----------------|-------------|
+| `https://agents.example.com` | `http://agent-gateway:9080` |
 
-Set `TUNNEL_TOKEN` in `.env` (see root `.env.example`). The merge file [`docker-compose.agent-gateway.tunnel.yml`](../docker-compose.agent-gateway.tunnel.yml) makes `cloudflared` start after both `flow2api` and `agent-gateway`.
-
-In [Cloudflare Zero Trust](https://one.dash.cloudflare.com/) → **Networks** → **Tunnels** → your tunnel → **Public hostnames**, add a **new** hostname for the gateway (in addition to any `flow-api` / `admin-flow` routes you already have):
-
-| Public hostname | Service | Internal URL |
-|-----------------|---------|--------------|
-| `https://agents.example.com` (your choice) | HTTP | `http://agent-gateway:9080` |
-
-- **PC agents (Node):** connect with **`wss://agents.example.com/ws/agents`** (TLS at the edge; Cloudflare supports WebSockets to the origin).
-- **Flow2API** (inside Docker) should keep using **`http://agent-gateway:9080`** for `remote_browser_base_url` — do not use the public URL there; the call stays on the bridge network.
-
-If you use `FLOW2API_API_ONLY_HOST` on the API hostname, that only affects the main app; the new `agents.*` hostname is separate.
+- **PC agents:** `wss://agents.example.com/ws/agents`
+- **Flow2API (inside Docker)** should keep `remote_browser_base_url` = `http://agent-gateway:9080` (not the public URL).
+- `FLOW2API_API_ONLY_HOST` is set for `flow2api` in the default `docker-compose.yml` (overridable via `.env`).
 
 ## Phase 2
 
-A **Node.js** agent will connect to `wss://` (via tunnel) or `ws://` (local) and implement the protocol in [`src/agent_gateway/README.md`](../src/agent_gateway/README.md).
+A **Node.js** agent will use `wss://` and the protocol in [`src/agent_gateway/README.md`](../src/agent_gateway/README.md).
