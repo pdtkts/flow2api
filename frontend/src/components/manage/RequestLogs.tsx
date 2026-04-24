@@ -90,7 +90,7 @@ export function RequestLogs() {
             variant="ghost"
             size="sm"
             onClick={clearLogs}
-            className="h-8 text-sm text-destructive hover:text-destructive hover:bg-red-50"
+            className="h-8 text-sm text-destructive hover:text-destructive hover:bg-destructive/10"
           >
             <Trash2 className="h-4 w-4 mr-1" />
             Clear
@@ -139,7 +139,7 @@ export function RequestLogs() {
                     <TableRow key={log.id} className="border-border/60">
                       <TableCell className="py-2.5 px-3 text-sm align-top">{log.operation || "-"}</TableCell>
                       <TableCell className="py-2.5 px-3 text-xs align-top">
-                        <span className={cn(log.token_email ? "text-blue-600" : "text-muted-foreground")} title={email}>
+                        <span className={cn(log.token_email ? "text-primary" : "text-muted-foreground")} title={email}>
                           {email}
                         </span>
                       </TableCell>
@@ -185,7 +185,7 @@ export function RequestLogs() {
                           variant="ghost"
                           size="sm"
                           onClick={() => void openDetail(log.id)}
-                          className="h-7 px-2 text-xs hover:bg-blue-50 hover:text-blue-700"
+                          className="h-7 px-2 text-xs hover:bg-accent hover:text-accent-foreground"
                         >
                           View
                         </Button>
@@ -203,20 +203,19 @@ export function RequestLogs() {
         <DialogContent
           className={cn(
             "flex max-h-[80vh] w-[calc(100vw-2rem)] max-w-3xl translate-x-[-50%] translate-y-[-50%] flex-col gap-0 overflow-hidden p-0 sm:max-w-3xl sm:rounded-xl",
-            "border-slate-200/90 bg-white text-slate-900 shadow-2xl [color-scheme:light]",
-            "[&>button]:text-slate-400 [&>button]:hover:text-slate-800 [&>button]:hover:opacity-100"
+            "border-border bg-background text-foreground shadow-lg"
           )}
         >
-          <DialogHeader className="shrink-0 flex-row items-center justify-between space-y-0 border-b border-slate-200/80 p-5 text-left pr-12">
-            <DialogTitle className="text-lg font-semibold leading-none tracking-tight text-slate-900">Log details</DialogTitle>
+          <DialogHeader className="shrink-0 flex-row items-center justify-between space-y-0 border-b border-border p-5 text-left pr-12">
+            <DialogTitle className="text-lg font-semibold leading-none tracking-tight">Log details</DialogTitle>
           </DialogHeader>
-          <div className="min-h-0 flex-1 overflow-y-auto bg-white p-5">
+          <div className="min-h-0 flex-1 overflow-y-auto bg-background p-5">
             {detailLoading ? (
-              <div className="rounded-lg border border-slate-200/90 bg-slate-50/80 p-4 text-sm text-slate-500">Loading log details…</div>
+              <div className="rounded-lg border border-border bg-muted/50 p-4 text-sm text-muted-foreground">Loading log details…</div>
             ) : detail ? (
               <LogDetailStatic log={detail} />
             ) : (
-              <p className="py-8 text-center text-sm text-slate-500">No data</p>
+              <p className="py-8 text-center text-sm text-muted-foreground">No data</p>
             )}
           </div>
         </DialogContent>

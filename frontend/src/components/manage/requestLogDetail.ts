@@ -91,7 +91,7 @@ export function extractLogPrimaryUrl(responseBodyObj: unknown): string | null {
   )
 }
 
-/** English copy for the light “Log details” template (list/detail UI). */
+/** English copy for the log details template (list/detail UI). */
 export function extractLogSuccessSummaryEn(
   log: LogListItem | null | undefined,
   responseBodyObj: unknown
@@ -122,13 +122,6 @@ export function formatLogDetailLocalTimestamp(iso: string | null | undefined): s
   const d = new Date(iso)
   if (Number.isNaN(d.getTime())) return "—"
   return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}:${String(d.getSeconds()).padStart(2, "0")}`
-}
-
-/** Light modal status-code badge (no dark: variants) */
-export function statusCodePillClassLight(code: number | null | undefined): string {
-  if (code === 200) return "bg-emerald-50 text-emerald-800"
-  if (code === 102) return "bg-amber-50 text-amber-800"
-  return "bg-red-50 text-red-800"
 }
 
 export function formatLogPayload(raw: string | null | undefined): string {

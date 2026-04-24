@@ -11,14 +11,14 @@ import {
   isVideoUrl,
   normalizeLogMediaUrl,
   parseLogJson,
-  statusCodePillClassLight,
+  statusCodePillClass,
 } from "./requestLogDetail"
 import { formatLogStatus } from "./requestLogUi"
 import { cn } from "@/lib/utils"
 
-const sectionTitle = "text-sm font-semibold text-slate-900 tracking-tight"
-const cardBox = "rounded-lg border border-slate-200/90 bg-slate-50/90 p-3.5"
-const kLabel = "text-slate-500"
+const sectionTitle = "text-sm font-semibold text-foreground tracking-tight"
+const cardBox = "rounded-lg border border-border bg-muted/40 p-3.5"
+const kLabel = "text-muted-foreground"
 
 type PayloadVariant = "default" | "fullResponse"
 
@@ -34,7 +34,7 @@ function LogPayloadPre({
   return (
     <pre
       className={cn(
-        "rounded-lg border border-slate-200/90 bg-white p-3.5 text-[13px] font-mono leading-relaxed text-slate-800 overflow-x-auto whitespace-pre shadow-[inset_0_1px_0_0_rgba(15,23,42,0.04)]",
+        "rounded-lg border border-border bg-muted/30 p-3.5 text-[13px] font-mono leading-relaxed text-foreground overflow-x-auto whitespace-pre",
         variant === "fullResponse" && "max-h-[min(420px,55vh)] max-w-full overflow-y-auto overscroll-contain [scrollbar-gutter:stable]",
         className
       )}
@@ -54,26 +54,26 @@ function LogMediaPreview({ label, url, withUrl = true }: { label: string; url: s
 
   return (
     <div className="flex flex-col gap-3">
-      <p className="text-xs font-medium text-slate-500">{label}</p>
+      <p className="text-xs font-medium text-muted-foreground">{label}</p>
       {withUrl && !isDataUrl ? (
-        <p className="text-xs text-slate-800 leading-relaxed">
-          <span className="font-medium text-slate-600">URL:</span>{" "}
-          <a href={previewUrl} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline break-all">
+        <p className="text-xs text-foreground leading-relaxed">
+          <span className="font-medium text-muted-foreground">URL:</span>{" "}
+          <a href={previewUrl} target="_blank" rel="noreferrer" className="text-primary hover:underline break-all">
             {previewUrl}
           </a>
         </p>
       ) : null}
       {withUrl && isDataUrl ? (
-        <p className="text-xs text-slate-800">
-          <span className="font-medium text-slate-600">URL:</span>{" "}
-          <span className="text-slate-500">data URL (length {String(previewUrl).length})</span>
+        <p className="text-xs text-foreground">
+          <span className="font-medium text-muted-foreground">URL:</span>{" "}
+          <span className="text-muted-foreground">data URL (length {String(previewUrl).length})</span>
         </p>
       ) : null}
       {mediaType && !loaded && !failed ? (
         <button
           type="button"
           onClick={() => setLoaded(true)}
-          className="inline-flex items-center justify-center rounded-lg border border-slate-200/90 bg-white px-3.5 py-1.5 text-xs font-medium text-slate-800 shadow-sm transition-colors hover:bg-slate-50"
+          className="inline-flex items-center justify-center rounded-lg border border-border bg-secondary px-3.5 py-1.5 text-xs font-medium text-secondary-foreground shadow-sm transition-colors hover:bg-secondary/80"
         >
           Click to load preview
         </button>
@@ -85,7 +85,7 @@ function LogMediaPreview({ label, url, withUrl = true }: { label: string; url: s
               src={previewUrl}
               controls
               preload="metadata"
-              className="w-full max-h-80 rounded-lg border border-slate-200/90 bg-black"
+              className="w-full max-h-80 rounded-lg border border-border bg-black"
               onError={() => setFailed(true)}
             />
           ) : (
@@ -94,19 +94,19 @@ function LogMediaPreview({ label, url, withUrl = true }: { label: string; url: s
               alt={label}
               loading="lazy"
               decoding="async"
-              className="max-h-80 rounded-lg border border-slate-200/90 object-contain bg-white"
+              className="max-h-80 rounded-lg border border-border object-contain bg-muted"
               onError={() => setFailed(true)}
             />
           )}
         </div>
       ) : null}
       {failed ? (
-        <div className="rounded-lg border border-red-200/90 bg-red-50 p-3 text-xs text-red-800 space-y-2">
+        <div className="rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-xs text-destructive space-y-2">
           <p>Preview could not be loaded. Open the link in a new tab.</p>
           {previewUrl && !isDataUrl ? (
             <p>
-              <span className="font-medium text-slate-700">URL:</span>{" "}
-              <a href={previewUrl} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline break-all">
+              <span className="font-medium text-foreground">URL:</span>{" "}
+              <a href={previewUrl} target="_blank" rel="noreferrer" className="text-primary hover:underline break-all">
                 {previewUrl}
               </a>
             </p>
@@ -119,7 +119,7 @@ function LogMediaPreview({ label, url, withUrl = true }: { label: string; url: s
 
 function BasicInfoRow({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <div className="text-sm text-slate-900">
+    <div className="text-sm text-foreground">
       <span className={kLabel}>{label}:</span> {children}
     </div>
   )
@@ -154,8 +154,8 @@ export function LogDetailStatic({ log }: { log: LogDetail }) {
         const upPreviewUrl = up.local_url || up.url || null
         inner = (
           <div className="space-y-4">
-            <p className="text-xs text-slate-800">
-              <span className="font-medium text-slate-600">Zoomed resolution:</span> {upResolution}
+            <p className="text-xs text-foreground">
+              <span className="font-medium text-muted-foreground">Zoomed resolution:</span> {upResolution}
             </p>
             {upPreviewUrl ? (
               <LogMediaPreview
@@ -166,12 +166,12 @@ export function LogDetailStatic({ log }: { log: LogDetail }) {
             ) : null}
             {up.base64 ? (
               <>
-                <p className="text-xs text-slate-800">
-                  <span className="font-medium text-slate-600">Base64 length:</span> {String(up.base64).length}
+                <p className="text-xs text-foreground">
+                  <span className="font-medium text-muted-foreground">Base64 length:</span> {String(up.base64).length}
                 </p>
-                <details className="rounded-lg border border-slate-200/90 bg-white p-2">
-                  <summary className="cursor-pointer text-xs text-slate-500">View base64 preview</summary>
-                  <pre className="mt-2 text-xs text-slate-800 overflow-x-auto max-h-48 overflow-y-auto">
+                <details className="rounded-lg border border-border bg-muted/30 p-2">
+                  <summary className="cursor-pointer text-xs text-muted-foreground">View base64 preview</summary>
+                  <pre className="mt-2 text-xs text-foreground overflow-x-auto max-h-48 overflow-y-auto">
                     {String(up.base64).length > 600 ? `${String(up.base64).slice(0, 600)}...` : String(up.base64)}
                   </pre>
                 </details>
@@ -189,7 +189,7 @@ export function LogDetailStatic({ log }: { log: LogDetail }) {
         <div className="space-y-2.5">
           <h4 className={sectionTitle}>2K/4K Asset Information</h4>
           <div className={cn(cardBox, "space-y-2.5")}>
-            {inner || <p className="text-xs text-slate-500">No asset details</p>}
+            {inner || <p className="text-xs text-muted-foreground">No asset details</p>}
           </div>
         </div>
       )
@@ -197,7 +197,7 @@ export function LogDetailStatic({ log }: { log: LogDetail }) {
   }
 
   return (
-    <div className="space-y-5 text-slate-900 [color-scheme:light]">
+    <div className="space-y-5 text-foreground">
       <div className="space-y-2.5">
         <h4 className={sectionTitle}>Request data</h4>
         <LogPayloadPre>{requestPayloadText}</LogPayloadPre>
@@ -207,9 +207,9 @@ export function LogDetailStatic({ log }: { log: LogDetail }) {
         <>
           {successSummary ? (
             <div className="space-y-2.5">
-              <h4 className="text-sm font-semibold text-emerald-800">Results Summary</h4>
-              <div className="rounded-lg border border-emerald-200/90 bg-emerald-50/90 p-3.5">
-                <p className="text-sm font-medium text-emerald-800">{successSummary}</p>
+              <h4 className="text-sm font-semibold text-emerald-800 dark:text-emerald-200">Results Summary</h4>
+              <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-3.5">
+                <p className="text-sm font-medium text-emerald-800 dark:text-emerald-200">{successSummary}</p>
               </div>
             </div>
           ) : null}
@@ -224,9 +224,9 @@ export function LogDetailStatic({ log }: { log: LogDetail }) {
                 </div>
               ) : null}
               {assetsBlock}
-              <details className="border-t border-slate-200/80 pt-4 open:[&>summary>span.chevron]:rotate-90" data-detail-key="full-response">
-                <summary className="cursor-pointer list-none text-sm font-semibold text-slate-900 marker:hidden select-none [&::-webkit-details-marker]:hidden">
-                  <span className="chevron inline-block translate-y-px pr-1 text-slate-400 transition-transform duration-200">▶</span>
+              <details className="border-t border-border pt-4 open:[&>summary>span.chevron]:rotate-90" data-detail-key="full-response">
+                <summary className="cursor-pointer list-none text-sm font-semibold text-foreground marker:hidden select-none [&::-webkit-details-marker]:hidden">
+                  <span className="chevron inline-block translate-y-px pr-1 text-muted-foreground transition-transform duration-200">▶</span>
                   Full response (large fields have been truncated)
                 </summary>
                 <LogPayloadPre variant="fullResponse" className="mt-3">
@@ -245,22 +245,22 @@ export function LogDetailStatic({ log }: { log: LogDetail }) {
         <>
           {errorSummary ? (
             <div className="space-y-2.5">
-              <h4 className="text-sm font-semibold text-red-700">Error</h4>
-              <div className="rounded-lg border border-red-200/90 bg-red-50 p-3.5">
-                <p className="text-sm text-red-800 break-all">{errorSummary}</p>
+              <h4 className="text-sm font-semibold text-destructive">Error</h4>
+              <div className="rounded-lg border border-destructive/30 bg-destructive/10 p-3.5">
+                <p className="text-sm text-destructive break-all">{errorSummary}</p>
               </div>
             </div>
           ) : null}
           <div className="space-y-2.5">
-            <h4 className="text-sm font-semibold text-red-700">Error response</h4>
-            <pre className="rounded-lg border border-red-200/90 bg-red-50 p-3.5 text-xs font-mono text-red-900 overflow-x-auto whitespace-pre">
+            <h4 className="text-sm font-semibold text-destructive">Error response</h4>
+            <pre className="rounded-lg border border-destructive/30 bg-destructive/10 p-3.5 text-xs font-mono text-destructive overflow-x-auto whitespace-pre">
               {responsePayloadText}
             </pre>
           </div>
         </>
       )}
 
-      <div className="space-y-3 border-t border-slate-200/80 pt-5">
+      <div className="space-y-3 border-t border-border pt-5">
         <h4 className={sectionTitle}>Basic Information</h4>
         <div className="flex flex-col gap-2.5 text-sm">
           <BasicInfoRow label="Operation">{log.operation || "—"}</BasicInfoRow>
@@ -269,7 +269,7 @@ export function LogDetailStatic({ log }: { log: LogDetail }) {
             <span
               className={cn(
                 "inline-flex min-w-[2.25rem] items-center justify-center rounded px-2 py-0.5 text-xs font-medium tabular-nums",
-                statusCodePillClassLight(log.status_code ?? undefined)
+                statusCodePillClass(log.status_code ?? undefined)
               )}
             >
               {log.status_code ?? "—"}
