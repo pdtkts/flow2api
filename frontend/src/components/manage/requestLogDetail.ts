@@ -195,9 +195,54 @@ export function isImageUrl(url: string): boolean {
 
 /** Matches static `formatLogProgress` */
 export function formatLogProgressField(l: LogListItem): string {
-  if (l.progress === null || l.progress === undefined) return "-"
+  if (l.progress === null || l.progress === undefined || l.progress === "") return "-"
   const progress = Number(l.progress)
   return Number.isFinite(progress) ? `${Math.max(0, Math.min(100, progress))}%` : "-"
+}
+
+/** Same as `static/manage.html` `getLogOperationLabel` */
+export function getLogOperationLabelZh(l: LogListItem): string {
+  const op = String(l.operation || "").trim()
+  if (op === "generate_image") return "图片"
+  if (op === "generate_video") return "视频"
+  return ""
+}
+
+/**
+ * Outcome one-liner for the logs list — matches `static/manage.html` `formatLogOutcome`
+ * and `formatLogOutcomeClass` for `className`
+ */
+export function formatLogOutcomeZh(l: LogListItem): string {
+  const code = Number(l.status_code)
+  if (code === 200) {
+    const label = getLogOperationLabelZh(l)
+    return label ? `${label}结果已返回` : "已返回结果"
+  }
+  if (code === 102) return "处理中"
+  const err = extractLogErrorSummary(l, undefined)
+  if (err) {
+    return err.length > 96 ? `${err.slice(0, 93)}…` : err
+  }
+  if (code >= 400) return "请求失败"
+  return "-"
+}
+
+export function formatLogOutcomeRowClass(l: LogListItem): string {
+  if ((l.status_code || 0) >= 400) return "text-red-600 dark:text-red-300"
+  if (l.status_code === 200) return "text-green-700 dark:text-emerald-300"
+  if (l.status_code === 102) return "text-amber-700 dark:text-amber-200"
+  return "text-muted-foreground"
+}
+
+/** Pills in the 状态 column — `static/manage.html` `formatLogStatusClass` */
+export function logStatusPillClass(l: LogListItem): string {
+  const s = formatLogStatusZh(l)
+  if (s === "处理中")
+    return "bg-amber-50 text-amber-700 dark:bg-amber-950/50 dark:text-amber-200"
+  if (s === "已完成")
+    return "bg-green-50 text-green-700 dark:bg-emerald-950/50 dark:text-emerald-200"
+  if (s === "失败") return "bg-red-50 text-red-700 dark:bg-red-950/40 dark:text-red-200"
+  return "bg-gray-100 text-gray-700 dark:bg-muted/80 dark:text-foreground/90"
 }
 
 export function statusCodePillClass(code: number | null | undefined): string {

@@ -15,9 +15,15 @@ import {
 } from "./requestLogDetail"
 import { cn } from "@/lib/utils"
 
-function LogPayloadPre({ children }: { children: string }) {
+/** Matches `static/manage.html` `renderLogDetail` & `formatLogPayload` output blocks */
+function LogPayloadPre({ children, className }: { children: string; className?: string }) {
   return (
-    <pre className="rounded-md border border-border p-3 bg-muted/30 text-xs overflow-x-auto whitespace-pre-wrap break-words max-h-[min(360px,40vh)] overflow-y-auto">
+    <pre
+      className={cn(
+        "rounded-md border border-border p-3 bg-muted/30 text-xs overflow-x-auto whitespace-pre",
+        className
+      )}
+    >
       {children}
     </pre>
   )
@@ -29,18 +35,20 @@ function LogMediaPreview({ label, url, withUrl = true }: { label: string; url: s
   const [loaded, setLoaded] = useState(false)
   const [failed, setFailed] = useState(false)
 
+  const isDataUrl = /^data:/i.test(String(previewUrl))
+
   return (
     <div className="space-y-2">
-      <p className="text-xs font-medium">{label}</p>
-      {withUrl && !/^data:/i.test(String(previewUrl)) ? (
+      <p className="text-xs font-medium text-muted-foreground">{label}</p>
+      {withUrl && !isDataUrl ? (
         <p className="text-xs">
           <span className="font-medium">URL:</span>{" "}
-          <a href={previewUrl} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline break-all dark:text-blue-400">
+          <a href={previewUrl} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline break-all">
             {previewUrl}
           </a>
         </p>
       ) : null}
-      {withUrl && /^data:/i.test(String(previewUrl)) ? (
+      {withUrl && isDataUrl ? (
         <p className="text-xs">
           <span className="font-medium">URL:</span> <span className="text-muted-foreground">data URL（长度 {String(previewUrl).length}）</span>
         </p>
@@ -77,14 +85,14 @@ function LogMediaPreview({ label, url, withUrl = true }: { label: string; url: s
         </div>
       ) : null}
       {failed ? (
-        <div className="rounded-md border border-red-200 bg-red-50 p-3 text-xs text-red-700 space-y-2 dark:border-red-900/50 dark:bg-red-950/30 dark:text-red-200">
+        <div className="rounded-md border border-red-200 bg-red-50 p-3 text-xs text-red-700 space-y-2">
           <p>
             {label}预览加载失败，请直接打开链接查看。
           </p>
-          {previewUrl && !/^data:/i.test(previewUrl) ? (
+          {previewUrl && !isDataUrl ? (
             <p className="text-xs">
               <span className="font-medium">URL:</span>{" "}
-              <a href={previewUrl} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline break-all dark:text-blue-400">
+              <a href={previewUrl} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline break-all">
                 {previewUrl}
               </a>
             </p>
@@ -150,7 +158,9 @@ export function LogDetailStatic({ log }: { log: LogDetail }) {
       assetsBlock = (
         <div className="space-y-2">
           <h4 className="font-medium text-sm">2K/4K 资产信息</h4>
-          <div className="rounded-md border border-border p-3 bg-muted/30 space-y-2">{inner || <p className="text-xs text-muted-foreground">无资产详情</p>}</div>
+          <div className="rounded-md border border-border p-3 bg-muted/30 space-y-2">
+            {inner || <p className="text-xs text-muted-foreground">无资产详情</p>}
+          </div>
         </div>
       )
     }
@@ -167,9 +177,9 @@ export function LogDetailStatic({ log }: { log: LogDetail }) {
         <>
           {successSummary ? (
             <div className="space-y-2">
-              <h4 className="font-medium text-sm text-green-700 dark:text-green-400">结果摘要</h4>
-              <div className="rounded-md border border-green-200 p-3 bg-green-50 dark:border-green-900/50 dark:bg-green-950/30">
-                <p className="text-sm text-green-700 dark:text-green-200">{successSummary}</p>
+              <h4 className="font-medium text-sm text-green-700">结果摘要</h4>
+              <div className="rounded-md border border-green-200 p-3 bg-green-50">
+                <p className="text-sm text-green-700">{successSummary}</p>
               </div>
             </div>
           ) : null}
@@ -186,7 +196,7 @@ export function LogDetailStatic({ log }: { log: LogDetail }) {
               {assetsBlock}
               <details className="space-y-2" data-detail-key="full-response">
                 <summary className="cursor-pointer text-sm font-medium">完整响应（大字段已截断）</summary>
-                <LogPayloadPre>{responsePayloadText}</LogPayloadPre>
+                <LogPayloadPre className="mt-2">{responsePayloadText}</LogPayloadPre>
               </details>
             </>
           ) : (
@@ -200,15 +210,15 @@ export function LogDetailStatic({ log }: { log: LogDetail }) {
         <>
           {errorSummary ? (
             <div className="space-y-2">
-              <h4 className="font-medium text-sm text-red-600 dark:text-red-400">错误原因</h4>
-              <div className="rounded-md border border-red-200 p-3 bg-red-50 dark:border-red-900/50 dark:bg-red-950/30">
-                <p className="text-sm text-red-700 break-all dark:text-red-200">{errorSummary}</p>
+              <h4 className="font-medium text-sm text-red-600">错误原因</h4>
+              <div className="rounded-md border border-red-200 p-3 bg-red-50">
+                <p className="text-sm text-red-700 break-all">{errorSummary}</p>
               </div>
             </div>
           ) : null}
           <div className="space-y-2">
-            <h4 className="font-medium text-sm text-red-600 dark:text-red-400">错误响应</h4>
-            <pre className="rounded-md border border-red-200 p-3 bg-red-50 text-xs overflow-x-auto whitespace-pre-wrap break-words max-h-[min(360px,40vh)] overflow-y-auto dark:border-red-900/50 dark:bg-red-950/30 dark:text-red-100">
+            <h4 className="font-medium text-sm text-red-600">错误响应</h4>
+            <pre className="rounded-md border border-red-200 p-3 bg-red-50 text-xs overflow-x-auto whitespace-pre">
               {responsePayloadText}
             </pre>
           </div>
