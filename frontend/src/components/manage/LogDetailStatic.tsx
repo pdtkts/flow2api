@@ -20,11 +20,22 @@ const sectionTitle = "text-sm font-semibold text-slate-900 tracking-tight"
 const cardBox = "rounded-lg border border-slate-200/90 bg-slate-50/90 p-3.5"
 const kLabel = "text-slate-500"
 
-function LogPayloadPre({ children, className }: { children: string; className?: string }) {
+type PayloadVariant = "default" | "fullResponse"
+
+function LogPayloadPre({
+  children,
+  className,
+  variant = "default",
+}: {
+  children: string
+  className?: string
+  variant?: PayloadVariant
+}) {
   return (
     <pre
       className={cn(
         "rounded-lg border border-slate-200/90 bg-white p-3.5 text-[13px] font-mono leading-relaxed text-slate-800 overflow-x-auto whitespace-pre shadow-[inset_0_1px_0_0_rgba(15,23,42,0.04)]",
+        variant === "fullResponse" && "max-h-[min(420px,55vh)] max-w-full overflow-y-auto overscroll-contain [scrollbar-gutter:stable]",
         className
       )}
     >
@@ -42,10 +53,10 @@ function LogMediaPreview({ label, url, withUrl = true }: { label: string; url: s
   const isDataUrl = /^data:/i.test(String(previewUrl))
 
   return (
-    <div className="space-y-2.5">
+    <div className="flex flex-col gap-3">
       <p className="text-xs font-medium text-slate-500">{label}</p>
       {withUrl && !isDataUrl ? (
-        <p className="text-xs text-slate-800">
+        <p className="text-xs text-slate-800 leading-relaxed">
           <span className="font-medium text-slate-600">URL:</span>{" "}
           <a href={previewUrl} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline break-all">
             {previewUrl}
@@ -142,12 +153,16 @@ export function LogDetailStatic({ log }: { log: LogDetail }) {
         const upResolution = up.resolution || "upscaled"
         const upPreviewUrl = up.local_url || up.url || null
         inner = (
-          <>
+          <div className="space-y-4">
             <p className="text-xs text-slate-800">
               <span className="font-medium text-slate-600">Zoomed resolution:</span> {upResolution}
             </p>
             {upPreviewUrl ? (
-              <LogMediaPreview label={`${upResolution} result`} url={String(upPreviewUrl)} withUrl={!/^data:/i.test(String(upPreviewUrl || ""))} />
+              <LogMediaPreview
+                label={`${upResolution} results`}
+                url={String(upPreviewUrl)}
+                withUrl={!/^data:/i.test(String(upPreviewUrl || ""))}
+              />
             ) : null}
             {up.base64 ? (
               <>
@@ -156,13 +171,13 @@ export function LogDetailStatic({ log }: { log: LogDetail }) {
                 </p>
                 <details className="rounded-lg border border-slate-200/90 bg-white p-2">
                   <summary className="cursor-pointer text-xs text-slate-500">View base64 preview</summary>
-                  <pre className="mt-2 text-xs text-slate-800 overflow-x-auto">
+                  <pre className="mt-2 text-xs text-slate-800 overflow-x-auto max-h-48 overflow-y-auto">
                     {String(up.base64).length > 600 ? `${String(up.base64).slice(0, 600)}...` : String(up.base64)}
                   </pre>
                 </details>
               </>
             ) : null}
-          </>
+          </div>
         )
       } else {
         const extraMediaUrl = (assets.final_video_url || assets.final_image_url) as string | undefined
@@ -203,18 +218,20 @@ export function LogDetailStatic({ log }: { log: LogDetail }) {
               {extractLogPrimaryUrl(responseBodyObj) ? (
                 <div className="space-y-2.5">
                   <h4 className={sectionTitle}>Result</h4>
-                  <div className={cn(cardBox, "space-y-1")}>
+                  <div className={cn(cardBox, "space-y-0")}>
                     <LogMediaPreview label="Main result" url={String(extractLogPrimaryUrl(responseBodyObj))} />
                   </div>
                 </div>
               ) : null}
               {assetsBlock}
-              <details className="group border-t border-slate-200/80 pt-4" data-detail-key="full-response">
-                <summary className="cursor-pointer list-none text-sm font-semibold text-slate-900 marker:hidden [&::-webkit-details-marker]:hidden">
-                  <span className="inline-block translate-y-px pr-1 text-slate-400">▶</span>
+              <details className="border-t border-slate-200/80 pt-4 open:[&>summary>span.chevron]:rotate-90" data-detail-key="full-response">
+                <summary className="cursor-pointer list-none text-sm font-semibold text-slate-900 marker:hidden select-none [&::-webkit-details-marker]:hidden">
+                  <span className="chevron inline-block translate-y-px pr-1 text-slate-400 transition-transform duration-200">▶</span>
                   Full response (large fields have been truncated)
                 </summary>
-                <LogPayloadPre className="mt-3">{responsePayloadText}</LogPayloadPre>
+                <LogPayloadPre variant="fullResponse" className="mt-3">
+                  {responsePayloadText}
+                </LogPayloadPre>
               </details>
             </>
           ) : (
@@ -245,28 +262,24 @@ export function LogDetailStatic({ log }: { log: LogDetail }) {
 
       <div className="space-y-3 border-t border-slate-200/80 pt-5">
         <h4 className={sectionTitle}>Basic Information</h4>
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 sm:gap-x-8 sm:gap-y-2.5 text-sm">
-          <div className="space-y-2.5 sm:space-y-2.5">
-            <BasicInfoRow label="Operation">{log.operation || "—"}</BasicInfoRow>
-            <BasicInfoRow label="Status code">
-              <span
-                className={cn(
-                  "inline-flex min-w-[2.25rem] items-center justify-center rounded px-2 py-0.5 text-xs font-medium tabular-nums",
-                  statusCodePillClassLight(log.status_code ?? undefined)
-                )}
-              >
-                {log.status_code ?? "—"}
-              </span>
-            </BasicInfoRow>
-            <BasicInfoRow label="Time">{formatLogDetailLocalTimestamp(log.created_at)}</BasicInfoRow>
-            <BasicInfoRow label="Log ID">{log.id ?? "—"}</BasicInfoRow>
-          </div>
-          <div className="space-y-2.5 sm:space-y-2.5">
-            <BasicInfoRow label="Status">{formatLogStatus(log)}</BasicInfoRow>
-            <BasicInfoRow label="Time taken">{durationStr}</BasicInfoRow>
-            <BasicInfoRow label="Token">{tokenDisplay}</BasicInfoRow>
-            <BasicInfoRow label="Progress">{formatLogProgressField(log)}</BasicInfoRow>
-          </div>
+        <div className="flex flex-col gap-2.5 text-sm">
+          <BasicInfoRow label="Operation">{log.operation || "—"}</BasicInfoRow>
+          <BasicInfoRow label="Status">{formatLogStatus(log)}</BasicInfoRow>
+          <BasicInfoRow label="Status code">
+            <span
+              className={cn(
+                "inline-flex min-w-[2.25rem] items-center justify-center rounded px-2 py-0.5 text-xs font-medium tabular-nums",
+                statusCodePillClassLight(log.status_code ?? undefined)
+              )}
+            >
+              {log.status_code ?? "—"}
+            </span>
+          </BasicInfoRow>
+          <BasicInfoRow label="Time taken">{durationStr}</BasicInfoRow>
+          <BasicInfoRow label="Time">{formatLogDetailLocalTimestamp(log.created_at)}</BasicInfoRow>
+          <BasicInfoRow label="Token">{tokenDisplay}</BasicInfoRow>
+          <BasicInfoRow label="Log ID">{log.id ?? "—"}</BasicInfoRow>
+          <BasicInfoRow label="Progress">{formatLogProgressField(log)}</BasicInfoRow>
         </div>
       </div>
     </div>
