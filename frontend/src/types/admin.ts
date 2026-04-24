@@ -39,6 +39,7 @@ export interface LogListItem {
   id: number
   token_id?: number | null
   token_email?: string | null
+  token_username?: string | null
   operation?: string | null
   status_code?: number | null
   duration?: number | null
