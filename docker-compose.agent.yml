@@ -1,5 +1,12 @@
-# Agent Gateway + Redis (merge with docker-compose.yml for the full default stack).
+# Agent gateway + Redis + Cloudflare Tunnel (same connector TUNNEL_TOKEN as the rest of your stack).
+# Merge with docker-compose.yml so `flow2api` exists on the same network:
 #   docker compose -f docker-compose.yml -f docker-compose.agent.yml up -d --build
+#
+# .env: TUNNEL_TOKEN (see .env.example), optional GATEWAY_*.
+#
+# Cloudflare Zero Trust → Tunnels → Public hostnames (same tunnel as admin-flow / flow-api), add e.g.:
+#   - https://agents.yourdomain.com  →  http://agent-gateway:9080  (WSS: /ws/agents)
+# flow-api + admin-flow still point to http://flow2api:8000
 #
 # Captcha: admin → remote_browser_base_url = http://agent-gateway:9080, key = GATEWAY_FLOW2API_BEARER
 
@@ -23,4 +30,15 @@ services:
   redis:
     image: redis:7-alpine
     container_name: agent-gateway-redis
+    restart: unless-stopped
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: flow2api-cloudflared
+    command: tunnel run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN}
+    depends_on:
+      - flow2api
+      - agent-gateway
     restart: unless-stopped

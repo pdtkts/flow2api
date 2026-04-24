@@ -4,7 +4,7 @@ When `captcha_method` is `remote_browser`, Flow2API calls `remote_browser_base_u
 
 ## Docker
 
-**Core** is [`docker-compose.yml`](../docker-compose.yml) (Flow2API + `cloudflared`). **Agent stack** is [`docker-compose.agent.yml`](../docker-compose.agent.yml) (agent-gateway + redis). Merge both for the usual deployment:
+[`docker-compose.yml`](../docker-compose.yml) has **flow2api** only. [`docker-compose.agent.yml`](../docker-compose.agent.yml) adds **agent-gateway**, **redis**, and **`cloudflared`** (one tunnel; same `TUNNEL_TOKEN` as the rest of your hostnames). Merge both for a **public** deployment with captcha agent:
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.agent.yml up -d --build
@@ -13,7 +13,7 @@ docker compose -f docker-compose.yml -f docker-compose.agent.yml up -d --build
 
 `GATEWAY_*` in `.env` (see [`.env.agent-gateway.example`](../.env.agent-gateway.example)) and `TUNNEL_TOKEN` in [`.env`](../.env.example).
 
-**App + tunnel only** (no agent): `docker compose up -d` (single file).
+**App only, no public tunnel, no agent stack:** `docker compose up -d` (only `docker-compose.yml`).
 
 **Build the main `flow2api` image from this repo** (fresh UI, not only `ghcr`):
 
@@ -24,8 +24,8 @@ docker build -t flow2api:local -f Dockerfile .
 
 Services (merge `docker-compose.yml` + `docker-compose.agent.yml`):
 
-- **flow2api** — main app; internal `http://flow2api:8000`
-- **cloudflared** — in `docker-compose.yml`
+- **flow2api** — in `docker-compose.yml`; `http://flow2api:8000`
+- **cloudflared** — in `docker-compose.agent.yml` (waits for `flow2api` + `agent-gateway` after merge)
 - **agent-gateway** — in `docker-compose.agent.yml`; port **9080**
 - **redis** — in `docker-compose.agent.yml` (Phase 3)
 
@@ -46,7 +46,7 @@ Services (merge `docker-compose.yml` + `docker-compose.agent.yml`):
 | `GATEWAY_AGENT_DEVICE_TOKEN` | Secret agents send in the WebSocket `register` message. |
 | `SOLVE_TIMEOUT_SECONDS` | Max wait for a token (default 120). |
 | `REDIS_URL` | Reserved for Phase 3 (optional). |
-| `TUNNEL_TOKEN` | See root `.env` — for `cloudflared` in the same compose file. |
+| `TUNNEL_TOKEN` | See root `.env` — for `cloudflared` in `docker-compose.agent.yml` (merge with `docker-compose.yml`). |
 
 ## Source layout
 
@@ -54,7 +54,7 @@ Services (merge `docker-compose.yml` + `docker-compose.agent.yml`):
 
 ## Cloudflare Tunnel (gateway on the public internet)
 
-**One** `cloudflared` in `docker-compose.yml`. In [Zero Trust](https://one.dash.cloudflare.com/) → **Tunnels** → **Public hostnames** (in addition to `flow-api` / `admin-flow` if used):
+**One** `cloudflared` in `docker-compose.agent.yml` (after merge; do not run a second connector). In [Zero Trust](https://one.dash.cloudflare.com/) → **Tunnels** → **Public hostnames** (in addition to `flow-api` / `admin-flow` if used):
 
 | Public hostname | Internal URL |
 |-----------------|-------------|
