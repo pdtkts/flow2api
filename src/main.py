@@ -1,8 +1,12 @@
 """FastAPI application initialization"""
+import os
+
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -17,12 +21,69 @@ from .services.generation_handler import GenerationHandler
 from .api import routes, admin
 
 
+def _normalize_host(host: str) -> str:
+    if not host:
+        return ""
+    return host.split(":")[0].strip().lower()
+
+
+def _api_only_hostnames() -> set[str]:
+    raw = (os.environ.get("FLOW2API_API_ONLY_HOST") or "").strip()
+    if not raw:
+        return set()
+    return {_normalize_host(h) for h in raw.split(",") if h.strip()}
+
+
+def _incoming_hostname(request: Request) -> str:
+    xf = (request.headers.get("x-forwarded-host") or "").strip()
+    if xf:
+        return _normalize_host(xf.split(",")[0].strip())
+    return _normalize_host(request.headers.get("host", ""))
+
+
+def _path_allowed_on_api_only_host(path: str) -> bool:
+    if path.startswith(("/v1/", "/v1beta/")) or path in ("/v1", "/v1beta"):
+        return True
+    if path.startswith("/models/") or path == "/models":
+        return True
+    if path.startswith("/tmp/"):
+        return True
+    if path in ("/openapi.json",):
+        return True
+    return False
+
+
+class ApiOnlyHostMiddleware(BaseHTTPMiddleware):
+    """
+    If FLOW2API_API_ONLY_HOST is set (comma-separated FQDNs), requests whose Host
+    (or X-Forwarded-Host) matches get only public API + /tmp; SPA, /api, /assets, /docs, etc. return 404.
+    Add before CORS in code so CORS still wraps the response.
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        hosts = _api_only_hostnames()
+        if not hosts:
+            return await call_next(request)
+        h = _incoming_hostname(request)
+        if h not in hosts:
+            return await call_next(request)
+        path = request.url.path
+        if _path_allowed_on_api_only_host(path):
+            return await call_next(request)
+        return JSONResponse({"detail": "Not Found"}, status_code=404)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager"""
     # Startup
     print("=" * 60)
     print("Flow2API Starting...")
+    api_only = _api_only_hostnames()
+    if api_only:
+        print(
+            f"API-only host(s) (no web UI on these hosts): {', '.join(sorted(api_only))}"
+        )
     print("=" * 60)
 
     # Get config from setting.toml
@@ -182,7 +243,8 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# CORS middleware
+# CORS is added after this block so CORS is outer and still applies to 404s
+app.add_middleware(ApiOnlyHostMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],

@@ -90,15 +90,15 @@ docker compose -f docker-compose.headed.yml logs -f
 在 Docker 中运行 [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/)，用**同一个内网源**、**两个公网子域名**分别对外暴露 OpenAPI（`/v1/...` 等）和 Web 管理台（`/` + `/api/...`）。不拆进程：两个域名都反代到本项目的 **容器内** `http://<服务名>:8000`。
 
 1. 在 [Cloudflare Zero Trust](https://one.dash.cloudflare.com/) → **Networks** → **Tunnels** 创建**命名隧道**，复制 `cloudflared` 安装命令里的 **TUNNEL_TOKEN**。
-2. 在同一隧道下配置两条 **Public hostname**（示例）  
-   - `https://api.example.com` → `http://flow2api:8000`  
-   - `https://admin.example.com` → `http://flow2api:8000`  
+2. 在同一隧道下配置两条 **Public hostname**（示例 — 可换成自己的域名）  
+   - 仅 **API**（不开放管理台/前端）：`https://flow-api.prismacreative.online` → `http://flow2api:8000`  
+   - **管理台 + 前端**（与 API 用不同子域）：`https://admin-flow.prismacreative.online` → `http://flow2api:8000`  
    在 Docker 同网络内解析 `flow2api` 为应用容器；**不要**填主机上的 `38000` 等映射端口。  
-3. 根目录 `cp .env.example .env`，写入 `TUNNEL_TOKEN=...`。**不要**在宿主机再跑一个相同 Token 的 `cloudflared`（一隧道一连接器）。
+3. 根目录 `cp .env.example .env`，写入 `TUNNEL_TOKEN=...`；`docker-compose.tunnel.yml` 会默认为应用设置 `FLOW2API_API_ONLY_HOST=flow-api.prismacreative.online`。在该 **API 子域**上仅允许 `/v1` / `/v1beta` / `/models`、缓存 `/tmp` 与 `openapi.json`，**不**提供网页界面、`/api` 管理接口与 `/assets` 静态资源（见 `src/main.py` 中 `ApiOnlyHostMiddleware`）。**管理台**请始终使用 `admin-flow.*` 等未列入 `FLOW2API_API_ONLY_HOST` 的 hostname。可覆盖为：`FLOW2API_API_ONLY_HOST=你的api子域`。**不要**在宿主机再跑一个相同 Token 的 `cloudflared`（一隧道一连接器）。  
 4. 启动：  
    `docker compose -f docker-compose.yml -f docker-compose.tunnel.yml up -d`  
-5. 管理台用浏览器打开 **admin 域名**；API 基础地址用 **api 域名**（如 `https://api.example.com/v1/...`）。  
-6. 在 `config/setting.toml` 的 `[cache]` 中设置与公网一致的 `base_url`（见 `config/setting_example.toml` 注释），以便返回的 `/tmp/...` 资源链接为可访问的 HTTPS 地址，例如 `base_url = "https://api.example.com"`。
+5. 管理台在浏览器打开 **admin-flow** 域名；OpenAI 兼容 API 的 Base URL 使用 **flow-api** 域名（如 `https://flow-api.prismacreative.online/v1/...`）。  
+6. 在 `config/setting.toml` 的 `[cache]` 中设置与公网一致的 `base_url`（见 `config/setting_example.toml` 注释），例如 `base_url = "https://flow-api.prismacreative.online"`。
 
 有头打码时合并隧道覆盖文件，并把隧道里的源改为 `flow2api-headed` 对应容器的 **8000 端口**：
 
