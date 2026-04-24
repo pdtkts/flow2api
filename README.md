@@ -99,7 +99,7 @@ docker compose -f docker-compose.headed.yml logs -f
    `docker compose -f docker-compose.yml -f docker-compose.tunnel.yml up -d`  
 5. 管理台在浏览器打开 **admin-flow** 域名；OpenAI 兼容 API 的 Base URL 使用 **flow-api** 域名（如 `https://flow-api.prismacreative.online/v1/...`）。  
 6. 在 `config/setting.toml` 的 `[cache]` 中设置与公网一致的 `base_url`（见 `config/setting_example.toml` 注释），例如 `base_url = "https://flow-api.prismacreative.online"`。  
-7. 在 `config/setting.toml` 的 `[server]` 中可设置 `api_only_host`（与 `api` 子域一致，见 `config/setting_example.toml`）。若未设置，至少保证环境变量或 compose 中已设置 `FLOW2API_API_ONLY_HOST`。
+7. `FLOW2API_API_ONLY_HOST` 仅在**环境变量**中配置（根目录 `.env` 与 `docker-compose.tunnel.yml` 默认已带 `flow-api.prismacreative.online`；`docker compose` 会读 `.env`）。
 
 **若 `flow-api` 子域仍能打开 /login 等页面：** 表示当前映像**未包含**本仓库的 `ApiOnlyHostMiddleware`（例如只拉了旧版 `ghcr.io/.../flow2api:latest`）。需**使用本仓库代码构建**再部署，例如在本项目根目录执行 `docker build -t flow2api:local -f Dockerfile .`，在 `docker-compose` 里把 `flow2api` 服务的 `image` 改为 `flow2api:local` 后重新 `up -d`，并确认容器日志启动行有 `API-only host(s)`。也可在宿主机上 `python main.py` 时设置环境变量。若已用新映像仍异常，在 Cloudflare 对该子域**关闭针对 HTML 的强缓存**或做一次 **Purge Cache**，避免边缘缓存了旧的 `index.html`。
 

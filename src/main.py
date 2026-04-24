@@ -28,13 +28,8 @@ def _normalize_host(host: str) -> str:
 
 
 def _api_only_hostnames() -> set[str]:
-    # Env wins over config so CI/containers can override without editing setting.toml
+    """Comma-separated FQDNs from env FLOW2API_API_ONLY_HOST only (see docker-compose.tunnel.yml, .env)."""
     raw = (os.environ.get("FLOW2API_API_ONLY_HOST") or "").strip()
-    if not raw:
-        try:
-            raw = (getattr(config, "api_only_host", None) or "").strip()
-        except Exception:
-            raw = ""
     if not raw:
         return set()
     return {_normalize_host(h) for h in raw.split(",") if h.strip()}

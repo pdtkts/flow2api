@@ -218,12 +218,6 @@ class Config:
         return self._config["server"]["port"]
 
     @property
-    def api_only_host(self) -> str:
-        """Comma-separated FQDNs: those hosts get public API + /tmp only (no web UI, no /api)."""
-        v = (self._config.get("server") or {}).get("api_only_host", "")
-        return (v or "").strip() if isinstance(v, str) else ""
-
-    @property
     def debug_enabled(self) -> bool:
         return self._config.get("debug", {}).get("enabled", False)
 

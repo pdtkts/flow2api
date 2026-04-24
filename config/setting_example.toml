@@ -27,10 +27,6 @@ max_poll_attempts = 200
 [server]
 host = "0.0.0.0"
 port = 8000
-# 公网“仅 API”子域（与浏览器管理台用不同 hostname）。多个用英文逗号分隔。留空则不在应用层做限制。
-# 也可通过环境变量 FLOW2API_API_ONLY_HOST 设置（会覆盖这里）。与 Cloudflare 上的 API 子域一致，例如:
-# api_only_host = "flow-api.prismacreative.online"
-api_only_host = ""
 
 [debug]
 enabled = false
