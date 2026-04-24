@@ -56,13 +56,21 @@ def _incoming_hostname(request: Request) -> str:
 
 
 def _path_allowed_on_api_only_host(path: str) -> bool:
+    """
+    Paths allowed on the API-only public host (no admin SPA / /api on this host).
+
+    - OpenAI / Chat Completions style: /v1/chat/completions, /v1/models, /v1/models/aliases, …
+    - Gemini (Google) style: /v1beta/models/…:generateContent, :streamGenerateContent, list models, …
+    - Same body on alternate paths: /models, /models/{m}:generateContent, …
+    - Cached media, discovery, liveness: /tmp, /openapi.json, /health
+    """
+    if path in ("/openapi.json", "/health"):
+        return True
     if path.startswith(("/v1/", "/v1beta/")) or path in ("/v1", "/v1beta"):
         return True
     if path.startswith("/models/") or path == "/models":
         return True
     if path.startswith("/tmp/"):
-        return True
-    if path in ("/openapi.json",):
         return True
     return False
 
@@ -70,7 +78,8 @@ def _path_allowed_on_api_only_host(path: str) -> bool:
 class ApiOnlyHostMiddleware(BaseHTTPMiddleware):
     """
     If FLOW2API_API_ONLY_HOST is set (comma-separated FQDNs), requests whose Host
-    (or X-Forwarded-Host) matches get only public API + /tmp; SPA, /api, /assets, /docs, etc. return 404.
+    (or X-Forwarded-Host) matches get public OpenAI- and Gemini-style routes + /tmp only;
+    SPA, /api, /assets, /docs, /redoc, etc. return 404.
     Add before CORS in code so CORS still wraps the response.
     """
 
