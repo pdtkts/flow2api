@@ -123,7 +123,9 @@ async def lifespan(app: FastAPI):
 
     print(f"✓ Database initialized")
     print(f"✓ Total tokens: {len(tokens)}")
-    print(f"✓ Cache: {'Enabled' if config.cache_enabled else 'Disabled'} (timeout: {config.cache_timeout}s)")
+    ct = config.cache_timeout
+    d = f", ~{ct / 86400.0:.3g}d" if ct and ct > 0 else " (no auto-expiry)"
+    print(f"✓ Cache: {'Enabled' if config.cache_enabled else 'Disabled'} (timeout: {ct}s{d})")
     if cache_cleanup_enabled:
         print("✓ File cache cleanup task started")
     else:

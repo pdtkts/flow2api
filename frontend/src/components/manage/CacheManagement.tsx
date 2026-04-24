@@ -10,10 +10,31 @@ import { toast } from "sonner"
 import { RefreshCw, Trash2, File } from "lucide-react"
 import type { CacheStatsResponse, CacheConfigResponse, CacheFilesResponse, CacheFileItem } from "../../types/admin"
 
+const SECONDS_PER_DAY = 86400
+const MAX_CACHE_DAYS = 7
+const MAX_CACHE_SECONDS = MAX_CACHE_DAYS * SECONDS_PER_DAY
+
 function formatBytes(n: number) {
   if (n < 1024) return `${n} B`
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
   return `${(n / 1024 / 1024).toFixed(2)} MB`
+}
+
+function secondsToDaysField(sec: number): string {
+  if (sec <= 0) return "0"
+  const d = sec / SECONDS_PER_DAY
+  return String(Math.round(d * 1e4) / 1e4)
+}
+
+function daysFieldToSeconds(raw: string): { ok: true; seconds: number } | { ok: false; message: string } {
+  const t = raw.trim()
+  if (t === "") return { ok: true, seconds: 7200 }
+  const days = parseFloat(t)
+  if (Number.isNaN(days) || days < 0) return { ok: false, message: "Enter a number of days between 0 and 7" }
+  if (days > MAX_CACHE_DAYS) return { ok: false, message: `Max retention is ${MAX_CACHE_DAYS} days` }
+  if (days === 0) return { ok: true, seconds: 0 }
+  const sec = Math.round(days * SECONDS_PER_DAY)
+  return { ok: true, seconds: Math.min(MAX_CACHE_SECONDS, sec) }
 }
 
 /** Public URL for a file under the API static /tmp mount (dev: Vite proxies /tmp → backend). */
@@ -82,7 +103,7 @@ function MediaTile({ file }: { file: CacheFileItem }) {
 export function CacheManagement({ active }: { active: boolean }) {
   const { token } = useAuth()
   const [cacheEnabled, setCacheEnabled] = useState(true)
-  const [cacheTimeout, setCacheTimeout] = useState("7200")
+  const [cacheTimeoutDays, setCacheTimeoutDays] = useState("0.0833")
   const [cacheBaseUrl, setCacheBaseUrl] = useState("")
   const [cacheEffectiveUrl, setCacheEffectiveUrl] = useState("")
 
@@ -99,7 +120,13 @@ export function CacheManagement({ active }: { active: boolean }) {
     const cache = await adminJson<CacheConfigResponse>("/api/cache/config", token)
     if (cache.ok && cache.data?.success && cache.data.config) {
       setCacheEnabled(cache.data.config.enabled !== false)
-      setCacheTimeout(String(cache.data.config.timeout ?? 7200))
+      const sec = cache.data.config.timeout ?? 7200
+      if (typeof cache.data.config.timeout_days === "number" && !Number.isNaN(cache.data.config.timeout_days)) {
+        const d = cache.data.config.timeout_days
+        setCacheTimeoutDays(d <= 0 ? "0" : String(Math.round(d * 1e4) / 1e4))
+      } else {
+        setCacheTimeoutDays(secondsToDaysField(sec))
+      }
       setCacheBaseUrl(cache.data.config.base_url || "")
       setCacheEffectiveUrl(cache.data.config.effective_base_url || "")
     }
@@ -147,9 +174,13 @@ export function CacheManagement({ active }: { active: boolean }) {
 
   const saveCache = async () => {
     if (!token) return
-    const timeout = cacheTimeout.trim() === "" ? 7200 : parseInt(cacheTimeout, 10)
+    const parsed = daysFieldToSeconds(cacheTimeoutDays)
+    if (parsed.ok === false) {
+      toast.error(parsed.message)
+      return
+    }
+    const timeout = parsed.seconds
     const baseUrl = cacheBaseUrl.trim()
-    if (Number.isNaN(timeout) || timeout < 0 || timeout > 86400) return toast.error("Cache timeout 0–86400")
     if (baseUrl && !baseUrl.startsWith("http://") && !baseUrl.startsWith("https://")) return toast.error("Base URL must start with http(s)://")
     setBusy(true)
     try {
@@ -215,8 +246,20 @@ export function CacheManagement({ active }: { active: boolean }) {
           {cacheEnabled ? (
             <>
               <div>
-                <Label>Cache TTL (seconds)</Label>
-                <Input type="number" className="mt-1" value={cacheTimeout} onChange={(e) => setCacheTimeout(e.target.value)} />
+                <Label>Cache retention (days)</Label>
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  How long to keep files before the cleanup task can remove them. 0 = no automatic expiry. Max {MAX_CACHE_DAYS}{" "}
+                  days.
+                </p>
+                <Input
+                  type="number"
+                  min={0}
+                  max={MAX_CACHE_DAYS}
+                  step={0.01}
+                  className="mt-1"
+                  value={cacheTimeoutDays}
+                  onChange={(e) => setCacheTimeoutDays(e.target.value)}
+                />
               </div>
               <div>
                 <Label>Public base URL for cached files</Label>

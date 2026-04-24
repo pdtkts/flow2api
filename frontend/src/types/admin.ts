@@ -72,7 +72,10 @@ export interface CacheConfigResponse {
   success?: boolean
   config?: {
     enabled?: boolean
+    /** Retention in seconds (internal). */
     timeout?: number
+    /** Retention in days (same as timeout / 86400; 0 = no auto-expiry). */
+    timeout_days?: number
     base_url?: string
     effective_base_url?: string
   }

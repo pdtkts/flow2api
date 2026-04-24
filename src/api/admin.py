@@ -1520,11 +1520,15 @@ async def get_cache_config(token: str = Depends(verify_admin_token)):
     # Calculate effective base URL
     effective_base_url = cache_config.cache_base_url if cache_config.cache_base_url else f"http://127.0.0.1:8000"
 
+    ct = cache_config.cache_timeout or 0
+    timeout_days = 0.0 if ct <= 0 else round(ct / 86400.0, 4)
+
     return {
         "success": True,
         "config": {
             "enabled": cache_config.cache_enabled,
             "timeout": cache_config.cache_timeout,
+            "timeout_days": timeout_days,
             "base_url": cache_config.cache_base_url or "",
             "effective_base_url": effective_base_url
         }
@@ -1602,6 +1606,12 @@ async def update_cache_config_full(
             raise HTTPException(status_code=400, detail="缓存超时时间必须为整数")
         if timeout < 0:
             raise HTTPException(status_code=400, detail="缓存超时时间不能小于 0")
+        max_cache_seconds = 7 * 86400
+        if timeout > max_cache_seconds:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cache timeout cannot exceed 7 days ({max_cache_seconds} seconds)",
+            )
 
     await db.update_cache_config(enabled=enabled, timeout=timeout, base_url=base_url)
 

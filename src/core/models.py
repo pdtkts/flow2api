@@ -155,7 +155,7 @@ class CacheConfig(BaseModel):
 
     id: int = 1
     cache_enabled: bool = False
-    cache_timeout: int = 7200  # seconds (2 hours), 0 means never expire
+    cache_timeout: int = 7200  # seconds; UI uses days (max 7d = 604800s), 0 = never expire
     cache_base_url: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
