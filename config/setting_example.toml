@@ -55,7 +55,9 @@ error_ban_threshold = 3
 [cache]
 enabled = false
 timeout = 7200  # 缓存超时时间(秒), 默认2小时; 设置为0表示不自动删除缓存
-base_url = ""   # 缓存文件访问的基础URL, 留空则使用服务器地址
+# Public base URL for /tmp/... links in API responses. When using Cloudflare Tunnel (or any HTTPS reverse
+# proxy), set this to the hostname clients use for the API, e.g. base_url = "https://api.example.com"
+base_url = ""   # 缓存文件访问的基础URL, 留空则按请求/本机回退
 
 [captcha]
 captcha_method = "browser"  # 打码方式: yescaptcha/browser/personal/remote_browser

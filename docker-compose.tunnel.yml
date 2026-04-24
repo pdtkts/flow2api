@@ -1,0 +1,15 @@
+# Cloudflare Tunnel sidecar. Merge with the base compose file:
+#   docker compose -f docker-compose.yml -f docker-compose.tunnel.yml up -d
+# Copy .env.example to .env, set TUNNEL_TOKEN from Zero Trust → Networks → Tunnels.
+# In the tunnel’s Public hostnames, point api.* and admin.* to http://flow2api:8000 (not the host-mapped port).
+
+services:
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: flow2api-cloudflared
+    command: tunnel run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN}
+    depends_on:
+      - flow2api
+    restart: unless-stopped

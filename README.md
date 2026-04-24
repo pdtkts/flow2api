@@ -85,6 +85,29 @@ docker compose -f docker-compose.headed.yml logs -f
 - API 端口：`8000`
 - 进入管理后台后，将验证码方式设为 `browser` 或 `personal`
 
+#### Cloudflare Tunnel（公网 + 分离 API 与管理台域名）
+
+在 Docker 中运行 [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/)，用**同一个内网源**、**两个公网子域名**分别对外暴露 OpenAPI（`/v1/...` 等）和 Web 管理台（`/` + `/api/...`）。不拆进程：两个域名都反代到本项目的 **容器内** `http://<服务名>:8000`。
+
+1. 在 [Cloudflare Zero Trust](https://one.dash.cloudflare.com/) → **Networks** → **Tunnels** 创建**命名隧道**，复制 `cloudflared` 安装命令里的 **TUNNEL_TOKEN**。
+2. 在同一隧道下配置两条 **Public hostname**（示例）  
+   - `https://api.example.com` → `http://flow2api:8000`  
+   - `https://admin.example.com` → `http://flow2api:8000`  
+   在 Docker 同网络内解析 `flow2api` 为应用容器；**不要**填主机上的 `38000` 等映射端口。  
+3. 根目录 `cp .env.example .env`，写入 `TUNNEL_TOKEN=...`。**不要**在宿主机再跑一个相同 Token 的 `cloudflared`（一隧道一连接器）。
+4. 启动：  
+   `docker compose -f docker-compose.yml -f docker-compose.tunnel.yml up -d`  
+5. 管理台用浏览器打开 **admin 域名**；API 基础地址用 **api 域名**（如 `https://api.example.com/v1/...`）。  
+6. 在 `config/setting.toml` 的 `[cache]` 中设置与公网一致的 `base_url`（见 `config/setting_example.toml` 注释），以便返回的 `/tmp/...` 资源链接为可访问的 HTTPS 地址，例如 `base_url = "https://api.example.com"`。
+
+有头打码时合并隧道覆盖文件，并把隧道里的源改为 `flow2api-headed` 对应容器的 **8000 端口**：
+
+```bash
+docker compose -f docker-compose.headed.yml -f docker-compose.headed.tunnel.yml up -d
+```
+
+在 Zero Trust 里两条公网 hostname 的源地址应填 `http://flow2api-headed:8000`（与 `docker-compose.headed.yml` 中服务名一致）。
+
 ### 方式二：本地部署
 
 ```bash

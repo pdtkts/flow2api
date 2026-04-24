@@ -1,0 +1,15 @@
+# Cloudflare Tunnel with headed captcha stack. Merge with:
+#   docker compose -f docker-compose.headed.yml -f docker-compose.headed.tunnel.yml up -d
+# Set TUNNEL_TOKEN in .env (see .env.example). In Cloudflare, both public hostnames
+# should target http://flow2api-headed:8000
+
+services:
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: flow2api-headed-cloudflared
+    command: tunnel run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN}
+    depends_on:
+      - flow2api-headed
+    restart: unless-stopped
