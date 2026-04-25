@@ -1138,11 +1138,22 @@ async def list_cache_files_for_key(
     if auth_ctx.key_id is None:
         raise HTTPException(status_code=403, detail="Managed API key required")
     handler = _ensure_generation_handler()
-    rows = await handler.db.list_cache_files_for_api_key(
-        auth_ctx.key_id, limit=int(limit), offset=int(offset)
-    )
+    kid = auth_ctx.key_id
+    lim = int(limit)
+    off = int(offset)
+    total = await handler.db.count_cache_files_for_api_key(kid)
+    rows = await handler.db.list_cache_files_for_api_key(kid, limit=lim, offset=off)
     data = [_cache_file_row_to_list_item(r) for r in rows]
-    return {"object": "list", "data": data}
+    return {
+        "object": "list",
+        "data": data,
+        "pagination": {
+            "total": total,
+            "limit": lim,
+            "offset": off,
+            "has_more": off + len(data) < total,
+        },
+    }
 
 
 @router.get("/api/cache/file/{project_id}")
@@ -1165,11 +1176,24 @@ async def list_cache_files_for_key_project(
     tid = int(proj.token_id)
     if tid not in auth_ctx.allowed_accounts:
         raise HTTPException(status_code=400, detail="project_id is not assigned to this API key")
+    kid = auth_ctx.key_id
+    lim = int(limit)
+    off = int(offset)
+    total = await handler.db.count_cache_files_for_api_key_project(kid, pid)
     rows = await handler.db.list_cache_files_for_api_key_project(
-        auth_ctx.key_id, pid, limit=int(limit), offset=int(offset)
+        kid, pid, limit=lim, offset=off
     )
     data = [_cache_file_row_to_list_item(r) for r in rows]
-    return {"object": "list", "data": data}
+    return {
+        "object": "list",
+        "data": data,
+        "pagination": {
+            "total": total,
+            "limit": lim,
+            "offset": off,
+            "has_more": off + len(data) < total,
+        },
+    }
 
 
 @router.get("/api/cache/blob/{filename}")

@@ -2107,6 +2107,15 @@ class Database:
             rows = await cursor.fetchall()
             return [dict(r) for r in rows]
 
+    async def count_cache_files_for_api_key(self, api_key_id: int) -> int:
+        async with self._connect() as db:
+            cursor = await db.execute(
+                "SELECT COUNT(*) FROM cache_files WHERE api_key_id = ?",
+                (api_key_id,),
+            )
+            row = await cursor.fetchone()
+            return int(row[0]) if row else 0
+
     async def list_cache_files_for_api_key_project(
         self,
         api_key_id: int,
@@ -2132,6 +2141,21 @@ class Database:
             )
             rows = await cursor.fetchall()
             return [dict(r) for r in rows]
+
+    async def count_cache_files_for_api_key_project(
+        self, api_key_id: int, flow_project_id: str
+    ) -> int:
+        pid = (flow_project_id or "").strip()
+        async with self._connect() as db:
+            cursor = await db.execute(
+                """
+                SELECT COUNT(*) FROM cache_files
+                WHERE api_key_id = ? AND flow_project_id = ?
+                """,
+                (api_key_id, pid),
+            )
+            row = await cursor.fetchone()
+            return int(row[0]) if row else 0
 
     async def init_config_from_toml(self, config_dict: dict, is_first_startup: bool = True):
         """
