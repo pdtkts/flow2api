@@ -2083,6 +2083,56 @@ class Database:
             row = await cursor.fetchone()
             return dict(row) if row else None
 
+    async def list_cache_files_for_api_key(
+        self,
+        api_key_id: int,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """List cache_files rows for a managed API key (newest first)."""
+        lim = max(1, min(int(limit), 500))
+        off = max(0, int(offset))
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT * FROM cache_files
+                WHERE api_key_id = ?
+                ORDER BY datetime(updated_at) DESC, id DESC
+                LIMIT ? OFFSET ?
+                """,
+                (api_key_id, lim, off),
+            )
+            rows = await cursor.fetchall()
+            return [dict(r) for r in rows]
+
+    async def list_cache_files_for_api_key_project(
+        self,
+        api_key_id: int,
+        flow_project_id: str,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """List cache_files rows for a managed API key scoped to one Flow project UUID."""
+        lim = max(1, min(int(limit), 500))
+        off = max(0, int(offset))
+        pid = (flow_project_id or "").strip()
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT * FROM cache_files
+                WHERE api_key_id = ? AND flow_project_id = ?
+                ORDER BY datetime(updated_at) DESC, id DESC
+                LIMIT ? OFFSET ?
+                """,
+                (api_key_id, pid, lim, off),
+            )
+            rows = await cursor.fetchall()
+            return [dict(r) for r in rows]
+
     async def init_config_from_toml(self, config_dict: dict, is_first_startup: bool = True):
         """
         Initialize database configuration from setting.toml

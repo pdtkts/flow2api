@@ -7,7 +7,7 @@ import random
 import json
 import mimetypes
 import re
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 from curl_cffi.requests import AsyncSession
 from pathlib import Path
@@ -181,15 +181,37 @@ def _guess_mime_type(uri: str, fallback: str) -> str:
 
 
 def _extract_cache_filename(url: str) -> Optional[str]:
-    """Resolve filename from owner-scoped cache URLs (must not overlap /api/cache/config|stats|files)."""
+    """Resolve filename from owner-scoped cache URLs (blob path; legacy /api/cache/file/ still accepted)."""
     path = urlparse(url).path
-    marker = "/api/cache/file/"
-    if marker not in path:
-        return None
-    filename = path.split(marker, 1)[-1].strip().split("/", 1)[0]
-    if not filename:
-        return None
-    return Path(filename).name
+    for marker in ("/api/cache/blob/", "/api/cache/file/"):
+        if marker not in path:
+            continue
+        filename = path.split(marker, 1)[-1].strip().split("/", 1)[0]
+        if not filename:
+            return None
+        return Path(filename).name
+    return None
+
+
+def _cache_file_row_to_list_item(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Shape a cache_files row for GET /api/cache/file list APIs."""
+    fn_safe = Path(str(row.get("filename") or "")).name
+    flow = _strip_optional_project_id(row.get("flow_project_id"))
+    download_path = f"/api/cache/blob/{fn_safe}"
+    if flow:
+        download_path = f"{download_path}?project_id={quote(flow, safe='')}"
+    created = row.get("created_at")
+    updated = row.get("updated_at")
+    return {
+        "filename": fn_safe,
+        "flow_project_id": flow,
+        "media_type": row.get("media_type"),
+        "source_url": row.get("source_url"),
+        "token_id": row.get("token_id"),
+        "created_at": created.isoformat() if hasattr(created, "isoformat") else (str(created) if created is not None else None),
+        "updated_at": updated.isoformat() if hasattr(updated, "isoformat") else (str(updated) if updated is not None else None),
+        "download_path": download_path,
+    }
 
 
 async def retrieve_image_data(
@@ -276,7 +298,12 @@ async def _load_image_bytes_from_uri(
         _, image_bytes = _decode_data_url(uri)
         return image_bytes
 
-    if uri.startswith("http://") or uri.startswith("https://") or "/api/cache/file/" in uri:
+    if (
+        uri.startswith("http://")
+        or uri.startswith("https://")
+        or "/api/cache/blob/" in uri
+        or "/api/cache/file/" in uri
+    ):
         image_bytes = await retrieve_image_data(
             uri, api_key_id=api_key_id, allowed_token_ids=allowed_token_ids
         )
@@ -391,7 +418,11 @@ async def _append_openai_reference_images(
                 continue
 
             for image_url in reversed(matches):
-                if not image_url.startswith("http") and "/api/cache/file/" not in image_url:
+                if (
+                    not image_url.startswith("http")
+                    and "/api/cache/blob/" not in image_url
+                    and "/api/cache/file/" not in image_url
+                ):
                     continue
                 try:
                     downloaded_bytes = await retrieve_image_data(
@@ -1097,12 +1128,57 @@ async def create_flow_project(
     }
 
 
-@router.get("/api/cache/file/{filename}")
-async def get_cached_media(
+@router.get("/api/cache/file")
+async def list_cache_files_for_key(
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    auth_ctx: AuthContext = Depends(verify_api_key_flexible),
+):
+    """List cache file metadata rows owned by this managed API key."""
+    if auth_ctx.key_id is None:
+        raise HTTPException(status_code=403, detail="Managed API key required")
+    handler = _ensure_generation_handler()
+    rows = await handler.db.list_cache_files_for_api_key(
+        auth_ctx.key_id, limit=int(limit), offset=int(offset)
+    )
+    data = [_cache_file_row_to_list_item(r) for r in rows]
+    return {"object": "list", "data": data}
+
+
+@router.get("/api/cache/file/{project_id}")
+async def list_cache_files_for_key_project(
+    project_id: str,
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    auth_ctx: AuthContext = Depends(verify_api_key_flexible),
+):
+    """List cache file metadata for one Flow project UUID under this managed API key."""
+    if auth_ctx.key_id is None:
+        raise HTTPException(status_code=403, detail="Managed API key required")
+    pid = project_id.strip()
+    if not pid:
+        raise HTTPException(status_code=400, detail="project_id is required")
+    handler = _ensure_generation_handler()
+    proj = await handler.db.get_project_by_id(pid, auth_ctx.key_id)
+    if not proj:
+        raise HTTPException(status_code=400, detail="project_id not found for this API key")
+    tid = int(proj.token_id)
+    if tid not in auth_ctx.allowed_accounts:
+        raise HTTPException(status_code=400, detail="project_id is not assigned to this API key")
+    rows = await handler.db.list_cache_files_for_api_key_project(
+        auth_ctx.key_id, pid, limit=int(limit), offset=int(offset)
+    )
+    data = [_cache_file_row_to_list_item(r) for r in rows]
+    return {"object": "list", "data": data}
+
+
+@router.get("/api/cache/blob/{filename}")
+async def get_cached_blob(
     filename: str,
     project_id: Optional[str] = Query(None),
     auth_ctx: AuthContext = Depends(verify_api_key_flexible),
 ):
+    """Stream a cache file owned by this managed API key (use list endpoints to discover filenames)."""
     handler = _ensure_generation_handler()
     if auth_ctx.key_id is None:
         raise HTTPException(status_code=403, detail="Managed API key required")

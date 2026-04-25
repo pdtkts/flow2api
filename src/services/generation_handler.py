@@ -2093,7 +2093,7 @@ class GenerationHandler:
         response_state: Optional[Dict[str, Any]] = None,
         flow_project_id: Optional[str] = None,
     ) -> str:
-        base = f"{self._get_base_url(response_state)}/api/cache/file/{filename}"
+        base = f"{self._get_base_url(response_state)}/api/cache/blob/{filename}"
         pid = (flow_project_id or "").strip()
         if pid:
             return f"{base}?project_id={quote(pid, safe='')}"

@@ -1856,7 +1856,7 @@ async def list_cache_files(token: str = Depends(verify_admin_token)):
 
 @router.get("/api/cache/admin/file/{filename}")
 async def get_cache_file_admin_preview(filename: str, token: str = Depends(verify_admin_token)):
-    """Stream a cache file for the admin UI (Bearer auth). Plain <img src> cannot use /api/cache/file/… (API key)."""
+    """Stream a cache file for the admin UI (Bearer auth). Plain <img src> cannot use managed-key /api/cache/blob/… URLs."""
     from . import routes
 
     if not routes.generation_handler or not routes.generation_handler.file_cache:
