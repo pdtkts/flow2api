@@ -12,6 +12,7 @@ class Settings:
     agent_auth_mode: Literal["legacy", "keygen", "dual"]
     keygen_verify_mode: Literal["jwt", "introspection"]
     keygen_api_url: str
+    keygen_account: str
     keygen_api_token: str
     keygen_public_key: str
     keygen_issuer: str
@@ -46,6 +47,7 @@ def load_settings() -> Settings:
         agent_auth_mode=auth_mode,  # type: ignore[arg-type]
         keygen_verify_mode=verify_mode,  # type: ignore[arg-type]
         keygen_api_url=(os.environ.get("KEYGEN_API_URL") or "https://api.keygen.sh").strip(),
+        keygen_account=(os.environ.get("KEYGEN_ACCOUNT") or "").strip(),
         keygen_api_token=(os.environ.get("KEYGEN_API_TOKEN") or "").strip(),
         keygen_public_key=(os.environ.get("KEYGEN_PUBLIC_KEY") or "").strip(),
         keygen_issuer=(os.environ.get("KEYGEN_ISSUER") or "https://api.keygen.sh").strip(),

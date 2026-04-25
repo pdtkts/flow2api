@@ -74,12 +74,36 @@ function parseTokenIdsFromEnv() {
   return ns.length ? ns : null;
 }
 
+/**
+ * Accepts AGENT_TOKEN in either:
+ * - raw token string
+ * - JSON object string containing { key, licenseId, machineId, ... } from a client API response
+ * The gateway only verifies the token value itself; ids are useful for app-side bookkeeping.
+ */
+function parseAgentTokenFromEnvOrConfig() {
+  const raw = (process.env.AGENT_TOKEN || FILE_CONFIG.agentToken || "").trim();
+  if (!raw) {
+    return "";
+  }
+  if (raw.startsWith("{")) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === "object" && typeof parsed.key === "string" && parsed.key.trim()) {
+        return parsed.key.trim();
+      }
+    } catch {
+      // fall through to raw handling
+    }
+  }
+  return raw;
+}
+
 /** Default config — override or use env: AGENT_TOKEN, AGENT_GATEWAY_WSS, AGENT_TOKEN_IDS */
 const FILE_CONFIG = {
   // WebSocket to agent-gateway (HTTPS https://agents.prismacreative.online/ is the same host; path is /ws/agents)
   wss: "wss://agents.prismacreative.online/ws/agents",
   // Keygen-derived agent token (jwt/introspection token)
-  agentToken: "",
+  agentToken: "activ-b357ff2159b5f3b81e1fbae559697fb1v3",
   // Optional machine/license hint (server may ignore; useful for debugging/audit trails).
   agentId: "",
   tokenIds: [1],
@@ -93,7 +117,7 @@ const FILE_CONFIG = {
 const CONFIG = {
   ...FILE_CONFIG,
   wss: (process.env.AGENT_GATEWAY_WSS || FILE_CONFIG.wss).trim(),
-  agentToken: (process.env.AGENT_TOKEN || FILE_CONFIG.agentToken || "").trim(),
+  agentToken: parseAgentTokenFromEnvOrConfig(),
   agentId: (process.env.AGENT_ID || FILE_CONFIG.agentId || "").trim(),
   tokenIds: parseTokenIdsFromEnv() ?? FILE_CONFIG.tokenIds,
 };
@@ -192,6 +216,7 @@ function main() {
     console.error(
       "Missing AGENT_TOKEN. Use one of:\n" +
         "  PowerShell:  $env:AGENT_TOKEN=\"<keygen token>\"; npm start\n" +
+        "  PowerShell:  $env:AGENT_TOKEN='{\"key\":\"UTX4-...\",\"licenseId\":\"...\",\"machineId\":\"...\"}'; npm start\n" +
         "  bash:        export AGENT_TOKEN=... && npm start\n" +
         "  Or set FILE_CONFIG.agentToken in agent.mjs"
     );

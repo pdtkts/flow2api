@@ -25,6 +25,18 @@ npx playwright install chromium
 
 Use a Keygen-issued token that the gateway can verify.
 
+Accepted formats for `AGENT_TOKEN` in this client:
+
+- Raw token string (recommended): `AGENT_TOKEN=xxxx`
+- JSON string containing `key` (client auto-extracts `.key`):
+  - `{"key":"UTX4-...","licenseId":"...","machineId":"..."}`
+
+Notes:
+
+- In gateway `keygen` mode, only the token value (`key`) is used for auth verification.
+- `licenseId` / `machineId` are not used by this client for auth; they may still be useful in your own app logic/logs.
+- Do not send only `licenseId` or only `machineId` as `AGENT_TOKEN` — that will fail auth.
+
 **Option A — environment (no file edit):**
 
 ```powershell
@@ -32,6 +44,12 @@ Use a Keygen-issued token that the gateway can verify.
 $env:AGENT_TOKEN = "<keygen jwt/introspection token>"
 $env:AGENT_ID = "<optional machine/license hint>"
 $env:AGENT_GATEWAY_WSS = "wss://agents.yourdomain.com/ws/agents"   # optional; see FILE_CONFIG
+npm start
+```
+
+```powershell
+# PowerShell (if your API returns a JSON token object)
+$env:AGENT_TOKEN = '{"key":"UTX4-...","licenseId":"7c7f8c52-...","machineId":"0cbd79d1-..."}'
 npm start
 ```
 

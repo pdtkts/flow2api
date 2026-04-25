@@ -1,6 +1,7 @@
 import hashlib
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 import jwt
@@ -89,7 +90,14 @@ def _stable_token_hash(v: str) -> str:
 async def verify_keygen_introspection(agent_token: str, s: Settings) -> KeygenIdentity:
     if not s.keygen_api_token:
         raise ValueError("KEYGEN_API_TOKEN not configured")
-    endpoint = f"{s.keygen_api_url.rstrip('/')}/v1/tokens/{_stable_token_hash(agent_token)}"
+    token_hash = _stable_token_hash(agent_token)
+    base_url = s.keygen_api_url.rstrip("/")
+    # Keygen account-scoped endpoints are required by many setups.
+    if s.keygen_account:
+        account = quote(s.keygen_account.strip(), safe="")
+        endpoint = f"{base_url}/v1/accounts/{account}/tokens/{token_hash}"
+    else:
+        endpoint = f"{base_url}/v1/tokens/{token_hash}"
     headers = {
         "Authorization": f"Bearer {s.keygen_api_token}",
         "Accept": "application/vnd.api+json",
@@ -97,7 +105,10 @@ async def verify_keygen_introspection(agent_token: str, s: Settings) -> KeygenId
     async with httpx.AsyncClient(timeout=10.0) as client:
         r = await client.get(endpoint, headers=headers)
     if r.status_code >= 400:
-        raise ValueError(f"keygen introspection failed status={r.status_code}")
+        detail = (r.text or "").strip()
+        if len(detail) > 300:
+            detail = detail[:300] + "..."
+        raise ValueError(f"keygen introspection failed status={r.status_code}: {detail}")
     payload = r.json()
     data = payload.get("data") if isinstance(payload, dict) else None
     attrs = data.get("attributes") if isinstance(data, dict) else None
