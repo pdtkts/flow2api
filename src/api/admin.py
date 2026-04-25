@@ -1,8 +1,10 @@
 """Admin API routes"""
 import asyncio
 import json
+import mimetypes
+from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, Header, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 import secrets
@@ -1735,6 +1737,26 @@ async def list_cache_files(token: str = Depends(verify_admin_token)):
         raise HTTPException(status_code=503, detail="File cache not initialized")
     files = routes.generation_handler.file_cache.list_gallery_files()
     return {"success": True, "files": files}
+
+
+@router.get("/api/cache/admin/file/{filename}")
+async def get_cache_file_admin_preview(filename: str, token: str = Depends(verify_admin_token)):
+    """Stream a cache file for the admin UI (Bearer auth). Plain <img src> cannot use /api/cache/file/… (API key)."""
+    from . import routes
+
+    if not routes.generation_handler or not routes.generation_handler.file_cache:
+        raise HTTPException(status_code=503, detail="File cache not initialized")
+    safe_name = Path(filename).name
+    cache_dir = routes.generation_handler.file_cache.cache_dir.resolve()
+    file_path = (cache_dir / safe_name).resolve()
+    try:
+        file_path.relative_to(cache_dir)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid path")
+    if not file_path.is_file():
+        raise HTTPException(status_code=404, detail="Cache file not found")
+    media_type = mimetypes.guess_type(safe_name)[0] or "application/octet-stream"
+    return FileResponse(path=file_path, media_type=media_type, filename=safe_name)
 
 
 @router.post("/api/cache/clear")

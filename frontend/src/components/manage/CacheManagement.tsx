@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react"
+import { useState, useEffect, useCallback, useRef } from "react"
 import { useAuth } from "../../contexts/AuthContext"
 import { adminFetch, adminJson } from "../../lib/adminApi"
 import { Card, CardContent, CardHeader, CardTitle } from "../ui/card"
@@ -37,13 +37,61 @@ function daysFieldToSeconds(raw: string): { ok: true; seconds: number } | { ok: 
   return { ok: true, seconds: Math.min(MAX_CACHE_SECONDS, sec) }
 }
 
-/** Public URL for a file under the API static /tmp mount (dev: Vite proxies /tmp → backend). */
-function cacheFilePublicUrl(fileName: string) {
-  return `/tmp/${encodeURIComponent(fileName)}`
+/** Admin-authenticated preview (same origin as /api when proxied). Relative /tmp/… hits the admin host and returns HTML. */
+function cacheAdminPreviewPath(fileName: string) {
+  return `/api/cache/admin/file/${encodeURIComponent(fileName)}`
 }
 
-function MediaTile({ file }: { file: CacheFileItem }) {
-  const url = cacheFilePublicUrl(file.name)
+function MediaTile({ file, token }: { file: CacheFileItem; token: string | null }) {
+  const [objectUrl, setObjectUrl] = useState<string | null>(null)
+  const [previewError, setPreviewError] = useState(false)
+  const [previewLoading, setPreviewLoading] = useState(true)
+  const objectUrlRef = useRef<string | null>(null)
+
+  useEffect(() => {
+    if (!token) {
+      setPreviewLoading(false)
+      setPreviewError(true)
+      return
+    }
+    let cancelled = false
+    setPreviewLoading(true)
+    setPreviewError(false)
+    if (objectUrlRef.current) {
+      URL.revokeObjectURL(objectUrlRef.current)
+      objectUrlRef.current = null
+    }
+    setObjectUrl(null)
+
+    const path = cacheAdminPreviewPath(file.name)
+    void adminFetch(path, token)
+      .then((res) => {
+        if (cancelled || !res || !res.ok) throw new Error("preview failed")
+        return res.blob()
+      })
+      .then((blob) => {
+        if (cancelled) return
+        const u = URL.createObjectURL(blob)
+        objectUrlRef.current = u
+        setObjectUrl(u)
+        setPreviewLoading(false)
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setPreviewError(true)
+          setPreviewLoading(false)
+        }
+      })
+
+    return () => {
+      cancelled = true
+      if (objectUrlRef.current) {
+        URL.revokeObjectURL(objectUrlRef.current)
+        objectUrlRef.current = null
+      }
+    }
+  }, [file.name, token])
+
   const meta = (
     <div className="border-t bg-muted/40 px-2 py-1.5 text-xs">
       <p className="truncate font-mono text-[10px] text-muted-foreground" title={file.name}>
@@ -53,48 +101,44 @@ function MediaTile({ file }: { file: CacheFileItem }) {
     </div>
   )
 
-  if (file.kind === "image") {
-    return (
-      <div className="overflow-hidden rounded-lg border bg-card shadow-sm">
-        <a href={url} target="_blank" rel="noreferrer" className="block aspect-[4/3] bg-muted">
-          <img src={url} alt="" className="h-full w-full object-cover" loading="lazy" decoding="async" />
-        </a>
-        {meta}
-      </div>
-    )
-  }
-
-  if (file.kind === "video") {
-    return (
-      <div className="overflow-hidden rounded-lg border bg-card shadow-sm">
-        <div className="aspect-video bg-black">
-          <video
-            src={url}
-            className="h-full w-full object-contain"
-            controls
-            playsInline
-            preload="metadata"
-            muted
-          />
+  const mediaBody = () => {
+    if (previewLoading) {
+      return <div className="flex h-full min-h-[8rem] items-center justify-center bg-muted text-xs text-muted-foreground">Loading…</div>
+    }
+    if (previewError || !objectUrl) {
+      return (
+        <div className="flex h-full min-h-[8rem] flex-col items-center justify-center gap-1 bg-muted px-2 text-center text-xs text-muted-foreground">
+          <span>Preview unavailable</span>
         </div>
-        {meta}
+      )
+    }
+    if (file.kind === "image") {
+      return (
+        <a href={objectUrl} target="_blank" rel="noreferrer" className="block aspect-[4/3] bg-muted">
+          <img src={objectUrl} alt="" className="h-full w-full object-cover" decoding="async" />
+        </a>
+      )
+    }
+    if (file.kind === "video") {
+      return (
+        <div className="aspect-video bg-black">
+          <video src={objectUrl} className="h-full w-full object-contain" controls playsInline preload="metadata" muted />
+        </div>
+      )
+    }
+    return (
+      <div className="flex min-h-[8rem] flex-col items-center justify-center gap-2 bg-muted/30 p-3">
+        <File className="h-10 w-10 text-muted-foreground" />
+        <a href={objectUrl} target="_blank" rel="noreferrer" className="line-clamp-2 break-all text-center text-xs text-primary hover:underline">
+          Open file
+        </a>
       </div>
     )
   }
 
   return (
-    <div className="flex h-full min-h-[11rem] flex-col overflow-hidden rounded-lg border bg-card shadow-sm">
-      <div className="flex flex-1 flex-col items-center justify-center gap-2 bg-muted/30 p-3">
-        <File className="h-10 w-10 text-muted-foreground" />
-        <a
-          href={url}
-          target="_blank"
-          rel="noreferrer"
-          className="line-clamp-2 break-all text-center text-xs text-primary hover:underline"
-        >
-          {file.name}
-        </a>
-      </div>
+    <div className="overflow-hidden rounded-lg border bg-card shadow-sm">
+      {mediaBody()}
       {meta}
     </div>
   )
@@ -318,7 +362,7 @@ export function CacheManagement({ active }: { active: boolean }) {
           ) : (
             <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
               {galleryFiles.map((f) => (
-                <MediaTile key={f.name} file={f} />
+                <MediaTile key={f.name} file={f} token={token} />
               ))}
             </div>
           )}
