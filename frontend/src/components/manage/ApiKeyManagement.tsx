@@ -39,6 +39,14 @@ type AuditLog = {
 }
 
 type LimitRow = { endpoint: string; rpm: string; rph: string; burst: string }
+type ScopeOption = { id: string; label: string; description: string }
+
+const AVAILABLE_SCOPES: ScopeOption[] = [
+  { id: "*", label: "Full access", description: "Allows all currently supported API actions." },
+  { id: "models:read", label: "Read models", description: "Allows `/v1/models`, `/v1/models/aliases`, and Gemini model listing endpoints." },
+  { id: "generate:chat", label: "Generate chat", description: "Allows `/v1/chat/completions` (stream and non-stream)." },
+  { id: "generate:gemini", label: "Generate gemini", description: "Allows Gemini `generateContent` and `streamGenerateContent` endpoints." },
+]
 
 export function ApiKeyManagement() {
   const { token } = useAuth()
@@ -51,7 +59,7 @@ export function ApiKeyManagement() {
   const [createOpen, setCreateOpen] = useState(false)
   const [clientName, setClientName] = useState("")
   const [label, setLabel] = useState("default")
-  const [scopes, setScopes] = useState("*")
+  const [selectedScopes, setSelectedScopes] = useState<string[]>(["*"])
   const [expiresAt, setExpiresAt] = useState("")
   const [selectedAccountIds, setSelectedAccountIds] = useState<number[]>([])
   const [limits, setLimits] = useState<LimitRow[]>([
@@ -87,6 +95,15 @@ export function ApiKeyManagement() {
     setSelectedAccountIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))
   }
 
+  const toggleScope = (scopeId: string) => {
+    setSelectedScopes((prev) => {
+      if (scopeId === "*") return prev.includes("*") ? [] : ["*"]
+      const withoutWildcard = prev.filter((s) => s !== "*")
+      if (withoutWildcard.includes(scopeId)) return withoutWildcard.filter((s) => s !== scopeId)
+      return [...withoutWildcard, scopeId]
+    })
+  }
+
   const addLimitRow = () => {
     setLimits((prev) => [...prev, { endpoint: "", rpm: "0", rph: "0", burst: "0" }])
   }
@@ -113,6 +130,7 @@ export function ApiKeyManagement() {
     if (!token) return
     if (!clientName.trim()) return toast.error("Client name is required")
     if (!selectedAccountIds.length) return toast.error("Select at least one account")
+    if (!selectedScopes.length) return toast.error("Select at least one scope")
 
     setSaving(true)
     try {
@@ -121,7 +139,7 @@ export function ApiKeyManagement() {
         body: JSON.stringify({
           client_name: clientName.trim(),
           label: label.trim() || "default",
-          scopes: scopes.trim() || "*",
+          scopes: selectedScopes.join(","),
           account_ids: selectedAccountIds,
           endpoint_limits: buildLimitsPayload(),
           expires_at: expiresAt.trim() || null,
@@ -271,8 +289,33 @@ export function ApiKeyManagement() {
             </div>
             <div className="grid grid-cols-2 gap-3">
               <div>
-                <Label>Scopes (comma-separated)</Label>
-                <Input className="mt-1 font-mono text-sm" value={scopes} onChange={(e) => setScopes(e.target.value)} />
+                <Label>Scopes</Label>
+                <div className="mt-2 space-y-2 border rounded-md p-3 max-h-44 overflow-auto">
+                  {AVAILABLE_SCOPES.map((scope) => (
+                    <label key={scope.id} className="flex items-start justify-between gap-3 text-sm">
+                      <span>
+                        <span className="font-medium">{scope.label}</span>
+                        <span className="block text-xs text-muted-foreground">{scope.description}</span>
+                      </span>
+                      <input
+                        type="checkbox"
+                        checked={selectedScopes.includes(scope.id)}
+                        onChange={() => toggleScope(scope.id)}
+                      />
+                    </label>
+                  ))}
+                </div>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {selectedScopes.length ? (
+                    selectedScopes.map((scope) => (
+                      <Badge key={scope} variant="secondary" className="font-mono text-xs">
+                        {scope}
+                      </Badge>
+                    ))
+                  ) : (
+                    <span className="text-xs text-muted-foreground">No scope selected</span>
+                  )}
+                </div>
               </div>
               <div>
                 <Label>Expires at (optional)</Label>
