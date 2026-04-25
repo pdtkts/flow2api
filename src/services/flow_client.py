@@ -431,7 +431,7 @@ class FlowClient:
 
         short_url = (url or "").split("?")[0]
         if status_code < 400:
-            debug_logger.log_info(
+            debug_logger.log_recaptcha_proxy_check(
                 f"[reCAPTCHA verdict] ACCEPTED by upstream endpoint: status={status_code}, url={short_url}"
             )
             return
@@ -442,13 +442,13 @@ class FlowClient:
             detail = detail[:240] + "..."
 
         if "public_error_unusual_activity" in detail_lower or "recaptcha evaluation failed" in detail_lower:
-            debug_logger.log_warning(
+            debug_logger.log_recaptcha_proxy_check(
                 f"[reCAPTCHA verdict] REJECTED by upstream endpoint: status={status_code}, reason={detail}"
             )
             return
 
         if "recaptcha" in detail_lower or "public_error" in detail_lower:
-            debug_logger.log_warning(
+            debug_logger.log_recaptcha_proxy_check(
                 f"[reCAPTCHA verdict] UPSTREAM captcha-related error: status={status_code}, reason={detail}"
             )
 
