@@ -25,4 +25,41 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - FLOW2API_API_ONLY_HOST=${FLOW2API_API_ONLY_HOST:-flow-api.prismacreative.online}
+      - FLOW2API_DB_URL=${FLOW2API_DB_URL:-postgresql://flow2api:flow2api@postgres:5432/flow2api}
+      - FLOW2API_REDIS_URL=${FLOW2API_REDIS_URL:-redis://redis:6379/0}
     restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: flow2api-postgres
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-flow2api}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-flow2api}
+      - POSTGRES_DB=${POSTGRES_DB:-flow2api}
+    volumes:
+      - flow2api-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-flow2api} -d ${POSTGRES_DB:-flow2api}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: flow2api-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  flow2api-postgres-data:

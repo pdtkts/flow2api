@@ -1,7 +1,7 @@
 """Load balancing module for Flow2API"""
 import asyncio
 import random
-from typing import Optional, Dict
+from typing import Optional, Dict, Set
 from ..core.models import Token
 from ..core.config import config
 from ..core.account_tiers import (
@@ -125,6 +125,7 @@ class LoadBalancer:
         reserve: bool = False,
         enforce_concurrency_filter: bool = True,
         track_pending: bool = False,
+        allowed_token_ids: Optional[Set[int]] = None,
     ) -> Optional[Token]:
         """
         Select a token using load-aware balancing
@@ -162,6 +163,9 @@ class LoadBalancer:
         required_tier = get_required_paygate_tier_for_model(model)
 
         for token in active_tokens:
+            if allowed_token_ids is not None and token.id not in allowed_token_ids:
+                filtered_reasons[token.id] = "不在 API Key 允许账号列表"
+                continue
             normalized_tier = normalize_user_paygate_tier(token.user_paygate_tier)
             if model and not supports_model_for_tier(model, normalized_tier):
                 filtered_reasons[token.id] = '账号等级不足，需要 ' + get_paygate_tier_label(required_tier)

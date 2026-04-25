@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from ..core.auth import verify_api_key_flexible
+from ..core.api_key_manager import AuthContext
 from ..core.logger import debug_logger
 from ..core.model_resolver import get_base_model_aliases, resolve_model_name
 from ..core.models import (
@@ -472,6 +473,7 @@ async def _collect_non_stream_result(
     prompt: str,
     images: List[bytes],
     base_url_override: Optional[str] = None,
+    allowed_token_ids: Optional[set[int]] = None,
 ) -> str:
     handler = _ensure_generation_handler()
     result = None
@@ -481,6 +483,7 @@ async def _collect_non_stream_result(
         images=images if images else None,
         stream=False,
         base_url_override=base_url_override,
+        allowed_token_ids=allowed_token_ids,
     ):
         result = chunk
 
@@ -705,6 +708,7 @@ async def _convert_openai_stream_chunk_to_gemini_event(
 async def _iterate_openai_stream(
     normalized: NormalizedGenerationRequest,
     base_url_override: Optional[str] = None,
+    allowed_token_ids: Optional[set[int]] = None,
 ):
     handler = _ensure_generation_handler()
     async for chunk in handler.handle_generation(
@@ -713,6 +717,7 @@ async def _iterate_openai_stream(
         images=normalized.images if normalized.images else None,
         stream=True,
         base_url_override=base_url_override,
+        allowed_token_ids=allowed_token_ids,
     ):
         if chunk.startswith("data: "):
             yield chunk
@@ -728,6 +733,7 @@ async def _iterate_gemini_stream(
     normalized: NormalizedGenerationRequest,
     response_model: str,
     base_url_override: Optional[str] = None,
+    allowed_token_ids: Optional[set[int]] = None,
 ):
     handler = _ensure_generation_handler()
     async for chunk in handler.handle_generation(
@@ -736,6 +742,7 @@ async def _iterate_gemini_stream(
         images=normalized.images if normalized.images else None,
         stream=True,
         base_url_override=base_url_override,
+        allowed_token_ids=allowed_token_ids,
     ):
         if chunk.startswith("data: "):
             payload_text = chunk[6:].strip()
@@ -771,8 +778,14 @@ async def _iterate_gemini_stream(
             yield event
 
 
+def _resolve_allowed_token_ids(auth_ctx: AuthContext) -> Optional[set[int]]:
+    if not auth_ctx.is_legacy and auth_ctx.allowed_accounts:
+        return {int(x) for x in auth_ctx.allowed_accounts}
+    return None
+
+
 @router.get("/v1/models")
-async def list_models(api_key: str = Depends(verify_api_key_flexible)):
+async def list_models(auth_ctx: AuthContext = Depends(verify_api_key_flexible)):
     """List available models."""
     models = [
         {
@@ -788,7 +801,7 @@ async def list_models(api_key: str = Depends(verify_api_key_flexible)):
 
 
 @router.get("/v1/models/aliases")
-async def list_model_aliases(api_key: str = Depends(verify_api_key_flexible)):
+async def list_model_aliases(auth_ctx: AuthContext = Depends(verify_api_key_flexible)):
     """List simplified model aliases for generationConfig-based resolution."""
     aliases = get_base_model_aliases()
     alias_models = []
@@ -807,7 +820,7 @@ async def list_model_aliases(api_key: str = Depends(verify_api_key_flexible)):
 
 @router.get("/v1beta/models")
 @router.get("/models")
-async def list_gemini_models(api_key: str = Depends(verify_api_key_flexible)):
+async def list_gemini_models(auth_ctx: AuthContext = Depends(verify_api_key_flexible)):
     """List available models using Gemini-compatible response shape."""
     catalog = _get_gemini_model_catalog()
     return {
@@ -820,7 +833,7 @@ async def list_gemini_models(api_key: str = Depends(verify_api_key_flexible)):
 
 @router.get("/v1beta/models/{model}")
 @router.get("/models/{model}")
-async def get_gemini_model(model: str, api_key: str = Depends(verify_api_key_flexible)):
+async def get_gemini_model(model: str, auth_ctx: AuthContext = Depends(verify_api_key_flexible)):
     """Return a single model using Gemini-compatible response shape."""
     catalog = _get_gemini_model_catalog()
     description = catalog.get(model)
@@ -837,7 +850,7 @@ async def get_gemini_model(model: str, api_key: str = Depends(verify_api_key_fle
 async def create_chat_completion(
     request: ChatCompletionRequest,
     raw_request: Request,
-    api_key: str = Depends(verify_api_key_flexible),
+    auth_ctx: AuthContext = Depends(verify_api_key_flexible),
 ):
     """OpenAI-compatible unified generation endpoint."""
     try:
@@ -846,10 +859,11 @@ async def create_chat_completion(
             raise HTTPException(status_code=400, detail="Prompt cannot be empty")
 
         request_base_url = _get_request_base_url(raw_request)
+        allowed_token_ids = _resolve_allowed_token_ids(auth_ctx)
 
         if request.stream:
             return StreamingResponse(
-                _iterate_openai_stream(normalized, request_base_url),
+                _iterate_openai_stream(normalized, request_base_url, allowed_token_ids),
                 media_type="text/event-stream",
                 headers={
                     "Cache-Control": "no-cache",
@@ -865,6 +879,7 @@ async def create_chat_completion(
                     normalized.prompt,
                     normalized.images,
                     request_base_url,
+                    allowed_token_ids,
                 )
             )
         )
@@ -882,7 +897,7 @@ async def generate_content(
     model: str,
     request: GeminiGenerateContentRequest,
     raw_request: Request,
-    api_key: str = Depends(verify_api_key_flexible),
+    auth_ctx: AuthContext = Depends(verify_api_key_flexible),
 ):
     """Gemini official generateContent endpoint."""
     try:
@@ -891,6 +906,7 @@ async def generate_content(
             raise HTTPException(status_code=400, detail="Prompt cannot be empty")
 
         request_base_url = _get_request_base_url(raw_request)
+        allowed_token_ids = _resolve_allowed_token_ids(auth_ctx)
 
         payload = _enrich_payload_with_direct_url(
             _parse_handler_result(
@@ -899,6 +915,7 @@ async def generate_content(
                     normalized.prompt,
                     normalized.images,
                     request_base_url,
+                    allowed_token_ids,
                 )
             )
         )
@@ -928,7 +945,7 @@ async def stream_generate_content(
     request: GeminiGenerateContentRequest,
     raw_request: Request,
     alt: Optional[str] = Query(None),
-    api_key: str = Depends(verify_api_key_flexible),
+    auth_ctx: AuthContext = Depends(verify_api_key_flexible),
 ):
     """Gemini official streamGenerateContent endpoint."""
     try:
@@ -937,9 +954,10 @@ async def stream_generate_content(
             raise HTTPException(status_code=400, detail="Prompt cannot be empty")
 
         request_base_url = _get_request_base_url(raw_request)
+        allowed_token_ids = _resolve_allowed_token_ids(auth_ctx)
 
         return StreamingResponse(
-            _iterate_gemini_stream(normalized, normalized.model, request_base_url),
+            _iterate_gemini_stream(normalized, normalized.model, request_base_url, allowed_token_ids),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",

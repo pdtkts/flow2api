@@ -13,6 +13,7 @@ import urllib.request
 from urllib.parse import urlparse
 from curl_cffi.requests import AsyncSession
 from ..core.auth import AuthManager
+from ..core.api_key_manager import ApiKeyManager
 from ..core.database import Database
 from ..core.config import config
 from ..services.token_manager import TokenManager
@@ -31,6 +32,7 @@ token_manager: TokenManager = None
 proxy_manager: ProxyManager = None
 db: Database = None
 concurrency_manager: Optional[ConcurrencyManager] = None
+api_key_manager: Optional[ApiKeyManager] = None
 
 # Store active admin session tokens (in production, use Redis or database)
 active_admin_tokens = set()
@@ -506,13 +508,20 @@ async def _fetch_agent_gateway_connections(base_url: str, api_key: str) -> Dict[
     return response_payload
 
 
-def set_dependencies(tm: TokenManager, pm: ProxyManager, database: Database, cm: Optional[ConcurrencyManager] = None):
+def set_dependencies(
+    tm: TokenManager,
+    pm: ProxyManager,
+    database: Database,
+    cm: Optional[ConcurrencyManager] = None,
+    akm: Optional[ApiKeyManager] = None,
+):
     """Set service instances"""
-    global token_manager, proxy_manager, db, concurrency_manager
+    global token_manager, proxy_manager, db, concurrency_manager, api_key_manager
     token_manager = tm
     proxy_manager = pm
     db = database
     concurrency_manager = cm
+    api_key_manager = akm
 
 
 # ========== Request Models ==========
@@ -585,6 +594,22 @@ class ChangePasswordRequest(BaseModel):
 
 class UpdateAPIKeyRequest(BaseModel):
     new_api_key: str
+
+
+class CreateManagedApiKeyRequest(BaseModel):
+    client_name: str
+    label: str = "default"
+    scopes: str = "*"
+    account_ids: List[int]
+    endpoint_limits: Dict[str, Dict[str, int]] = {}
+    expires_at: Optional[str] = None
+
+
+class UpdateManagedApiKeyRequest(BaseModel):
+    is_active: Optional[bool] = None
+    scopes: Optional[str] = None
+    account_ids: Optional[List[int]] = None
+    endpoint_limits: Optional[Dict[str, Dict[str, int]]] = None
 
 
 class UpdateDebugConfigRequest(BaseModel):
@@ -1496,6 +1521,65 @@ async def update_api_key(
     await db.reload_config_to_memory()
 
     return {"success": True, "message": "API Key更新成功"}
+
+
+@router.get("/api/admin/managed-apikeys")
+async def list_managed_api_keys(token: str = Depends(verify_admin_token)):
+    if not api_key_manager:
+        raise HTTPException(status_code=503, detail="API key manager not initialized")
+    keys = await db.list_api_keys()
+    return {"success": True, "keys": keys}
+
+
+@router.post("/api/admin/managed-apikeys")
+async def create_managed_api_key(
+    request: CreateManagedApiKeyRequest,
+    token: str = Depends(verify_admin_token),
+):
+    if not api_key_manager:
+        raise HTTPException(status_code=503, detail="API key manager not initialized")
+    if not request.account_ids:
+        raise HTTPException(status_code=400, detail="account_ids cannot be empty")
+    created = await api_key_manager.create_api_key(
+        client_name=request.client_name,
+        label=request.label,
+        scopes=request.scopes,
+        account_ids=request.account_ids,
+        endpoint_limits=request.endpoint_limits or {},
+        expires_at=request.expires_at,
+    )
+    return {
+        "success": True,
+        "message": "Managed API key created",
+        "key": created,
+        "warning": "Store api_key now. It is shown only once.",
+    }
+
+
+@router.put("/api/admin/managed-apikeys/{key_id}")
+async def update_managed_api_key(
+    key_id: int,
+    request: UpdateManagedApiKeyRequest,
+    token: str = Depends(verify_admin_token),
+):
+    await db.update_api_key(
+        key_id,
+        is_active=request.is_active,
+        scopes=request.scopes,
+        account_ids=request.account_ids,
+        endpoint_limits=request.endpoint_limits,
+    )
+    return {"success": True, "message": "Managed API key updated"}
+
+
+@router.get("/api/admin/managed-apikeys/audit")
+async def list_managed_api_key_audit(
+    key_id: Optional[int] = None,
+    limit: int = 200,
+    token: str = Depends(verify_admin_token),
+):
+    logs = await db.list_api_key_audit_logs(limit=limit, key_id=key_id)
+    return {"success": True, "logs": logs}
 
 
 @router.post("/api/admin/debug")

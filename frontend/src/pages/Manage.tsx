@@ -7,9 +7,10 @@ import { SystemSettings } from "../components/manage/SystemSettings"
 import { RequestLogs } from "../components/manage/RequestLogs"
 import { CacheManagement } from "../components/manage/CacheManagement"
 import { AgentGateway } from "../components/manage/AgentGateway"
+import { ApiKeyManagement } from "../components/manage/ApiKeyManagement"
 import { cn } from "@/lib/utils"
 
-const MANAGE_TABS = ["tokens", "settings", "logs", "cache", "agent"] as const
+const MANAGE_TABS = ["tokens", "apikeys", "settings", "logs", "cache", "agent"] as const
 type ManageTab = (typeof MANAGE_TABS)[number]
 
 function parseManageTab(raw: string | null): ManageTab {
@@ -46,6 +47,14 @@ export default function Manage() {
               )}
             >
               Token management
+            </TabsTrigger>
+            <TabsTrigger
+              value="apikeys"
+              className={cn(
+                "rounded-none border-b-2 border-transparent px-1 py-3 data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:shadow-none"
+              )}
+            >
+              API key manager
             </TabsTrigger>
             <TabsTrigger
               value="settings"
@@ -98,6 +107,11 @@ export default function Manage() {
         <TabsContent value="settings" className="mt-0 outline-none focus-visible:ring-0">
           <div className="animate-in fade-in duration-300">
             <SystemSettings active={true} />
+          </div>
+        </TabsContent>
+        <TabsContent value="apikeys" className="mt-0 outline-none focus-visible:ring-0">
+          <div className="animate-in fade-in duration-300">
+            <ApiKeyManagement />
           </div>
         </TabsContent>
         <TabsContent value="logs" className="mt-0 outline-none focus-visible:ring-0">

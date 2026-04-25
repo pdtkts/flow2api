@@ -396,6 +396,84 @@ class Database:
                     )
                 """)
 
+            if not await self._table_exists(db, "api_clients"):
+                print("  ✓ Creating missing table: api_clients")
+                await db.execute("""
+                    CREATE TABLE api_clients (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        name TEXT NOT NULL UNIQUE,
+                        is_active BOOLEAN DEFAULT 1,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+
+            if not await self._table_exists(db, "api_keys"):
+                print("  ✓ Creating missing table: api_keys")
+                await db.execute("""
+                    CREATE TABLE api_keys (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        client_id INTEGER NOT NULL,
+                        label TEXT NOT NULL,
+                        key_prefix TEXT NOT NULL,
+                        key_hash TEXT NOT NULL UNIQUE,
+                        scopes TEXT DEFAULT '*',
+                        is_active BOOLEAN DEFAULT 1,
+                        expires_at TIMESTAMP,
+                        last_used_at TIMESTAMP,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (client_id) REFERENCES api_clients(id)
+                    )
+                """)
+
+            if not await self._table_exists(db, "api_key_accounts"):
+                print("  ✓ Creating missing table: api_key_accounts")
+                await db.execute("""
+                    CREATE TABLE api_key_accounts (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        api_key_id INTEGER NOT NULL,
+                        account_id INTEGER NOT NULL,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(api_key_id, account_id),
+                        FOREIGN KEY (api_key_id) REFERENCES api_keys(id)
+                    )
+                """)
+
+            if not await self._table_exists(db, "api_key_rate_limits"):
+                print("  ✓ Creating missing table: api_key_rate_limits")
+                await db.execute("""
+                    CREATE TABLE api_key_rate_limits (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        api_key_id INTEGER NOT NULL,
+                        endpoint TEXT NOT NULL,
+                        rpm INTEGER DEFAULT 0,
+                        rph INTEGER DEFAULT 0,
+                        burst INTEGER DEFAULT 0,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(api_key_id, endpoint),
+                        FOREIGN KEY (api_key_id) REFERENCES api_keys(id)
+                    )
+                """)
+
+            if not await self._table_exists(db, "api_key_audit_logs"):
+                print("  ✓ Creating missing table: api_key_audit_logs")
+                await db.execute("""
+                    CREATE TABLE api_key_audit_logs (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        api_key_id INTEGER,
+                        endpoint TEXT NOT NULL,
+                        account_id INTEGER,
+                        status_code INTEGER NOT NULL,
+                        detail TEXT,
+                        ip TEXT,
+                        user_agent TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (api_key_id) REFERENCES api_keys(id)
+                    )
+                """)
+
             # ========== Step 2: Add missing columns to existing tables ==========
             # Check and add missing columns to tokens table
             if await self._table_exists(db, "tokens"):
@@ -761,12 +839,81 @@ class Database:
                 )
             """)
 
+            # API key manager tables
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS api_clients (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE,
+                    is_active BOOLEAN DEFAULT 1,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS api_keys (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    client_id INTEGER NOT NULL,
+                    label TEXT NOT NULL,
+                    key_prefix TEXT NOT NULL,
+                    key_hash TEXT NOT NULL UNIQUE,
+                    scopes TEXT DEFAULT '*',
+                    is_active BOOLEAN DEFAULT 1,
+                    expires_at TIMESTAMP,
+                    last_used_at TIMESTAMP,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (client_id) REFERENCES api_clients(id)
+                )
+            """)
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS api_key_accounts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    api_key_id INTEGER NOT NULL,
+                    account_id INTEGER NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(api_key_id, account_id),
+                    FOREIGN KEY (api_key_id) REFERENCES api_keys(id)
+                )
+            """)
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS api_key_rate_limits (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    api_key_id INTEGER NOT NULL,
+                    endpoint TEXT NOT NULL,
+                    rpm INTEGER DEFAULT 0,
+                    rph INTEGER DEFAULT 0,
+                    burst INTEGER DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(api_key_id, endpoint),
+                    FOREIGN KEY (api_key_id) REFERENCES api_keys(id)
+                )
+            """)
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS api_key_audit_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    api_key_id INTEGER,
+                    endpoint TEXT NOT NULL,
+                    account_id INTEGER,
+                    status_code INTEGER NOT NULL,
+                    detail TEXT,
+                    ip TEXT,
+                    user_agent TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (api_key_id) REFERENCES api_keys(id)
+                )
+            """)
+
             # Create indexes
             await db.execute("CREATE INDEX IF NOT EXISTS idx_task_id ON tasks(task_id)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_token_st ON tokens(st)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_project_id ON projects(project_id)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_tokens_email ON tokens(email)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_tokens_is_active_last_used_at ON tokens(is_active, last_used_at)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_api_keys_client_id ON api_keys(client_id)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_api_key_accounts_key_id ON api_key_accounts(api_key_id)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_api_key_rl_key_endpoint ON api_key_rate_limits(api_key_id, endpoint)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_api_key_audit_created_at ON api_key_audit_logs(created_at DESC)")
 
             # Migrate request_logs table if needed
             await self._migrate_request_logs(db)
@@ -1924,3 +2071,257 @@ class Database:
                 """, (connection_token, auto_enable_on_update))
 
             await db.commit()
+
+    # API key manager operations
+    async def _get_or_create_api_client(self, client_name: str) -> int:
+        async with self._connect(write=True) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("SELECT id FROM api_clients WHERE name = ?", (client_name,))
+            row = await cursor.fetchone()
+            if row:
+                return int(row["id"])
+            cursor = await db.execute(
+                "INSERT INTO api_clients (name, is_active) VALUES (?, 1)",
+                (client_name,),
+            )
+            await db.commit()
+            return int(cursor.lastrowid)
+
+    async def create_client_api_key(
+        self,
+        *,
+        client_name: str,
+        label: str,
+        key_prefix: str,
+        key_hash: str,
+        scopes: str,
+        account_ids: List[int],
+        endpoint_limits: Dict[str, Dict[str, int]],
+        expires_at: Optional[str],
+    ) -> int:
+        client_id = await self._get_or_create_api_client(client_name)
+        async with self._connect(write=True) as db:
+            cursor = await db.execute(
+                """
+                INSERT INTO api_keys (client_id, label, key_prefix, key_hash, scopes, is_active, expires_at)
+                VALUES (?, ?, ?, ?, ?, 1, ?)
+                """,
+                (client_id, label, key_prefix, key_hash, scopes, expires_at),
+            )
+            key_id = int(cursor.lastrowid)
+
+            for account_id in sorted({int(x) for x in account_ids if int(x) > 0}):
+                await db.execute(
+                    "INSERT OR IGNORE INTO api_key_accounts (api_key_id, account_id) VALUES (?, ?)",
+                    (key_id, account_id),
+                )
+
+            for endpoint, values in (endpoint_limits or {}).items():
+                rpm = int((values or {}).get("rpm") or 0)
+                rph = int((values or {}).get("rph") or 0)
+                burst = int((values or {}).get("burst") or 0)
+                await db.execute(
+                    """
+                    INSERT OR REPLACE INTO api_key_rate_limits (api_key_id, endpoint, rpm, rph, burst, updated_at)
+                    VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    """,
+                    (key_id, endpoint, rpm, rph, burst),
+                )
+
+            await db.commit()
+            return key_id
+
+    async def get_client_api_key_by_hash(self, key_hash: str) -> Optional[Dict[str, Any]]:
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT
+                    k.*,
+                    c.name AS client_name,
+                    strftime('%s', k.expires_at) AS expires_unix
+                FROM api_keys k
+                JOIN api_clients c ON c.id = k.client_id
+                WHERE k.key_hash = ?
+                LIMIT 1
+                """,
+                (key_hash,),
+            )
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+    async def get_api_key_account_ids(self, key_id: int) -> List[int]:
+        async with self._connect() as db:
+            cursor = await db.execute(
+                "SELECT account_id FROM api_key_accounts WHERE api_key_id = ? ORDER BY account_id ASC",
+                (key_id,),
+            )
+            rows = await cursor.fetchall()
+            return [int(row[0]) for row in rows]
+
+    async def get_api_key_rate_limits(self, key_id: int, endpoint: str) -> Dict[str, Any]:
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT rpm, rph, burst
+                FROM api_key_rate_limits
+                WHERE api_key_id = ? AND endpoint IN (?, '*')
+                ORDER BY CASE WHEN endpoint = ? THEN 0 ELSE 1 END
+                LIMIT 1
+                """,
+                (key_id, endpoint, endpoint),
+            )
+            row = await cursor.fetchone()
+            return dict(row) if row else {}
+
+    async def touch_api_key_usage(self, key_id: int):
+        async with self._connect(write=True) as db:
+            await db.execute(
+                "UPDATE api_keys SET last_used_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (key_id,),
+            )
+            await db.commit()
+
+    async def insert_api_key_audit_log(
+        self,
+        *,
+        api_key_id: Optional[int],
+        endpoint: str,
+        account_id: Optional[int],
+        status_code: int,
+        detail: str,
+        ip: str,
+        user_agent: str,
+    ):
+        async with self._connect(write=True) as db:
+            await db.execute(
+                """
+                INSERT INTO api_key_audit_logs (api_key_id, endpoint, account_id, status_code, detail, ip, user_agent)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (api_key_id, endpoint, account_id, status_code, detail[:300], ip[:120], user_agent[:200]),
+            )
+            await db.commit()
+
+    async def list_api_keys(self) -> List[Dict[str, Any]]:
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT
+                    k.id,
+                    c.name AS client_name,
+                    k.label,
+                    k.key_prefix,
+                    k.scopes,
+                    k.is_active,
+                    k.expires_at,
+                    k.last_used_at,
+                    k.created_at
+                FROM api_keys k
+                JOIN api_clients c ON c.id = k.client_id
+                ORDER BY k.created_at DESC
+                """
+            )
+            rows = [dict(row) for row in await cursor.fetchall()]
+
+            for row in rows:
+                row["account_ids"] = await self.get_api_key_account_ids(int(row["id"]))
+            return rows
+
+    async def update_api_key(
+        self,
+        key_id: int,
+        *,
+        is_active: Optional[bool] = None,
+        scopes: Optional[str] = None,
+        account_ids: Optional[List[int]] = None,
+        endpoint_limits: Optional[Dict[str, Dict[str, int]]] = None,
+    ):
+        async with self._connect(write=True) as db:
+            if is_active is not None:
+                await db.execute(
+                    "UPDATE api_keys SET is_active = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (1 if is_active else 0, key_id),
+                )
+            if scopes is not None:
+                await db.execute(
+                    "UPDATE api_keys SET scopes = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (scopes, key_id),
+                )
+            if account_ids is not None:
+                await db.execute("DELETE FROM api_key_accounts WHERE api_key_id = ?", (key_id,))
+                for account_id in sorted({int(x) for x in account_ids if int(x) > 0}):
+                    await db.execute(
+                        "INSERT OR IGNORE INTO api_key_accounts (api_key_id, account_id) VALUES (?, ?)",
+                        (key_id, account_id),
+                    )
+            if endpoint_limits is not None:
+                await db.execute("DELETE FROM api_key_rate_limits WHERE api_key_id = ?", (key_id,))
+                for endpoint, values in endpoint_limits.items():
+                    await db.execute(
+                        """
+                        INSERT INTO api_key_rate_limits (api_key_id, endpoint, rpm, rph, burst)
+                        VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (
+                            key_id,
+                            endpoint,
+                            int((values or {}).get("rpm") or 0),
+                            int((values or {}).get("rph") or 0),
+                            int((values or {}).get("burst") or 0),
+                        ),
+                    )
+            await db.commit()
+
+    async def list_api_key_audit_logs(self, limit: int = 200, key_id: Optional[int] = None) -> List[Dict[str, Any]]:
+        safe_limit = max(1, min(int(limit or 200), 1000))
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            if key_id is not None:
+                cursor = await db.execute(
+                    """
+                    SELECT
+                        l.id,
+                        l.api_key_id,
+                        k.key_prefix,
+                        k.label,
+                        l.endpoint,
+                        l.account_id,
+                        l.status_code,
+                        l.detail,
+                        l.ip,
+                        l.user_agent,
+                        l.created_at
+                    FROM api_key_audit_logs l
+                    LEFT JOIN api_keys k ON k.id = l.api_key_id
+                    WHERE l.api_key_id = ?
+                    ORDER BY l.created_at DESC
+                    LIMIT ?
+                    """,
+                    (key_id, safe_limit),
+                )
+            else:
+                cursor = await db.execute(
+                    """
+                    SELECT
+                        l.id,
+                        l.api_key_id,
+                        k.key_prefix,
+                        k.label,
+                        l.endpoint,
+                        l.account_id,
+                        l.status_code,
+                        l.detail,
+                        l.ip,
+                        l.user_agent,
+                        l.created_at
+                    FROM api_key_audit_logs l
+                    LEFT JOIN api_keys k ON k.id = l.api_key_id
+                    ORDER BY l.created_at DESC
+                    LIMIT ?
+                    """,
+                    (safe_limit,),
+                )
+            return [dict(row) for row in await cursor.fetchall()]

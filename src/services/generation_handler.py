@@ -776,7 +776,8 @@ class GenerationHandler:
         prompt: str,
         images: Optional[List[bytes]] = None,
         stream: bool = False,
-        base_url_override: Optional[str] = None
+        base_url_override: Optional[str] = None,
+        allowed_token_ids: Optional[set[int]] = None,
     ) -> AsyncGenerator:
         """统一生成入口
 
@@ -851,6 +852,7 @@ class GenerationHandler:
                 reserve=False,
                 enforce_concurrency_filter=False,
                 track_pending=True,
+                allowed_token_ids=allowed_token_ids,
             )
         else:
             token = await self.load_balancer.select_token(
@@ -859,6 +861,7 @@ class GenerationHandler:
                 reserve=False,
                 enforce_concurrency_filter=False,
                 track_pending=True,
+                allowed_token_ids=allowed_token_ids,
             )
         perf_trace["token_select_ms"] = int((time.time() - token_select_started_at) * 1000)
 

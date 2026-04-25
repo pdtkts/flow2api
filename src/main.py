@@ -19,6 +19,8 @@ from .services.load_balancer import LoadBalancer
 from .services.concurrency_manager import ConcurrencyManager
 from .services.generation_handler import GenerationHandler
 from .api import routes, admin
+from .core.api_key_manager import ApiKeyManager
+from .core.auth import set_api_key_manager
 
 
 def _normalize_host(host: str) -> str:
@@ -253,10 +255,12 @@ generation_handler = GenerationHandler(
     concurrency_manager,
     proxy_manager  # 添加 proxy_manager 参数
 )
+managed_api_key_manager = ApiKeyManager(db, legacy_api_key_provider=lambda: config.api_key)
 
 # Set dependencies
 routes.set_generation_handler(generation_handler)
-admin.set_dependencies(token_manager, proxy_manager, db, concurrency_manager)
+admin.set_dependencies(token_manager, proxy_manager, db, concurrency_manager, managed_api_key_manager)
+set_api_key_manager(managed_api_key_manager)
 
 # Create FastAPI app
 app = FastAPI(

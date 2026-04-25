@@ -2,12 +2,19 @@
 
 import bcrypt
 from typing import Optional
-from fastapi import Header, HTTPException, Query, Security
+from fastapi import Header, HTTPException, Query, Security, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from .config import config
+from .api_key_manager import AuthContext
 
 security = HTTPBearer()
 optional_security = HTTPBearer(auto_error=False)
+api_key_manager = None
+
+
+def set_api_key_manager(manager):
+    global api_key_manager
+    api_key_manager = manager
 
 class AuthManager:
     """Authentication manager"""
@@ -42,10 +49,11 @@ async def verify_api_key_header(credentials: HTTPAuthorizationCredentials = Secu
 
 
 async def verify_api_key_flexible(
+    request: Request,
     credentials: Optional[HTTPAuthorizationCredentials] = Security(optional_security),
     x_goog_api_key: Optional[str] = Header(None, alias="x-goog-api-key"),
     key: Optional[str] = Query(None),
-) -> str:
+) -> AuthContext:
     """Verify API key from Authorization header, x-goog-api-key header, or key query param."""
     api_key = None
 
@@ -56,7 +64,60 @@ async def verify_api_key_flexible(
     elif key:
         api_key = key
 
-    if not api_key or not AuthManager.verify_api_key(api_key):
+    if not api_key:
         raise HTTPException(status_code=401, detail="Invalid API key")
+    endpoint = request.url.path
+    require_assignment = endpoint in {
+        "/v1/chat/completions",
+    } or endpoint.endswith(":generateContent") or endpoint.endswith(":streamGenerateContent")
+    if api_key_manager is None:
+        if not AuthManager.verify_api_key(api_key):
+            raise HTTPException(status_code=401, detail="Invalid API key")
+        return AuthContext(
+            key_id=None,
+            key_label="legacy-global",
+            is_legacy=True,
+            allowed_accounts=set(),
+            scopes={"*"},
+        )
 
-    return api_key
+    try:
+        context = await api_key_manager.authenticate(
+            api_key,
+            endpoint=endpoint,
+            require_assignment=require_assignment,
+        )
+        await api_key_manager.db.insert_api_key_audit_log(
+            api_key_id=context.key_id,
+            endpoint=endpoint,
+            account_id=None,
+            status_code=200,
+            detail="ok",
+            ip=(request.client.host if request.client else ""),
+            user_agent=request.headers.get("user-agent", ""),
+        )
+        return context
+    except PermissionError as exc:
+        await api_key_manager.db.insert_api_key_audit_log(
+            api_key_id=None,
+            endpoint=endpoint,
+            account_id=None,
+            status_code=403 if require_assignment else 401,
+            detail=str(exc),
+            ip=(request.client.host if request.client else ""),
+            user_agent=request.headers.get("user-agent", ""),
+        )
+        if "accounts assigned" in str(exc).lower():
+            raise HTTPException(status_code=403, detail=str(exc))
+        raise HTTPException(status_code=401, detail=str(exc))
+    except RuntimeError as exc:
+        await api_key_manager.db.insert_api_key_audit_log(
+            api_key_id=None,
+            endpoint=endpoint,
+            account_id=None,
+            status_code=429,
+            detail=str(exc),
+            ip=(request.client.host if request.client else ""),
+            user_agent=request.headers.get("user-agent", ""),
+        )
+        raise HTTPException(status_code=429, detail=str(exc))
