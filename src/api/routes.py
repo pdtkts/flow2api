@@ -3,6 +3,7 @@
 from dataclasses import dataclass, replace
 from typing import Any, Dict, List, Optional, Set, Tuple
 import base64
+import random
 import json
 import mimetypes
 import re
@@ -970,9 +971,17 @@ async def create_flow_project(
     if auth_ctx.key_id is None:
         raise HTTPException(status_code=403, detail="Managed API key required")
     _require_managed_projects_write(auth_ctx)
-    account_id = int(body.account_id)
-    if account_id not in auth_ctx.allowed_accounts:
-        raise HTTPException(status_code=400, detail="account_id is not assigned to this API key")
+    if not auth_ctx.allowed_accounts:
+        raise HTTPException(
+            status_code=400,
+            detail="No accounts assigned to this API key",
+        )
+    if body.account_id is not None:
+        account_id = int(body.account_id)
+        if account_id not in auth_ctx.allowed_accounts:
+            raise HTTPException(status_code=400, detail="account_id is not assigned to this API key")
+    else:
+        account_id = random.choice(list(auth_ctx.allowed_accounts))
 
     handler = _ensure_generation_handler()
     title = (body.title or "").strip() or None
