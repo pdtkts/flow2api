@@ -74,10 +74,30 @@ function parseTokenIdsFromEnv() {
   return ns.length ? ns : null;
 }
 
+function parseAgentTokenIdFromEnvOrConfig() {
+  const envValue = (process.env.AGENT_TOKEN_ID || FILE_CONFIG.agentTokenId || "").trim();
+  if (envValue) {
+    return envValue;
+  }
+  const raw = (process.env.AGENT_TOKEN || FILE_CONFIG.agentToken || "").trim();
+  if (!raw || !raw.startsWith("{")) {
+    return "";
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object" && typeof parsed.licenseTokenId === "string") {
+      return parsed.licenseTokenId.trim();
+    }
+  } catch {
+    // ignore json parse errors
+  }
+  return "";
+}
+
 /**
  * Accepts AGENT_TOKEN in either:
  * - raw token string
- * - JSON object string containing { key, licenseId, machineId, ... } from a client API response
+ * - JSON object string containing { licenseToken, licenseTokenId, ... } from a client API response
  * The gateway only verifies the token value itself; ids are useful for app-side bookkeeping.
  */
 function parseAgentTokenFromEnvOrConfig() {
@@ -88,8 +108,13 @@ function parseAgentTokenFromEnvOrConfig() {
   if (raw.startsWith("{")) {
     try {
       const parsed = JSON.parse(raw);
-      if (parsed && typeof parsed === "object" && typeof parsed.key === "string" && parsed.key.trim()) {
-        return parsed.key.trim();
+      if (parsed && typeof parsed === "object") {
+        if (typeof parsed.licenseToken === "string" && parsed.licenseToken.trim()) {
+          return parsed.licenseToken.trim();
+        }
+        if (typeof parsed.key === "string" && parsed.key.trim()) {
+          return parsed.key.trim();
+        }
       }
     } catch {
       // fall through to raw handling
@@ -103,7 +128,9 @@ const FILE_CONFIG = {
   // WebSocket to agent-gateway (HTTPS https://agents.prismacreative.online/ is the same host; path is /ws/agents)
   wss: "wss://agents.prismacreative.online/ws/agents",
   // Keygen-derived agent token (jwt/introspection token)
-  agentToken: "activ-b357ff2159b5f3b81e1fbae559697fb1v3",
+  agentToken: "activ-2ce0a6dfe86dff499bd8317eda049532v3",
+  // Keygen token resource id (UUID). Required for introspection mode.
+  agentTokenId: "",
   // Optional machine/license hint (server may ignore; useful for debugging/audit trails).
   agentId: "",
   tokenIds: [1],
@@ -118,6 +145,7 @@ const CONFIG = {
   ...FILE_CONFIG,
   wss: (process.env.AGENT_GATEWAY_WSS || FILE_CONFIG.wss).trim(),
   agentToken: parseAgentTokenFromEnvOrConfig(),
+  agentTokenId: parseAgentTokenIdFromEnvOrConfig(),
   agentId: (process.env.AGENT_ID || FILE_CONFIG.agentId || "").trim(),
   tokenIds: parseTokenIdsFromEnv() ?? FILE_CONFIG.tokenIds,
 };
@@ -222,6 +250,15 @@ function main() {
     );
     process.exit(1);
   }
+  if (!CONFIG.agentTokenId) {
+    console.error(
+      "Missing AGENT_TOKEN_ID. In introspection mode set one of:\n" +
+        "  PowerShell:  $env:AGENT_TOKEN_ID=\"<licenseTokenId>\"; npm start\n" +
+        "  bash:        export AGENT_TOKEN_ID=... && npm start\n" +
+        "  Or include licenseTokenId in AGENT_TOKEN JSON, or set FILE_CONFIG.agentTokenId"
+    );
+    process.exit(1);
+  }
   if (!Array.isArray(CONFIG.tokenIds) || CONFIG.tokenIds.length === 0) {
     console.error("Set FILE_CONFIG.tokenIds or AGENT_TOKEN_IDS (e.g. 1 or 1,2)");
     process.exit(1);
@@ -233,6 +270,7 @@ function main() {
     const reg = {
       type: "register",
       agent_token: CONFIG.agentToken,
+      agent_token_id: CONFIG.agentTokenId,
       agent_id: CONFIG.agentId,
       token_ids: CONFIG.tokenIds,
     };

@@ -15,6 +15,8 @@ class WsRegister(BaseModel):
     device_token: str = ""
     # Keygen-backed identity token (keygen/dual mode).
     agent_token: str = ""
+    # Optional Keygen token resource id (UUID). Preferred for introspection lookup.
+    agent_token_id: str = ""
     # Optional machine or license identifier (for introspection fallback / debugging).
     agent_id: str = ""
     # Client-side hint only; server should intersect against authorized ownership map.

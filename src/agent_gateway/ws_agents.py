@@ -56,7 +56,8 @@ async def _resolve_identity(data: dict[str, Any], s) -> AgentIdentity:
     agent_token = str(data.get("agent_token") or "").strip()
     if not agent_token:
         raise PermissionError("agent_token required")
-    identity = await verify_agent_token(agent_token, s)
+    agent_token_id = str(data.get("agent_token_id") or "").strip()
+    identity = await verify_agent_token(agent_token, agent_token_id, s)
     return AgentIdentity(
         auth_method="keygen",
         subject=identity.subject,

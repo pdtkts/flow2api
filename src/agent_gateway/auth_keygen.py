@@ -1,4 +1,3 @@
-import hashlib
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote
@@ -83,59 +82,89 @@ def verify_keygen_jwt(agent_token: str, s: Settings) -> KeygenIdentity:
     return _extract_identity(claims)
 
 
-def _stable_token_hash(v: str) -> str:
-    return hashlib.sha256(v.encode("utf-8")).hexdigest()
-
-
-async def verify_keygen_introspection(agent_token: str, s: Settings) -> KeygenIdentity:
-    if not s.keygen_api_token:
-        raise ValueError("KEYGEN_API_TOKEN not configured")
-    token_hash = _stable_token_hash(agent_token)
-    base_url = s.keygen_api_url.rstrip("/")
-    # Keygen account-scoped endpoints are required by many setups.
-    if s.keygen_account:
-        account = quote(s.keygen_account.strip(), safe="")
-        endpoint = f"{base_url}/v1/accounts/{account}/tokens/{token_hash}"
-    else:
-        endpoint = f"{base_url}/v1/tokens/{token_hash}"
-    headers = {
-        "Authorization": f"Bearer {s.keygen_api_token}",
-        "Accept": "application/vnd.api+json",
-    }
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        r = await client.get(endpoint, headers=headers)
-    if r.status_code >= 400:
-        detail = (r.text or "").strip()
-        if len(detail) > 300:
-            detail = detail[:300] + "..."
-        raise ValueError(f"keygen introspection failed status={r.status_code}: {detail}")
-    payload = r.json()
+def _claims_from_introspection_payload(payload: Any) -> dict[str, Any]:
     data = payload.get("data") if isinstance(payload, dict) else None
     attrs = data.get("attributes") if isinstance(data, dict) else None
+    rel = data.get("relationships") if isinstance(data, dict) else None
     if not isinstance(attrs, dict):
         raise ValueError("keygen introspection malformed response")
     if attrs.get("revoked") or attrs.get("expired"):
         raise ValueError("keygen token revoked or expired")
-    sub = str(
-        attrs.get("machine")
-        or attrs.get("license")
-        or attrs.get("id")
-        or ""
-    ).strip()
+
+    machine = attrs.get("machine") or ""
+    license_value = attrs.get("license") or ""
+    account = attrs.get("account") or ""
+
+    if isinstance(rel, dict):
+        bearer = rel.get("bearer")
+        if isinstance(bearer, dict):
+            bdata = bearer.get("data")
+            if isinstance(bdata, dict):
+                btype = str(bdata.get("type") or "").strip().lower()
+                bid = str(bdata.get("id") or "").strip()
+                if btype == "machines" and bid and not machine:
+                    machine = bid
+                if btype == "licenses" and bid and not license_value:
+                    license_value = bid
+        acc_rel = rel.get("account")
+        if isinstance(acc_rel, dict):
+            adata = acc_rel.get("data")
+            if isinstance(adata, dict) and not account:
+                account = str(adata.get("id") or "").strip()
+
+    sub = str(machine or license_value or attrs.get("id") or "").strip()
     if not sub:
         raise ValueError("keygen introspection missing subject")
-    claims = {
+    return {
         "sub": sub,
-        "machine": attrs.get("machine") or "",
-        "license": attrs.get("license") or "",
-        "account": attrs.get("account") or "",
+        "machine": str(machine or "").strip(),
+        "license": str(license_value or "").strip(),
+        "account": str(account or "").strip(),
     }
+
+
+async def verify_keygen_introspection(agent_token: str, agent_token_id: str, s: Settings) -> KeygenIdentity:
+    if not s.keygen_api_token:
+        raise ValueError("KEYGEN_API_TOKEN not configured")
+
+    base_url = s.keygen_api_url.rstrip("/")
+    token_id = (agent_token_id or "").strip()
+    if token_id and s.keygen_account:
+        account = quote(s.keygen_account.strip(), safe="")
+        endpoint = f"{base_url}/v1/accounts/{account}/tokens/{quote(token_id, safe='')}"
+        # First, authenticate as the token itself (proof-of-possession).
+        candidate_headers = [
+            {"Authorization": f"Bearer {agent_token}", "Accept": "application/vnd.api+json"},
+            {"Authorization": f"Bearer {s.keygen_api_token}", "Accept": "application/vnd.api+json"},
+        ]
+    elif s.keygen_account and token_id:
+        raise ValueError("KEYGEN_ACCOUNT required when agent_token_id is provided")
+    else:
+        raise ValueError("agent_token_id required in introspection mode")
+
+    last_error: tuple[int, str] | None = None
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        payload = None
+        for headers in candidate_headers:
+            r = await client.get(endpoint, headers=headers)
+            if r.status_code < 400:
+                payload = r.json()
+                break
+            detail = (r.text or "").strip()
+            if len(detail) > 300:
+                detail = detail[:300] + "..."
+            last_error = (r.status_code, detail)
+        if payload is None:
+            status, detail = last_error or (500, "unknown keygen error")
+            raise ValueError(f"keygen introspection failed status={status}: {detail}")
+
+    claims = _claims_from_introspection_payload(payload)
     return _extract_identity(claims)
 
 
-async def verify_agent_token(agent_token: str, s: Settings) -> KeygenIdentity:
+async def verify_agent_token(agent_token: str, agent_token_id: str, s: Settings) -> KeygenIdentity:
     if not agent_token:
         raise ValueError("agent_token required")
     if s.keygen_verify_mode == "introspection":
-        return await verify_keygen_introspection(agent_token, s)
+        return await verify_keygen_introspection(agent_token, agent_token_id, s)
     return verify_keygen_jwt(agent_token, s)
