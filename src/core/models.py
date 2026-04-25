@@ -54,6 +54,7 @@ class Project(BaseModel):
     id: Optional[int] = None
     project_id: str  # VideoFX项目UUID
     token_id: int  # 关联的Token ID
+    api_key_id: Optional[int] = None  # 创建该项目的 API key
     project_name: str  # 项目名称
     tool_name: str = "PINHOLE"  # 工具名称,固定为PINHOLE
     is_active: bool = True
@@ -85,6 +86,7 @@ class Task(BaseModel):
     id: Optional[int] = None
     task_id: str  # Flow API返回的operation name
     token_id: int
+    api_key_id: Optional[int] = None
     model: str
     prompt: str
     status: str  # processing, completed, failed
@@ -101,6 +103,7 @@ class RequestLog(BaseModel):
 
     id: Optional[int] = None
     token_id: Optional[int] = None
+    api_key_id: Optional[int] = None
     operation: str
     request_body: Optional[str] = None
     response_body: Optional[str] = None

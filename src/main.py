@@ -64,7 +64,7 @@ def _path_allowed_on_api_only_host(path: str) -> bool:
     - OpenAI / Chat Completions style: /v1/chat/completions, /v1/models, /v1/models/aliases, …
     - Gemini (Google) style: /v1beta/models/…:generateContent, :streamGenerateContent, list models, …
     - Same body on alternate paths: /models, /models/{m}:generateContent, …
-    - Cached media, discovery, liveness: /tmp, /openapi.json, /health
+    - Cached media (authenticated), discovery, liveness: /api/cache, /openapi.json, /health
     """
     if path in ("/openapi.json", "/health"):
         return True
@@ -72,7 +72,7 @@ def _path_allowed_on_api_only_host(path: str) -> bool:
         return True
     if path.startswith("/models/") or path == "/models":
         return True
-    if path.startswith("/tmp/"):
+    if path.startswith("/api/cache/"):
         return True
     return False
 
@@ -283,11 +283,6 @@ app.add_middleware(
 # Include routers
 app.include_router(routes.router)
 app.include_router(admin.router)
-
-# Static files - serve tmp directory for cached files
-tmp_dir = Path(__file__).parent.parent / "tmp"
-tmp_dir.mkdir(exist_ok=True)
-app.mount("/tmp", StaticFiles(directory=str(tmp_dir)), name="tmp")
 
 # HTML routes for frontend
 static_path = Path(__file__).parent.parent / "static"

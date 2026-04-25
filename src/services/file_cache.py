@@ -25,6 +25,7 @@ class FileCache:
         default_timeout: int = 7200,
         proxy_manager=None,
         flow_client=None,
+        db=None,
     ):
         """
         Initialize file cache
@@ -39,6 +40,7 @@ class FileCache:
         self.default_timeout = max(0, int(default_timeout))
         self.proxy_manager = proxy_manager
         self.flow_client = flow_client
+        self.db = db
         self._cleanup_task = None
         self._download_locks: Dict[str, asyncio.Lock] = {}
 
@@ -256,10 +258,11 @@ class FileCache:
                 response_text=""
             )
 
-    def _generate_cache_filename(self, url: str, media_type: str) -> str:
+    def _generate_cache_filename(self, url: str, media_type: str, api_key_id: Optional[int] = None) -> str:
         """Generate unique filename for cached file"""
-        # Use URL hash as filename
-        url_hash = hashlib.md5(url.encode()).hexdigest()
+        # Bind cache entries to API key to avoid cross-key sharing.
+        digest_source = f"{api_key_id or 0}:{url}"
+        url_hash = hashlib.md5(digest_source.encode()).hexdigest()
         ext = self._guess_extension(url, media_type)
 
         return f"{url_hash}{ext}"
@@ -279,7 +282,13 @@ class FileCache:
 
         return message
 
-    async def download_and_cache(self, url: str, media_type: str) -> str:
+    async def download_and_cache(
+        self,
+        url: str,
+        media_type: str,
+        api_key_id: Optional[int] = None,
+        token_id: Optional[int] = None,
+    ) -> str:
         """
         Download file from URL and cache it locally
 
@@ -290,7 +299,7 @@ class FileCache:
         Returns:
             Local cache filename
         """
-        filename = self._generate_cache_filename(url, media_type)
+        filename = self._generate_cache_filename(url, media_type, api_key_id=api_key_id)
         file_path = self.cache_dir / filename
         download_lock = self._download_locks.setdefault(filename, asyncio.Lock())
 
@@ -298,10 +307,24 @@ class FileCache:
             # Check if already cached and not expired
             if file_path.exists():
                 if self._is_cleanup_disabled():
+                    await self._record_cache_metadata(
+                        filename=filename,
+                        api_key_id=api_key_id,
+                        token_id=token_id,
+                        media_type=media_type,
+                        source_url=url,
+                    )
                     return filename
                 file_age = time.time() - file_path.stat().st_mtime
                 if file_age < self.default_timeout:
                     debug_logger.log_info(f"Cache hit: {filename}")
+                    await self._record_cache_metadata(
+                        filename=filename,
+                        api_key_id=api_key_id,
+                        token_id=token_id,
+                        media_type=media_type,
+                        source_url=url,
+                    )
                     return filename
                 try:
                     file_path.unlink()
@@ -329,6 +352,13 @@ class FileCache:
 
                     if response.status_code == 200 and response.content:
                         self._write_cached_content(file_path, response.content)
+                        await self._record_cache_metadata(
+                            filename=filename,
+                            api_key_id=api_key_id,
+                            token_id=token_id,
+                            media_type=media_type,
+                            source_url=url,
+                        )
                         debug_logger.log_info(
                             f"File cached (curl_cffi): {filename} ({len(response.content)} bytes)"
                         )
@@ -378,6 +408,13 @@ class FileCache:
                     file_size = file_path.stat().st_size
                     if file_size > 0:
                         debug_logger.log_info(f"File cached (wget): {filename} ({file_size} bytes)")
+                        await self._record_cache_metadata(
+                            filename=filename,
+                            api_key_id=api_key_id,
+                            token_id=token_id,
+                            media_type=media_type,
+                            source_url=url,
+                        )
                         return filename
                     raise Exception("Downloaded file is empty")
 
@@ -422,6 +459,13 @@ class FileCache:
                     file_size = file_path.stat().st_size
                     if file_size > 0:
                         debug_logger.log_info(f"File cached (curl): {filename} ({file_size} bytes)")
+                        await self._record_cache_metadata(
+                            filename=filename,
+                            api_key_id=api_key_id,
+                            token_id=token_id,
+                            media_type=media_type,
+                            source_url=url,
+                        )
                         return filename
                     raise Exception("Downloaded file is empty")
 
@@ -445,7 +489,13 @@ class FileCache:
                 )
                 raise Exception(normalized_error) from e
 
-    async def cache_base64_image(self, base64_data: str, resolution: str = "") -> str:
+    async def cache_base64_image(
+        self,
+        base64_data: str,
+        resolution: str = "",
+        api_key_id: Optional[int] = None,
+        token_id: Optional[int] = None,
+    ) -> str:
         """
         Cache base64 encoded image data to local file
 
@@ -470,6 +520,13 @@ class FileCache:
             image_data = base64.b64decode(base64_data)
             with open(file_path, 'wb') as f:
                 f.write(image_data)
+            await self._record_cache_metadata(
+                filename=filename,
+                api_key_id=api_key_id,
+                token_id=token_id,
+                media_type="image",
+                source_url=None,
+            )
             debug_logger.log_info(f"Base64 image cached: {filename} ({len(image_data)} bytes)")
             return filename
         except Exception as e:
@@ -583,3 +640,25 @@ class FileCache:
         """Clear all cached files (async wrapper). Returns removed file count."""
         count, _ = self.clear_all_files()
         return count
+
+    async def _record_cache_metadata(
+        self,
+        *,
+        filename: str,
+        api_key_id: Optional[int],
+        token_id: Optional[int],
+        media_type: str,
+        source_url: Optional[str],
+    ):
+        if self.db is None or api_key_id is None:
+            return
+        try:
+            await self.db.upsert_cache_file(
+                filename=filename,
+                api_key_id=int(api_key_id),
+                token_id=token_id,
+                media_type=media_type,
+                source_url=source_url,
+            )
+        except Exception as exc:
+            debug_logger.log_warning(f"Failed to record cache metadata: {exc}")

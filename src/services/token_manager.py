@@ -103,7 +103,13 @@ class TokenManager:
 
         return warmup_ids
 
-    async def _create_project_for_token(self, token: Token, pool_index: int, base_name: Optional[str] = None) -> Project:
+    async def _create_project_for_token(
+        self,
+        token: Token,
+        pool_index: int,
+        base_name: Optional[str] = None,
+        api_key_id: Optional[int] = None,
+    ) -> Project:
         """Create a new pooled project for a token and persist it."""
         project_name = self._build_project_name(pool_index, base_name)
         project_id = await self.flow_client.create_project(token.st, project_name)
@@ -113,6 +119,7 @@ class TokenManager:
         project = Project(
             project_id=project_id,
             token_id=token.id,
+            api_key_id=api_key_id,
             project_name=project_name,
         )
         project.id = await self.db.add_project(project)
@@ -591,7 +598,7 @@ class TokenManager:
             debug_logger.log_error(f"[ST_REFRESH] Token {token_id}: 刷新 ST 失败 - {str(e)}")
             return None
 
-    async def ensure_project_exists(self, token_id: int) -> str:
+    async def ensure_project_exists(self, token_id: int, api_key_id: Optional[int] = None) -> str:
         """Ensure a token has a pooled set of projects and return one in round-robin order."""
         project_lock = await self._get_token_lock(
             self._project_locks,
@@ -603,13 +610,21 @@ class TokenManager:
             if not token:
                 raise ValueError("Token not found")
 
-            projects = [project for project in await self.db.get_projects_by_token(token_id) if project.is_active]
+            projects = [
+                project
+                for project in await self.db.get_projects_by_token(token_id, api_key_id=api_key_id)
+                if project.is_active
+            ]
             projects = self._sort_projects(projects)
 
             try:
                 project_pool_size = self._get_project_pool_size()
                 while len(projects) < project_pool_size:
-                    new_project = await self._create_project_for_token(token, len(projects) + 1)
+                    new_project = await self._create_project_for_token(
+                        token,
+                        len(projects) + 1,
+                        api_key_id=api_key_id,
+                    )
                     projects.append(new_project)
                     projects = self._sort_projects(projects)
 
@@ -629,6 +644,7 @@ class TokenManager:
         token_id: int,
         title: Optional[str] = None,
         set_as_current: bool = True,
+        api_key_id: Optional[int] = None,
     ) -> Project:
         """Create a new VideoFX project for an existing token and persist it in the projects table."""
         project_lock = await self._get_token_lock(
@@ -644,7 +660,9 @@ class TokenManager:
             if not st:
                 raise ValueError("Token has no session token")
 
-            projects = [p for p in await self.db.get_projects_by_token(token_id) if p.is_active]
+            projects = [
+                p for p in await self.db.get_projects_by_token(token_id, api_key_id=api_key_id) if p.is_active
+            ]
             projects = self._sort_projects(projects)
             next_index = len(projects) + 1
 
@@ -661,6 +679,7 @@ class TokenManager:
             project = Project(
                 project_id=project_id,
                 token_id=token_id,
+                api_key_id=api_key_id,
                 project_name=project_title,
                 tool_name="PINHOLE",
             )

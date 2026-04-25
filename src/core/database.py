@@ -475,6 +475,23 @@ class Database:
                     )
                 """)
 
+            if not await self._table_exists(db, "cache_files"):
+                print("  ✓ Creating missing table: cache_files")
+                await db.execute("""
+                    CREATE TABLE cache_files (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        filename TEXT NOT NULL UNIQUE,
+                        api_key_id INTEGER NOT NULL,
+                        token_id INTEGER,
+                        media_type TEXT,
+                        source_url TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (api_key_id) REFERENCES api_keys(id),
+                        FOREIGN KEY (token_id) REFERENCES tokens(id)
+                    )
+                """)
+
             # ========== Step 2: Add missing columns to existing tables ==========
             # Check and add missing columns to tokens table
             if await self._table_exists(db, "tokens"):
@@ -539,6 +556,30 @@ class Database:
                             print(f"  ✓ Added column '{col_name}' to generation_config table")
                         except Exception as e:
                             print(f"  ✗ Failed to add column '{col_name}': {e}")
+
+            if await self._table_exists(db, "projects"):
+                if not await self._column_exists(db, "projects", "api_key_id"):
+                    try:
+                        await db.execute("ALTER TABLE projects ADD COLUMN api_key_id INTEGER")
+                        print("  ✓ Added column 'api_key_id' to projects table")
+                    except Exception as e:
+                        print(f"  ✗ Failed to add column 'api_key_id' to projects: {e}")
+
+            if await self._table_exists(db, "tasks"):
+                if not await self._column_exists(db, "tasks", "api_key_id"):
+                    try:
+                        await db.execute("ALTER TABLE tasks ADD COLUMN api_key_id INTEGER")
+                        print("  ✓ Added column 'api_key_id' to tasks table")
+                    except Exception as e:
+                        print(f"  ✗ Failed to add column 'api_key_id' to tasks: {e}")
+
+            if await self._table_exists(db, "request_logs"):
+                if not await self._column_exists(db, "request_logs", "api_key_id"):
+                    try:
+                        await db.execute("ALTER TABLE request_logs ADD COLUMN api_key_id INTEGER")
+                        print("  ✓ Added column 'api_key_id' to request_logs table")
+                    except Exception as e:
+                        print(f"  ✗ Failed to add column 'api_key_id' to request_logs: {e}")
 
             # Check and add missing columns to captcha_config table
             if await self._table_exists(db, "captcha_config"):
@@ -634,6 +675,10 @@ class Database:
             # It only ensures missing rows are created with default values from setting.toml
             await self._ensure_config_rows(db, config_dict=config_dict)
 
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_projects_api_key_created_at ON projects(api_key_id, created_at DESC)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_request_logs_api_key_id_created_at ON request_logs(api_key_id, created_at DESC)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_cache_files_api_key_filename ON cache_files(api_key_id, filename)")
+
             await db.commit()
             print("Database migration check completed.")
 
@@ -676,11 +721,13 @@ class Database:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     project_id TEXT UNIQUE NOT NULL,
                     token_id INTEGER NOT NULL,
+                    api_key_id INTEGER,
                     project_name TEXT NOT NULL,
                     tool_name TEXT DEFAULT 'PINHOLE',
                     is_active BOOLEAN DEFAULT 1,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (token_id) REFERENCES tokens(id)
+                    FOREIGN KEY (token_id) REFERENCES tokens(id),
+                    FOREIGN KEY (api_key_id) REFERENCES api_keys(id)
                 )
             """)
 
@@ -710,6 +757,7 @@ class Database:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     task_id TEXT UNIQUE NOT NULL,
                     token_id INTEGER NOT NULL,
+                    api_key_id INTEGER,
                     model TEXT NOT NULL,
                     prompt TEXT NOT NULL,
                     status TEXT NOT NULL DEFAULT 'processing',
@@ -719,7 +767,8 @@ class Database:
                     scene_id TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     completed_at TIMESTAMP,
-                    FOREIGN KEY (token_id) REFERENCES tokens(id)
+                    FOREIGN KEY (token_id) REFERENCES tokens(id),
+                    FOREIGN KEY (api_key_id) REFERENCES api_keys(id)
                 )
             """)
 
@@ -728,6 +777,7 @@ class Database:
                 CREATE TABLE IF NOT EXISTS request_logs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     token_id INTEGER,
+                    api_key_id INTEGER,
                     operation TEXT NOT NULL,
                     request_body TEXT,
                     response_body TEXT,
@@ -737,6 +787,22 @@ class Database:
                     progress INTEGER DEFAULT 0,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (token_id) REFERENCES tokens(id),
+                    FOREIGN KEY (api_key_id) REFERENCES api_keys(id)
+                )
+            """)
+
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS cache_files (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    filename TEXT NOT NULL UNIQUE,
+                    api_key_id INTEGER NOT NULL,
+                    token_id INTEGER,
+                    media_type TEXT,
+                    source_url TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (api_key_id) REFERENCES api_keys(id),
                     FOREIGN KEY (token_id) REFERENCES tokens(id)
                 )
             """)
@@ -924,6 +990,7 @@ class Database:
             await db.execute("CREATE INDEX IF NOT EXISTS idx_task_id ON tasks(task_id)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_token_st ON tokens(st)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_project_id ON projects(project_id)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_projects_api_key_created_at ON projects(api_key_id, created_at DESC)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_tokens_email ON tokens(email)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_tokens_is_active_last_used_at ON tokens(is_active, last_used_at)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_api_keys_client_id ON api_keys(client_id)")
@@ -937,6 +1004,8 @@ class Database:
             # Request logs query indexes (列表按 created_at 排序 / token 过滤)
             await db.execute("CREATE INDEX IF NOT EXISTS idx_request_logs_created_at ON request_logs(created_at DESC)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_request_logs_token_id_created_at ON request_logs(token_id, created_at DESC)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_request_logs_api_key_id_created_at ON request_logs(api_key_id, created_at DESC)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_cache_files_api_key_filename ON cache_files(api_key_id, filename)")
 
             # Token stats lookup index
             await db.execute("CREATE INDEX IF NOT EXISTS idx_token_stats_token_id ON token_stats(token_id)")
@@ -956,6 +1025,7 @@ class Database:
                     CREATE TABLE request_logs (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         token_id INTEGER,
+                        api_key_id INTEGER,
                         operation TEXT NOT NULL,
                         request_body TEXT,
                         response_body TEXT,
@@ -965,13 +1035,15 @@ class Database:
                         progress INTEGER DEFAULT 0,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        FOREIGN KEY (token_id) REFERENCES tokens(id)
+                        FOREIGN KEY (token_id) REFERENCES tokens(id),
+                        FOREIGN KEY (api_key_id) REFERENCES api_keys(id)
                     )
                 """)
                 await db.execute("""
-                    INSERT INTO request_logs (token_id, operation, request_body, status_code, duration, status_text, progress, created_at, updated_at)
+                    INSERT INTO request_logs (token_id, api_key_id, operation, request_body, status_code, duration, status_text, progress, created_at, updated_at)
                     SELECT
                         token_id,
+                        NULL AS api_key_id,
                         model as operation,
                         json_object('model', model, 'prompt', substr(prompt, 1, 100)) as request_body,
                         CASE
@@ -1003,6 +1075,8 @@ class Database:
                 await db.execute("ALTER TABLE request_logs ADD COLUMN progress INTEGER DEFAULT 0")
             if not await self._column_exists(db, "request_logs", "updated_at"):
                 await db.execute("ALTER TABLE request_logs ADD COLUMN updated_at TIMESTAMP")
+            if not await self._column_exists(db, "request_logs", "api_key_id"):
+                await db.execute("ALTER TABLE request_logs ADD COLUMN api_key_id INTEGER")
             await db.execute("UPDATE request_logs SET updated_at = created_at WHERE updated_at IS NULL")
         except Exception as e:
             print(f"?? request_logs?????: {e}")
@@ -1186,31 +1260,43 @@ class Database:
         """Add a new project"""
         async with self._connect(write=True) as db:
             cursor = await db.execute("""
-                INSERT INTO projects (project_id, token_id, project_name, tool_name, is_active)
-                VALUES (?, ?, ?, ?, ?)
-            """, (project.project_id, project.token_id, project.project_name,
+                INSERT INTO projects (project_id, token_id, api_key_id, project_name, tool_name, is_active)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (project.project_id, project.token_id, project.api_key_id, project.project_name,
                   project.tool_name, project.is_active))
             await db.commit()
             return cursor.lastrowid
 
-    async def get_project_by_id(self, project_id: str) -> Optional[Project]:
+    async def get_project_by_id(self, project_id: str, api_key_id: Optional[int] = None) -> Optional[Project]:
         """Get project by UUID"""
         async with self._connect() as db:
             db.row_factory = aiosqlite.Row
-            cursor = await db.execute("SELECT * FROM projects WHERE project_id = ?", (project_id,))
+            if api_key_id is None:
+                cursor = await db.execute("SELECT * FROM projects WHERE project_id = ?", (project_id,))
+            else:
+                cursor = await db.execute(
+                    "SELECT * FROM projects WHERE project_id = ? AND api_key_id = ?",
+                    (project_id, api_key_id),
+                )
             row = await cursor.fetchone()
             if row:
                 return Project(**dict(row))
             return None
 
-    async def get_projects_by_token(self, token_id: int) -> List[Project]:
+    async def get_projects_by_token(self, token_id: int, api_key_id: Optional[int] = None) -> List[Project]:
         """Get all projects for a token"""
         async with self._connect() as db:
             db.row_factory = aiosqlite.Row
-            cursor = await db.execute(
-                "SELECT * FROM projects WHERE token_id = ? ORDER BY created_at DESC",
-                (token_id,)
-            )
+            if api_key_id is None:
+                cursor = await db.execute(
+                    "SELECT * FROM projects WHERE token_id = ? ORDER BY created_at DESC",
+                    (token_id,)
+                )
+            else:
+                cursor = await db.execute(
+                    "SELECT * FROM projects WHERE token_id = ? AND api_key_id = ? ORDER BY created_at DESC",
+                    (token_id, api_key_id)
+                )
             rows = await cursor.fetchall()
             return [Project(**dict(row)) for row in rows]
 
@@ -1225,9 +1311,9 @@ class Database:
         """Create a new task"""
         async with self._connect(write=True) as db:
             cursor = await db.execute("""
-                INSERT INTO tasks (task_id, token_id, model, prompt, status, progress, scene_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (task.task_id, task.token_id, task.model, task.prompt,
+                INSERT INTO tasks (task_id, token_id, api_key_id, model, prompt, status, progress, scene_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (task.task_id, task.token_id, task.api_key_id, task.model, task.prompt,
                   task.status, task.progress, task.scene_id))
             await db.commit()
             return cursor.lastrowid
@@ -1564,10 +1650,11 @@ class Database:
         """Add request log and return log id"""
         async with self._connect(write=True) as db:
             cursor = await db.execute("""
-                INSERT INTO request_logs (token_id, operation, request_body, response_body, status_code, duration, status_text, progress)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO request_logs (token_id, api_key_id, operation, request_body, response_body, status_code, duration, status_text, progress)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 log.token_id,
+                log.api_key_id,
                 log.operation,
                 log.request_body,
                 log.response_body,
@@ -1586,6 +1673,7 @@ class Database:
 
         allowed_fields = {
             "token_id",
+            "api_key_id",
             "operation",
             "request_body",
             "response_body",
@@ -1613,7 +1701,13 @@ class Database:
             )
             await db.commit()
 
-    async def get_logs(self, limit: int = 100, token_id: Optional[int] = None, include_payload: bool = False):
+    async def get_logs(
+        self,
+        limit: int = 100,
+        token_id: Optional[int] = None,
+        include_payload: bool = False,
+        api_key_id: Optional[int] = None,
+    ):
         """Get request logs with token info, optionally including payload fields"""
         async with self._connect() as db:
             db.row_factory = aiosqlite.Row
@@ -1631,6 +1725,7 @@ class Database:
                     SELECT
                         rl.id,
                         rl.token_id,
+                        rl.api_key_id,
                         rl.operation,
                         {payload_columns}
                         {response_excerpt_column}
@@ -1648,11 +1743,35 @@ class Database:
                     ORDER BY rl.created_at DESC
                     LIMIT ?
                 """, (token_id, limit))
+            elif api_key_id is not None:
+                cursor = await db.execute(f"""
+                    SELECT
+                        rl.id,
+                        rl.token_id,
+                        rl.api_key_id,
+                        rl.operation,
+                        {payload_columns}
+                        {response_excerpt_column}
+                        rl.status_code,
+                        rl.duration,
+                        {status_text_column}
+                        {progress_column}
+                        rl.created_at,
+                        {updated_at_column}
+                        t.email as token_email,
+                        t.name as token_username
+                    FROM request_logs rl
+                    LEFT JOIN tokens t ON rl.token_id = t.id
+                    WHERE rl.api_key_id = ?
+                    ORDER BY rl.created_at DESC
+                    LIMIT ?
+                """, (api_key_id, limit))
             else:
                 cursor = await db.execute(f"""
                     SELECT
                         rl.id,
                         rl.token_id,
+                        rl.api_key_id,
                         rl.operation,
                         {payload_columns}
                         {response_excerpt_column}
@@ -1673,7 +1792,7 @@ class Database:
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
 
-    async def get_log_detail(self, log_id: int) -> Optional[Dict[str, Any]]:
+    async def get_log_detail(self, log_id: int, api_key_id: Optional[int] = None) -> Optional[Dict[str, Any]]:
         """Get single request log detail including payload fields"""
         async with self._connect() as db:
             db.row_factory = aiosqlite.Row
@@ -1683,26 +1802,50 @@ class Database:
             status_text_column = "rl.status_text," if has_status_text else "'' as status_text,"
             progress_column = "rl.progress," if has_progress else "0 as progress,"
             updated_at_column = "rl.updated_at," if has_updated_at else "rl.created_at as updated_at,"
-            cursor = await db.execute(f"""
-                SELECT
-                    rl.id,
-                    rl.token_id,
-                    rl.operation,
-                    rl.request_body,
-                    rl.response_body,
-                    rl.status_code,
-                    rl.duration,
-                    {status_text_column}
-                    {progress_column}
-                    rl.created_at,
-                    {updated_at_column}
-                    t.email as token_email,
-                    t.name as token_username
-                FROM request_logs rl
-                LEFT JOIN tokens t ON rl.token_id = t.id
-                WHERE rl.id = ?
-                LIMIT 1
-            """, (log_id,))
+            if api_key_id is None:
+                cursor = await db.execute(f"""
+                    SELECT
+                        rl.id,
+                        rl.token_id,
+                        rl.api_key_id,
+                        rl.operation,
+                        rl.request_body,
+                        rl.response_body,
+                        rl.status_code,
+                        rl.duration,
+                        {status_text_column}
+                        {progress_column}
+                        rl.created_at,
+                        {updated_at_column}
+                        t.email as token_email,
+                        t.name as token_username
+                    FROM request_logs rl
+                    LEFT JOIN tokens t ON rl.token_id = t.id
+                    WHERE rl.id = ?
+                    LIMIT 1
+                """, (log_id,))
+            else:
+                cursor = await db.execute(f"""
+                    SELECT
+                        rl.id,
+                        rl.token_id,
+                        rl.api_key_id,
+                        rl.operation,
+                        rl.request_body,
+                        rl.response_body,
+                        rl.status_code,
+                        rl.duration,
+                        {status_text_column}
+                        {progress_column}
+                        rl.created_at,
+                        {updated_at_column}
+                        t.email as token_email,
+                        t.name as token_username
+                    FROM request_logs rl
+                    LEFT JOIN tokens t ON rl.token_id = t.id
+                    WHERE rl.id = ? AND rl.api_key_id = ?
+                    LIMIT 1
+                """, (log_id, api_key_id))
             row = await cursor.fetchone()
             return dict(row) if row else None
 
@@ -1711,6 +1854,52 @@ class Database:
         async with self._connect(write=True) as db:
             await db.execute("DELETE FROM request_logs")
             await db.commit()
+
+    async def upsert_cache_file(
+        self,
+        *,
+        filename: str,
+        api_key_id: int,
+        token_id: Optional[int],
+        media_type: str,
+        source_url: Optional[str] = None,
+    ):
+        """Upsert cache file ownership metadata."""
+        async with self._connect(write=True) as db:
+            await db.execute(
+                """
+                INSERT INTO cache_files (filename, api_key_id, token_id, media_type, source_url, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ON CONFLICT(filename) DO UPDATE SET
+                    api_key_id = excluded.api_key_id,
+                    token_id = excluded.token_id,
+                    media_type = excluded.media_type,
+                    source_url = excluded.source_url,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (filename, api_key_id, token_id, media_type, source_url),
+            )
+            await db.commit()
+
+    async def get_cache_file(self, filename: str) -> Optional[Dict[str, Any]]:
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT * FROM cache_files WHERE filename = ? LIMIT 1",
+                (filename,),
+            )
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+    async def get_cache_file_for_api_key(self, filename: str, api_key_id: int) -> Optional[Dict[str, Any]]:
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT * FROM cache_files WHERE filename = ? AND api_key_id = ? LIMIT 1",
+                (filename, api_key_id),
+            )
+            row = await cursor.fetchone()
+            return dict(row) if row else None
 
     async def init_config_from_toml(self, config_dict: dict, is_first_startup: bool = True):
         """
