@@ -56,6 +56,11 @@ class FlowClient:
             "flow_request_fingerprint",
             default=None
         )
+        # Per-request flag: when upstream rejects local reCAPTCHA token, force next token attempts via remote gateway.
+        self._force_remote_recaptcha_ctx: contextvars.ContextVar[bool] = contextvars.ContextVar(
+            "flow_force_remote_recaptcha",
+            default=False
+        )
         self._remote_browser_prefill_last_sent: Dict[str, float] = {}
         # Last reCAPTCHA action for narrative logs (IMAGE_GENERATION vs VIDEO_GENERATION, etc.)
         self._last_recaptcha_action: Optional[str] = None
@@ -163,6 +168,12 @@ class FlowClient:
     def clear_request_fingerprint(self):
         """清理请求链路绑定的浏览器指纹。"""
         self._set_request_fingerprint(None)
+
+    def _set_force_remote_recaptcha(self, enabled: bool) -> None:
+        self._force_remote_recaptcha_ctx.set(bool(enabled))
+
+    def _should_force_remote_recaptcha(self) -> bool:
+        return bool(self._force_remote_recaptcha_ctx.get())
 
     async def _make_request(
         self,
@@ -2014,6 +2025,7 @@ class FlowClient:
     ) -> bool:
         """统一处理生成链路的重试判定与打码自愈通知。"""
         error_str = str(error)
+        error_lower = error_str.lower()
         retry_reason = self._get_retry_reason(error_str)
         notify_reason = retry_reason or error_str[:120] or type(error).__name__
         await self._notify_browser_captcha_error(
@@ -2024,6 +2036,20 @@ class FlowClient:
         )
         if not retry_reason:
             return False
+
+        should_force_remote = any(
+            key in error_lower
+            for key in [
+                "public_error_unusual_activity",
+                "recaptcha evaluation failed",
+                "recaptcha 验证失败",
+            ]
+        )
+        if should_force_remote and bool(config.browser_fallback_to_remote_browser):
+            self._set_force_remote_recaptcha(True)
+            debug_logger.log_warning(
+                f"{log_prefix}检测到上游拒绝本地 reCAPTCHA，后续重试强制走 remote_browser。"
+            )
 
         is_terminal_attempt = retry_attempt >= max_retries - 1
 
@@ -2540,6 +2566,47 @@ class FlowClient:
                 return None, None
         # 有头浏览器打码 (playwright)
         elif captcha_method == "browser":
+            if self._should_force_remote_recaptcha() and bool(config.browser_fallback_to_remote_browser):
+                debug_logger.log_info(
+                    "[reCAPTCHA] local token marked rejected by upstream; forcing remote_browser fallback"
+                )
+                try:
+                    solve_timeout = self._resolve_remote_browser_solve_timeout(action)
+                    payload = await self._call_remote_browser_service(
+                        method="POST",
+                        path="/api/v1/solve",
+                        json_data={
+                            "project_id": project_id,
+                            "action": action,
+                            "token_id": token_id,
+                        },
+                        timeout_override=solve_timeout,
+                    )
+                    token = payload.get("token")
+                    session_id = payload.get("session_id")
+                    fingerprint = (
+                        payload.get("fingerprint")
+                        if isinstance(payload.get("fingerprint"), dict)
+                        else None
+                    )
+                    if not token or not session_id:
+                        raise RuntimeError(
+                            f"remote_browser forced fallback 返回缺少 token/session_id: {payload}"
+                        )
+                    self._set_request_fingerprint(fingerprint if token else None)
+                    self._set_force_remote_recaptcha(False)
+                    debug_logger.log_info(
+                        "[reCAPTCHA] forced remote_browser fallback succeeded"
+                    )
+                    debug_logger.log_recaptcha_token_success(token)
+                    return token, str(session_id)
+                except Exception as force_remote_error:
+                    debug_logger.log_error(
+                        f"[reCAPTCHA BrowserFallback] forced remote attempt failed: {type(force_remote_error).__name__}: {force_remote_error}"
+                    )
+                    # Keep the force flag for subsequent retries in the same request chain.
+                    self._set_request_fingerprint(None)
+                    return None, None
             try:
                 from .browser_captcha import BrowserCaptchaService
                 service = await BrowserCaptchaService.get_instance(self.db)
@@ -2547,6 +2614,7 @@ class FlowClient:
                 fingerprint = await service.get_fingerprint(browser_id) if token else None
                 self._set_request_fingerprint(fingerprint if token else None)
                 if token:
+                    self._set_force_remote_recaptcha(False)
                     debug_logger.log_recaptcha_token_success(token)
                 else:
                     debug_logger.log_recaptcha_browser_error(
