@@ -10,7 +10,7 @@ import { Label } from "../ui/label"
 import { Switch } from "../ui/switch"
 import { Badge } from "../ui/badge"
 import { toast } from "sonner"
-import { Loader2, Plus, RefreshCw } from "lucide-react"
+import { Eye, Loader2, Pencil, Plus, RefreshCw, Trash2 } from "lucide-react"
 
 type TokenRow = { id: number; email?: string; is_active?: boolean }
 type ManagedApiKey = {
@@ -24,6 +24,12 @@ type ManagedApiKey = {
   last_used_at?: string | null
   created_at?: string | null
   account_ids: number[]
+  can_reveal_plaintext?: number
+}
+type EndpointLimit = { endpoint: string; rpm: number; rph: number; burst: number }
+type ManagedApiKeyDetail = ManagedApiKey & {
+  key_plaintext?: string | null
+  endpoint_limits?: EndpointLimit[]
 }
 type AuditLog = {
   id: number
@@ -57,6 +63,10 @@ export function ApiKeyManagement() {
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([])
 
   const [createOpen, setCreateOpen] = useState(false)
+  const [editOpen, setEditOpen] = useState(false)
+  const [plainKeyOpen, setPlainKeyOpen] = useState(false)
+  const [editingKeyId, setEditingKeyId] = useState<number | null>(null)
+  const [plainKeyValue, setPlainKeyValue] = useState("")
   const [clientName, setClientName] = useState("")
   const [label, setLabel] = useState("default")
   const [selectedScopes, setSelectedScopes] = useState<string[]>(["*"])
@@ -66,6 +76,14 @@ export function ApiKeyManagement() {
     { endpoint: "/v1/chat/completions", rpm: "60", rph: "2000", burst: "10" },
   ])
   const [createdKey, setCreatedKey] = useState("")
+
+  const parseScopes = (scopesRaw?: string | null): string[] => {
+    const parsed = String(scopesRaw || "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean)
+    return parsed.length ? parsed : ["*"]
+  }
 
   const loadAll = useCallback(async () => {
     if (!token) return
@@ -159,6 +177,99 @@ export function ApiKeyManagement() {
     }
   }
 
+  const openEditKey = async (keyId: number) => {
+    if (!token) return
+    const res = await adminJson<{ success?: boolean; key?: ManagedApiKeyDetail }>(`/api/admin/managed-apikeys/${keyId}`, token)
+    if (!res.ok || !res.data?.key) {
+      toast.error("Failed to load key details")
+      return
+    }
+    const key = res.data.key
+    setEditingKeyId(key.id)
+    setClientName(key.client_name || "")
+    setLabel(key.label || "default")
+    setSelectedScopes(parseScopes(key.scopes))
+    setExpiresAt(String(key.expires_at || ""))
+    setSelectedAccountIds(Array.isArray(key.account_ids) ? key.account_ids : [])
+    setLimits(
+      (key.endpoint_limits || []).length
+        ? (key.endpoint_limits || []).map((r) => ({
+            endpoint: r.endpoint,
+            rpm: String(r.rpm ?? 0),
+            rph: String(r.rph ?? 0),
+            burst: String(r.burst ?? 0),
+          }))
+        : [{ endpoint: "/v1/chat/completions", rpm: "60", rph: "2000", burst: "10" }]
+    )
+    setEditOpen(true)
+  }
+
+  const submitEditKey = async () => {
+    if (!token || editingKeyId == null) return
+    if (!clientName.trim()) return toast.error("Client name is required")
+    if (!selectedAccountIds.length) return toast.error("Select at least one account")
+    if (!selectedScopes.length) return toast.error("Select at least one scope")
+    setSaving(true)
+    try {
+      const res = await adminFetch(`/api/admin/managed-apikeys/${editingKeyId}`, token, {
+        method: "PUT",
+        body: JSON.stringify({
+          client_name: clientName.trim(),
+          label: label.trim() || "default",
+          scopes: selectedScopes.join(","),
+          expires_at: expiresAt.trim() || null,
+          account_ids: selectedAccountIds,
+          endpoint_limits: buildLimitsPayload(),
+        }),
+      })
+      if (!res) return
+      const data = await res.json()
+      if (data.success) {
+        toast.success("Managed API key updated")
+        setEditOpen(false)
+        setEditingKeyId(null)
+        await loadAll()
+      } else {
+        toast.error(data.detail || data.message || "Update failed")
+      }
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const deleteKey = async (keyId: number) => {
+    if (!token) return
+    if (!confirm("Delete this API key? This action cannot be undone.")) return
+    const res = await adminFetch(`/api/admin/managed-apikeys/${keyId}`, token, { method: "DELETE" })
+    if (!res) return
+    const data = await res.json()
+    if (data.success) {
+      toast.success("Managed API key deleted")
+      await loadAll()
+    } else {
+      toast.error(data.detail || data.message || "Delete failed")
+    }
+  }
+
+  const revealPlainKey = async (keyId: number) => {
+    if (!token) return
+    const res = await adminJson<{ success?: boolean; key?: ManagedApiKeyDetail }>(
+      `/api/admin/managed-apikeys/${keyId}?reveal_plaintext=true`,
+      token
+    )
+    if (!res.ok || !res.data?.key) {
+      toast.error("Failed to reveal key")
+      return
+    }
+    const plain = String(res.data.key.key_plaintext || "")
+    if (!plain) {
+      toast.error("Plain key not available for this record")
+      return
+    }
+    setPlainKeyValue(plain)
+    setPlainKeyOpen(true)
+  }
+
   const toggleKeyEnabled = async (key: ManagedApiKey) => {
     if (!token) return
     const res = await adminFetch(`/api/admin/managed-apikeys/${key.id}`, token, {
@@ -222,6 +333,15 @@ export function ApiKeyManagement() {
                     </TableCell>
                     <TableCell className="text-right">
                       <div className="inline-flex items-center gap-2">
+                        <Button size="icon" variant="outline" onClick={() => void openEditKey(k.id)} title="Edit key">
+                          <Pencil className="h-4 w-4" />
+                        </Button>
+                        <Button size="icon" variant="outline" onClick={() => void revealPlainKey(k.id)} title="View plain key">
+                          <Eye className="h-4 w-4" />
+                        </Button>
+                        <Button size="icon" variant="destructive" onClick={() => void deleteKey(k.id)} title="Delete key">
+                          <Trash2 className="h-4 w-4" />
+                        </Button>
                         <Switch checked={k.is_active} onCheckedChange={() => void toggleKeyEnabled(k)} />
                       </div>
                     </TableCell>
@@ -370,6 +490,119 @@ export function ApiKeyManagement() {
             </Button>
             <Button onClick={createKey} disabled={saving}>
               {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : "Create key"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={editOpen} onOpenChange={setEditOpen}>
+        <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Edit managed API key</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <Label>Client name</Label>
+                <Input className="mt-1" value={clientName} onChange={(e) => setClientName(e.target.value)} />
+              </div>
+              <div>
+                <Label>Label</Label>
+                <Input className="mt-1" value={label} onChange={(e) => setLabel(e.target.value)} />
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <Label>Scopes</Label>
+                <div className="mt-2 space-y-2 border rounded-md p-3 max-h-44 overflow-auto">
+                  {AVAILABLE_SCOPES.map((scope) => (
+                    <label key={`edit-${scope.id}`} className="flex items-start justify-between gap-3 text-sm">
+                      <span>
+                        <span className="font-medium">{scope.label}</span>
+                        <span className="block text-xs text-muted-foreground">{scope.description}</span>
+                      </span>
+                      <input
+                        type="checkbox"
+                        checked={selectedScopes.includes(scope.id)}
+                        onChange={() => toggleScope(scope.id)}
+                      />
+                    </label>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <Label>Expires at (optional)</Label>
+                <Input className="mt-1" value={expiresAt} onChange={(e) => setExpiresAt(e.target.value)} placeholder="YYYY-MM-DD HH:MM:SS" />
+              </div>
+            </div>
+            <div className="space-y-2 border rounded-md p-3">
+              <Label>Assign accounts (server-side routing pool)</Label>
+              <div className="max-h-52 overflow-auto space-y-2">
+                {tokens.map((t) => (
+                  <label key={`edit-account-${t.id}`} className="flex items-center justify-between gap-3 text-sm">
+                    <span>
+                      #{t.id} {t.email || ""}
+                    </span>
+                    <div className="flex items-center gap-2">
+                      <Badge variant={t.is_active ? "default" : "secondary"}>{t.is_active ? "active" : "disabled"}</Badge>
+                      <input type="checkbox" checked={selectedAccountIds.includes(t.id)} onChange={() => toggleAccount(t.id)} />
+                    </div>
+                  </label>
+                ))}
+              </div>
+            </div>
+            <div className="space-y-2 border rounded-md p-3">
+              <div className="flex items-center justify-between">
+                <Label>Per-endpoint limits</Label>
+                <Button type="button" variant="outline" size="sm" onClick={addLimitRow}>
+                  Add row
+                </Button>
+              </div>
+              {limits.map((row, idx) => (
+                <div key={`edit-limit-${idx}`} className="grid grid-cols-4 gap-2">
+                  <Input placeholder="/v1/chat/completions" value={row.endpoint} onChange={(e) => updateLimitRow(idx, { endpoint: e.target.value })} />
+                  <Input placeholder="rpm" value={row.rpm} onChange={(e) => updateLimitRow(idx, { rpm: e.target.value })} />
+                  <Input placeholder="rph" value={row.rph} onChange={(e) => updateLimitRow(idx, { rph: e.target.value })} />
+                  <Input placeholder="burst" value={row.burst} onChange={(e) => updateLimitRow(idx, { burst: e.target.value })} />
+                </div>
+              ))}
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setEditOpen(false)}>
+              Close
+            </Button>
+            <Button onClick={submitEditKey} disabled={saving}>
+              {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : "Save changes"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={plainKeyOpen} onOpenChange={setPlainKeyOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Plain API key</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-2">
+            <Label>Copy and store safely</Label>
+            <Input readOnly className="font-mono text-xs" value={plainKeyValue} />
+          </div>
+          <DialogFooter>
+            <Button
+              onClick={async () => {
+                try {
+                  await navigator.clipboard.writeText(plainKeyValue)
+                  toast.success("Copied")
+                } catch {
+                  toast.error("Copy failed")
+                }
+              }}
+            >
+              Copy key
+            </Button>
+            <Button variant="outline" onClick={() => setPlainKeyOpen(false)}>
+              Close
             </Button>
           </DialogFooter>
         </DialogContent>

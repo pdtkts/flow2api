@@ -416,6 +416,7 @@ class Database:
                         client_id INTEGER NOT NULL,
                         label TEXT NOT NULL,
                         key_prefix TEXT NOT NULL,
+                        key_plaintext TEXT,
                         key_hash TEXT NOT NULL UNIQUE,
                         scopes TEXT DEFAULT '*',
                         is_active BOOLEAN DEFAULT 1,
@@ -594,6 +595,20 @@ class Database:
                         try:
                             await db.execute(f"ALTER TABLE plugin_config ADD COLUMN {col_name} {col_type}")
                             print(f"  ✓ Added column '{col_name}' to plugin_config table")
+                        except Exception as e:
+                            print(f"  ✗ Failed to add column '{col_name}': {e}")
+
+            # Check and add missing columns to api_keys table
+            if await self._table_exists(db, "api_keys"):
+                api_keys_columns_to_add = [
+                    ("key_plaintext", "TEXT"),
+                ]
+
+                for col_name, col_type in api_keys_columns_to_add:
+                    if not await self._column_exists(db, "api_keys", col_name):
+                        try:
+                            await db.execute(f"ALTER TABLE api_keys ADD COLUMN {col_name} {col_type}")
+                            print(f"  ✓ Added column '{col_name}' to api_keys table")
                         except Exception as e:
                             print(f"  ✗ Failed to add column '{col_name}': {e}")
 
@@ -855,6 +870,7 @@ class Database:
                     client_id INTEGER NOT NULL,
                     label TEXT NOT NULL,
                     key_prefix TEXT NOT NULL,
+                    key_plaintext TEXT,
                     key_hash TEXT NOT NULL UNIQUE,
                     scopes TEXT DEFAULT '*',
                     is_active BOOLEAN DEFAULT 1,
@@ -2093,6 +2109,7 @@ class Database:
         client_name: str,
         label: str,
         key_prefix: str,
+        key_plaintext: Optional[str],
         key_hash: str,
         scopes: str,
         account_ids: List[int],
@@ -2103,10 +2120,10 @@ class Database:
         async with self._connect(write=True) as db:
             cursor = await db.execute(
                 """
-                INSERT INTO api_keys (client_id, label, key_prefix, key_hash, scopes, is_active, expires_at)
-                VALUES (?, ?, ?, ?, ?, 1, ?)
+                INSERT INTO api_keys (client_id, label, key_prefix, key_plaintext, key_hash, scopes, is_active, expires_at)
+                VALUES (?, ?, ?, ?, ?, ?, 1, ?)
                 """,
-                (client_id, label, key_prefix, key_hash, scopes, expires_at),
+                (client_id, label, key_prefix, key_plaintext, key_hash, scopes, expires_at),
             )
             key_id = int(cursor.lastrowid)
 
@@ -2214,6 +2231,7 @@ class Database:
                     c.name AS client_name,
                     k.label,
                     k.key_prefix,
+                    CASE WHEN k.key_plaintext IS NOT NULL AND length(trim(k.key_plaintext)) > 0 THEN 1 ELSE 0 END AS can_reveal_plaintext,
                     k.scopes,
                     k.is_active,
                     k.expires_at,
@@ -2230,16 +2248,44 @@ class Database:
                 row["account_ids"] = await self.get_api_key_account_ids(int(row["id"]))
             return rows
 
+    async def list_api_key_rate_limits(self, key_id: int) -> List[Dict[str, Any]]:
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT endpoint, rpm, rph, burst
+                FROM api_key_rate_limits
+                WHERE api_key_id = ?
+                ORDER BY endpoint ASC
+                """,
+                (key_id,),
+            )
+            return [dict(row) for row in await cursor.fetchall()]
+
     async def update_api_key(
         self,
         key_id: int,
         *,
         is_active: Optional[bool] = None,
+        client_name: Optional[str] = None,
+        label: Optional[str] = None,
         scopes: Optional[str] = None,
+        expires_at: Optional[str] = None,
         account_ids: Optional[List[int]] = None,
         endpoint_limits: Optional[Dict[str, Dict[str, int]]] = None,
     ):
         async with self._connect(write=True) as db:
+            if client_name is not None:
+                client_id = await self._get_or_create_api_client(client_name.strip())
+                await db.execute(
+                    "UPDATE api_keys SET client_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (client_id, key_id),
+                )
+            if label is not None:
+                await db.execute(
+                    "UPDATE api_keys SET label = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (label, key_id),
+                )
             if is_active is not None:
                 await db.execute(
                     "UPDATE api_keys SET is_active = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
@@ -2249,6 +2295,11 @@ class Database:
                 await db.execute(
                     "UPDATE api_keys SET scopes = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                     (scopes, key_id),
+                )
+            if expires_at is not None:
+                await db.execute(
+                    "UPDATE api_keys SET expires_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (expires_at, key_id),
                 )
             if account_ids is not None:
                 await db.execute("DELETE FROM api_key_accounts WHERE api_key_id = ?", (key_id,))
@@ -2273,6 +2324,46 @@ class Database:
                             int((values or {}).get("burst") or 0),
                         ),
                     )
+            await db.commit()
+
+    async def get_api_key_detail(self, key_id: int, include_plaintext: bool = False) -> Optional[Dict[str, Any]]:
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            plaintext_col = "k.key_plaintext," if include_plaintext else "NULL AS key_plaintext,"
+            cursor = await db.execute(
+                f"""
+                SELECT
+                    k.id,
+                    c.name AS client_name,
+                    k.label,
+                    k.key_prefix,
+                    {plaintext_col}
+                    k.scopes,
+                    k.is_active,
+                    k.expires_at,
+                    k.last_used_at,
+                    k.created_at
+                FROM api_keys k
+                JOIN api_clients c ON c.id = k.client_id
+                WHERE k.id = ?
+                LIMIT 1
+                """,
+                (key_id,),
+            )
+            row = await cursor.fetchone()
+            if not row:
+                return None
+            data = dict(row)
+            data["account_ids"] = await self.get_api_key_account_ids(key_id)
+            data["endpoint_limits"] = await self.list_api_key_rate_limits(key_id)
+            return data
+
+    async def delete_api_key(self, key_id: int):
+        async with self._connect(write=True) as db:
+            await db.execute("DELETE FROM api_key_accounts WHERE api_key_id = ?", (key_id,))
+            await db.execute("DELETE FROM api_key_rate_limits WHERE api_key_id = ?", (key_id,))
+            await db.execute("DELETE FROM api_key_audit_logs WHERE api_key_id = ?", (key_id,))
+            await db.execute("DELETE FROM api_keys WHERE id = ?", (key_id,))
             await db.commit()
 
     async def list_api_key_audit_logs(self, limit: int = 200, key_id: Optional[int] = None) -> List[Dict[str, Any]]:

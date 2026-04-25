@@ -2407,7 +2407,7 @@ class FlowClient:
         if not normalized_project:
             return False
 
-        cache_key = f"{normalized_project}|{normalized_action}|{int(token_id or 0)}"
+        cache_key = f"{normalized_project}|{normalized_action}"
         now_value = time.monotonic()
         last_sent = float(self._remote_browser_prefill_last_sent.get(cache_key, 0.0) or 0.0)
         if (now_value - last_sent) < max(0.5, float(cooldown_seconds)):
@@ -2420,7 +2420,6 @@ class FlowClient:
                 json_data={
                     "project_id": normalized_project,
                     "action": normalized_action,
-                    "token_id": token_id,
                 },
                 timeout_override=3,
             )
@@ -2629,7 +2628,6 @@ class FlowClient:
                         json_data={
                             "project_id": project_id,
                             "action": action,
-                            "token_id": token_id,
                         },
                         timeout_override=solve_timeout,
                     )
@@ -2716,7 +2714,6 @@ class FlowClient:
                         json_data={
                             "project_id": project_id,
                             "action": action,
-                            "token_id": token_id,
                         },
                         timeout_override=solve_timeout,
                     )
@@ -2759,7 +2756,6 @@ class FlowClient:
                     json_data={
                         "project_id": project_id,
                         "action": action,
-                        "token_id": token_id,
                     },
                     timeout_override=solve_timeout,
                 )

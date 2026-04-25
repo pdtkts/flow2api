@@ -182,15 +182,19 @@ class AgentRegistry:
         action: str,
         timeout: float,
     ) -> dict[str, Any]:
-        if token_id is None:
-            raise ValueError("token_id is required for agent routing")
         job_id = str(uuid.uuid4())
         loop = asyncio.get_event_loop()
         fut: asyncio.Future[dict[str, Any]] = loop.create_future()
         async with self._lock:
-            binding = self._by_token.get(int(token_id))
-            if binding is None:
-                raise LookupError("no_agent")
+            if token_id is None:
+                if not self._ws_binding:
+                    raise LookupError("no_agent")
+                # API-managed mode: select newest connected agent.
+                binding = max(self._ws_binding.values(), key=lambda b: float(b.connected_at or 0.0))
+            else:
+                binding = self._by_token.get(int(token_id))
+                if binding is None:
+                    raise LookupError("no_agent")
             ws = binding.ws
             p = PendingSolve(
                 job_id=job_id,
@@ -202,13 +206,14 @@ class AgentRegistry:
             )
             self._pending[job_id] = p
 
-        msg = {
+        msg: dict[str, Any] = {
             "type": "solve_job",
             "job_id": job_id,
             "project_id": project_id,
             "action": action,
-            "token_id": int(token_id),
         }
+        if token_id is not None:
+            msg["token_id"] = int(token_id)
         try:
             await ws.send_json(msg)
         except Exception as e:

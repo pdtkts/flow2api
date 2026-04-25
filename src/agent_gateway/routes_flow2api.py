@@ -26,15 +26,15 @@ async def api_v1_solve(
     if token_id is not None:
         token_id = int(token_id)
 
-    if not project_id or token_id is None:
+    if not project_id:
         raise HTTPException(
             status_code=400,
-            detail="project_id and token_id are required for agent routing",
+            detail="project_id is required for agent routing",
         )
 
     s = load_settings()
     registry.ownership.load_json(s.agent_token_ownership_json)
-    if not registry.has_any_owner_for_token(int(token_id)):
+    if token_id is not None and not registry.has_any_owner_for_token(int(token_id)):
         raise HTTPException(
             status_code=403,
             detail="token_id is not authorized for any registered device policy",
@@ -48,7 +48,10 @@ async def api_v1_solve(
         )
     except LookupError:
         connected_ids = await registry.connected_token_ids()
-        detail = f"no agent connected for token_id={int(token_id)}"
+        if token_id is None:
+            detail = "no agent connected"
+        else:
+            detail = f"no agent connected for token_id={int(token_id)}"
         if connected_ids:
             detail += f"; connected_token_ids={connected_ids}"
         else:

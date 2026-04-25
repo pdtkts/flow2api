@@ -79,7 +79,7 @@ For a dedicated PC-agent integration walkthrough, see: [agent-client-connection.
 | Field | Type | Required | Description |
 |--------|------|----------|-------------|
 | `project_id` | string | Yes | Google Flow / VideoFX project id for this account. |
-| `token_id` | integer | Yes | Flow2API database token id; the gateway routes the job to the agent that registered this id. |
+| `token_id` | integer | No | Optional legacy routing hint. If provided, gateway routes to an agent that registered this token id; if omitted, gateway uses API-managed routing and picks an available connected agent. |
 | `action` | string | No | Default `"IMAGE_GENERATION"`. Also used: e.g. `"VIDEO_GENERATION"`. |
 
 Example:
@@ -87,7 +87,6 @@ Example:
 ```json
 {
   "project_id": "b7c9f2a1-0000-0000-0000-000000000000",
-  "token_id": 42,
   "action": "IMAGE_GENERATION"
 }
 ```
@@ -110,8 +109,8 @@ Example:
 
 **Error responses (non-200):** FastAPI style — JSON with a `detail` string, for example:
 
-- **400** — missing `project_id` / `token_id`, or bad input.
-- **503** — no agent has registered for that `token_id`.
+- **400** — missing `project_id` or bad input.
+- **503** — no connected agent (or no connected agent for the provided `token_id`).
 - **504** — no `solve_result` / `solve_error` within `SOLVE_TIMEOUT_SECONDS`.
 - **500 / 502** — agent error, incomplete result, or internal failure.
 
@@ -124,8 +123,7 @@ Optional warm-up hint (body shape matches what Flow2API sends; the MVP gateway o
 ```json
 {
   "project_id": "<string>",
-  "action": "IMAGE_GENERATION",
-  "token_id": 42
+  "action": "IMAGE_GENERATION"
 }
 ```
 
@@ -210,15 +208,14 @@ Notes for Keygen mode:
 }
 ```
 
-3. **Server → client (work):** `solve_job` (one per HTTP `/api/v1/solve` dispatched to this agent’s `token_id`).
+3. **Server → client (work):** `solve_job` (one per HTTP `/api/v1/solve` dispatched to an eligible connected agent).
 
 ```json
 {
   "type": "solve_job",
   "job_id": "<uuid>",
   "project_id": "<string>",
-  "action": "IMAGE_GENERATION",
-  "token_id": 42
+  "action": "IMAGE_GENERATION"
 }
 ```
 

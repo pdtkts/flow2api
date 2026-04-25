@@ -56,6 +56,7 @@ class ApiKeyManager:
             client_name=client_name.strip(),
             label=label.strip() or "default",
             key_prefix=key_prefix,
+            key_plaintext=full_key,
             key_hash=key_hash,
             scopes=scopes.strip() or "*",
             account_ids=account_ids,

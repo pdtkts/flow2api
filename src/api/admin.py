@@ -606,8 +606,11 @@ class CreateManagedApiKeyRequest(BaseModel):
 
 
 class UpdateManagedApiKeyRequest(BaseModel):
+    client_name: Optional[str] = None
+    label: Optional[str] = None
     is_active: Optional[bool] = None
     scopes: Optional[str] = None
+    expires_at: Optional[str] = None
     account_ids: Optional[List[int]] = None
     endpoint_limits: Optional[Dict[str, Dict[str, int]]] = None
 
@@ -1564,12 +1567,39 @@ async def update_managed_api_key(
 ):
     await db.update_api_key(
         key_id,
+        client_name=request.client_name,
+        label=request.label,
         is_active=request.is_active,
         scopes=request.scopes,
+        expires_at=request.expires_at,
         account_ids=request.account_ids,
         endpoint_limits=request.endpoint_limits,
     )
     return {"success": True, "message": "Managed API key updated"}
+
+
+@router.get("/api/admin/managed-apikeys/{key_id}")
+async def get_managed_api_key(
+    key_id: int,
+    reveal_plaintext: bool = False,
+    token: str = Depends(verify_admin_token),
+):
+    detail = await db.get_api_key_detail(key_id, include_plaintext=reveal_plaintext)
+    if not detail:
+        raise HTTPException(status_code=404, detail="Managed API key not found")
+    return {"success": True, "key": detail}
+
+
+@router.delete("/api/admin/managed-apikeys/{key_id}")
+async def delete_managed_api_key(
+    key_id: int,
+    token: str = Depends(verify_admin_token),
+):
+    detail = await db.get_api_key_detail(key_id)
+    if not detail:
+        raise HTTPException(status_code=404, detail="Managed API key not found")
+    await db.delete_api_key(key_id)
+    return {"success": True, "message": "Managed API key deleted"}
 
 
 @router.get("/api/admin/managed-apikeys/audit")
