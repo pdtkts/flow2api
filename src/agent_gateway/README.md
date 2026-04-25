@@ -12,6 +12,7 @@ FastAPI service that implements the same **HTTP** contract as Flow2API’s `remo
 
 ```bash
 export GATEWAY_FLOW2API_BEARER=your-secret   # must match Flow2API remote_browser_api_key
+export GATEWAY_AGENT_AUTH_MODE=legacy         # legacy | keygen | dual
 export GATEWAY_AGENT_DEVICE_TOKEN=agent-secret
 python -m src.agent_gateway
 ```
@@ -25,8 +26,10 @@ See [../../docs/agent-gateway.md](../../docs/agent-gateway.md).
 ## WebSocket protocol
 
 1. Connect to `ws://<host>:9080/ws/agents`.
-2. Send one JSON line: `{"type":"register","device_token":"<GATEWAY_AGENT_DEVICE_TOKEN>","token_ids":[1]}`  
-   `token_ids` are Flow2API DB token ids this machine will serve.
+2. Send one JSON line (`register`) in one of these modes:
+   - Legacy: `{"type":"register","device_token":"<GATEWAY_AGENT_DEVICE_TOKEN>","token_ids":[1]}`
+   - Keygen: `{"type":"register","agent_token":"<keygen-token>","token_ids":[1]}`
+   `token_ids` are a client hint; server intersects with ownership policy from `AGENT_TOKEN_OWNERSHIP_JSON` when configured.
 3. Receive `solve_job` messages; reply with `solve_result` or `solve_error`:
 
 ```json
@@ -37,4 +40,12 @@ See [../../docs/agent-gateway.md](../../docs/agent-gateway.md).
 {"type":"solve_error","job_id":"...","error":"reason"}
 ```
 
-Phase 2 will ship a **Node** reference client.
+## Keygen mode (production)
+
+Set `GATEWAY_AGENT_AUTH_MODE=keygen` (or `dual` during migration) and configure:
+
+- `KEYGEN_VERIFY_MODE=jwt|introspection`
+- `KEYGEN_PUBLIC_KEY` (jwt mode) or `KEYGEN_API_TOKEN` + `KEYGEN_API_URL` (introspection mode)
+- `AGENT_TOKEN_OWNERSHIP_JSON` map, e.g. `{"machine-1":[1,2],"license-abc":[3]}`
+
+In Keygen mode, each agent sends `agent_token` and receives only `authorized_token_ids` in `registered`.

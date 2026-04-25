@@ -23,6 +23,7 @@ type CaptchaForm = {
   remote_browser_base_url: string
   remote_browser_api_key: string
   remote_browser_timeout: number
+  browser_fallback_to_remote_browser: boolean
   browser_captcha_page_url: string
   browser_proxy_enabled: boolean
   browser_proxy_url: string
@@ -47,6 +48,7 @@ const defaultCaptcha: CaptchaForm = {
   remote_browser_base_url: "",
   remote_browser_api_key: "",
   remote_browser_timeout: 60,
+  browser_fallback_to_remote_browser: true,
   browser_captcha_page_url: "https://labs.google/fx/api/auth/providers",
   browser_proxy_enabled: false,
   browser_proxy_url: "",
@@ -155,6 +157,7 @@ export function SystemSettings({ active }: { active: boolean }) {
         remote_browser_base_url: String(raw.remote_browser_base_url ?? ""),
         remote_browser_api_key: String(raw.remote_browser_api_key ?? ""),
         remote_browser_timeout: Number(raw.remote_browser_timeout ?? 60),
+        browser_fallback_to_remote_browser: raw.browser_fallback_to_remote_browser !== false,
         browser_captcha_page_url: String(
           raw.browser_captcha_page_url || "https://labs.google/fx/api/auth/providers"
         ),
@@ -414,6 +417,7 @@ export function SystemSettings({ active }: { active: boolean }) {
           remote_browser_base_url: captcha.remote_browser_base_url.trim(),
           remote_browser_api_key: captcha.remote_browser_api_key.trim(),
           remote_browser_timeout: captcha.remote_browser_timeout,
+          browser_fallback_to_remote_browser: captcha.browser_fallback_to_remote_browser,
           browser_captcha_page_url: captcha.browser_captcha_page_url.trim(),
           browser_proxy_enabled: finalProxyEnabled,
           browser_proxy_url: finalProxyUrl,
@@ -706,6 +710,18 @@ export function SystemSettings({ active }: { active: boolean }) {
                 value={captcha.browser_captcha_page_url}
                 onChange={(e) => setCaptcha((c) => ({ ...c, browser_captcha_page_url: e.target.value }))}
               />
+              <div className="flex items-center gap-2">
+                <Switch
+                  checked={captcha.browser_fallback_to_remote_browser}
+                  onCheckedChange={(v) =>
+                    setCaptcha((c) => ({ ...c, browser_fallback_to_remote_browser: v }))
+                  }
+                />
+                <Label>Fallback to gateway on browser failure</Label>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Uses remote gateway config (`remote_browser_base_url` and `remote_browser_api_key`) when local headed solve fails.
+              </p>
               <div className="flex items-center gap-2">
                 <Switch
                   checked={captcha.browser_proxy_enabled}

@@ -23,10 +23,19 @@ async def lifespan(_: FastAPI):
         logging.getLogger(__name__).warning(
             "GATEWAY_FLOW2API_BEARER is empty — set to match Flow2API remote_browser_api_key"
         )
-    if not s.agent_device_token:
+    if s.agent_auth_mode in {"legacy", "dual"} and not s.agent_device_token:
         logging.getLogger(__name__).warning(
             "GATEWAY_AGENT_DEVICE_TOKEN is empty — WebSocket agents cannot authenticate"
         )
+    if s.agent_auth_mode in {"keygen", "dual"}:
+        if s.keygen_verify_mode == "jwt" and not s.keygen_public_key:
+            logging.getLogger(__name__).warning(
+                "KEYGEN_PUBLIC_KEY is empty in keygen/jwt mode"
+            )
+        if s.keygen_verify_mode == "introspection" and not s.keygen_api_token:
+            logging.getLogger(__name__).warning(
+                "KEYGEN_API_TOKEN is empty in keygen/introspection mode"
+            )
     yield
 
 

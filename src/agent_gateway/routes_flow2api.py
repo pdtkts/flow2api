@@ -33,6 +33,12 @@ async def api_v1_solve(
         )
 
     s = load_settings()
+    registry.ownership.load_json(s.agent_token_ownership_json)
+    if not registry.has_any_owner_for_token(int(token_id)):
+        raise HTTPException(
+            status_code=403,
+            detail="token_id is not authorized for any registered device policy",
+        )
     try:
         result = await registry.dispatch_solve(
             token_id=token_id,

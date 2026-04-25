@@ -2480,25 +2480,79 @@ class FlowClient:
                         {"success": False, "token": None, "browser_ref": browser_id},
                     )
                 return token, browser_id
-            except RuntimeError as e:
-                # 捕获 Docker 环境或依赖缺失的明确错误
-                error_msg = str(e)
-                debug_logger.log_error(f"[reCAPTCHA Browser] {error_msg}")
-                debug_logger.log_recaptcha_execution_error(error_msg)
-                print(f"[reCAPTCHA] ❌ 有头浏览器打码失败: {error_msg}")
-                self._set_request_fingerprint(None)
-                return None, None
-            except ImportError as e:
-                debug_logger.log_error(f"[reCAPTCHA Browser] 导入失败: {str(e)}")
-                debug_logger.log_recaptcha_execution_error(f"ImportError: {e}")
-                print(f"[reCAPTCHA] ❌ playwright 未安装，请运行: pip install playwright && python -m playwright install chromium")
-                self._set_request_fingerprint(None)
-                return None, None
             except Exception as e:
-                debug_logger.log_error(f"[reCAPTCHA Browser] 错误: {str(e)}")
-                debug_logger.log_recaptcha_execution_error(f"{type(e).__name__}: {str(e)}")
-                self._set_request_fingerprint(None)
-                return None, None
+                primary_error = e
+                primary_error_msg = f"{type(e).__name__}: {str(e)}"
+                debug_logger.log_error(f"[reCAPTCHA Browser] 错误: {primary_error_msg}")
+
+                if not bool(config.browser_fallback_to_remote_browser):
+                    debug_logger.log_recaptcha_execution_error(primary_error_msg)
+                    if isinstance(primary_error, ImportError):
+                        print("[reCAPTCHA] ❌ playwright 未安装，请运行: pip install playwright && python -m playwright install chromium")
+                    elif isinstance(primary_error, RuntimeError):
+                        print(f"[reCAPTCHA] ❌ 有头浏览器打码失败: {str(primary_error)}")
+                    self._set_request_fingerprint(None)
+                    return None, None
+
+                # Fallback path: browser -> remote_browser gateway
+                try:
+                    self._get_remote_browser_service_config()
+                except Exception as config_error:
+                    fallback_error_msg = f"fallback unavailable: {type(config_error).__name__}: {config_error}"
+                    combined = (
+                        f"browser->remote_browser fallback failed; "
+                        f"primary={primary_error_msg}; {fallback_error_msg}"
+                    )
+                    debug_logger.log_error(f"[reCAPTCHA BrowserFallback] {combined}")
+                    debug_logger.log_recaptcha_execution_error(combined)
+                    self._set_request_fingerprint(None)
+                    return None, None
+
+                debug_logger.log_info(
+                    "[reCAPTCHA] browser->remote_browser fallback triggered"
+                )
+                try:
+                    solve_timeout = self._resolve_remote_browser_solve_timeout(action)
+                    payload = await self._call_remote_browser_service(
+                        method="POST",
+                        path="/api/v1/solve",
+                        json_data={
+                            "project_id": project_id,
+                            "action": action,
+                            "token_id": token_id,
+                        },
+                        timeout_override=solve_timeout,
+                    )
+                    token = payload.get("token")
+                    session_id = payload.get("session_id")
+                    fingerprint = (
+                        payload.get("fingerprint")
+                        if isinstance(payload.get("fingerprint"), dict)
+                        else None
+                    )
+                    if not token or not session_id:
+                        raise RuntimeError(
+                            f"remote_browser fallback 返回缺少 token/session_id: {payload}"
+                        )
+                    self._set_request_fingerprint(fingerprint if token else None)
+                    debug_logger.log_info(
+                        "[reCAPTCHA] browser->remote_browser fallback succeeded"
+                    )
+                    debug_logger.log_recaptcha_token_success(token)
+                    return token, str(session_id)
+                except Exception as fallback_error:
+                    fallback_error_msg = (
+                        f"{type(fallback_error).__name__}: {str(fallback_error)}"
+                    )
+                    combined = (
+                        f"browser->remote_browser fallback failed; "
+                        f"primary={primary_error_msg}; fallback={fallback_error_msg}"
+                    )
+                    debug_logger.log_error(f"[reCAPTCHA BrowserFallback] {combined}")
+                    debug_logger.log_recaptcha_execution_error(combined)
+                    self._set_request_fingerprint(None)
+                    return None, None
+
         elif captcha_method == "remote_browser":
             try:
                 solve_timeout = self._resolve_remote_browser_solve_timeout(action)

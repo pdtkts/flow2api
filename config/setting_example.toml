@@ -64,6 +64,7 @@ captcha_method = "browser"  # 打码方式: yescaptcha/browser/personal/remote_b
 # browser 模式打开的首页：默认 auth/providers（轻量）；有头 Docker 等可改为 https://labs.google/fx/tools/flow
 browser_captcha_page_url = "https://labs.google/fx/api/auth/providers"
 browser_launch_background = true  # 有头浏览器是否默认后台启动；设为 false 可直接看到窗口
+browser_fallback_to_remote_browser = true  # browser 模式失败时是否自动回退到 remote_browser 网关
 browser_recaptcha_settle_seconds = 3.0  # reload/clr 就绪后的额外稳态等待
 browser_count = 1  # browser 模式的有头浏览器实例数量
 personal_project_pool_size = 4  # personal 模式下单个 Token 默认维护的项目池数量（仅影响项目轮换，不决定打码标签页数量）

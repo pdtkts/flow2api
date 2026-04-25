@@ -38,9 +38,24 @@ Services (merge `docker-compose.yml` + `docker-compose.agent.yml`):
 | `remote_browser_api_key` | Same as **`GATEWAY_FLOW2API_BEARER`** |
 | `remote_browser_timeout` | ≤ `SOLVE_TIMEOUT_SECONDS` (default 120) |
 
+### Optional: browser mode fallback to gateway
+
+You can keep `captcha_method=browser` (local headed Playwright pool) and enable fallback to gateway when local solve fails:
+
+- `browser_fallback_to_remote_browser = true` (Captcha settings)
+- Keep `remote_browser_base_url` and `remote_browser_api_key` configured
+
+Behavior:
+
+- Local headed solve succeeds → gateway is not used.
+- Local headed solve fails → Flow2API calls gateway `/api/v1/solve`.
+- If fallback is disabled, Flow2API keeps the existing browser-only failure behavior.
+
 ## Request and response payloads
 
 Flow2API calls the gateway with **`Authorization: Bearer <remote_browser_api_key>`** (same value as `GATEWAY_FLOW2API_BEARER`). Agents connect over WebSocket and do not use that header.
+
+For a dedicated PC-agent integration walkthrough, see: [agent-client-connection.md](./agent-client-connection.md).
 
 ### `GET /health` (no auth)
 
@@ -159,10 +174,26 @@ Reports an upstream error for that session.
 }
 ```
 
+Or in Keygen mode:
+
+```json
+{
+  "type": "register",
+  "agent_token": "<keygen-token>",
+  "token_ids": [1, 2, 3]
+}
+```
+
 2. **Server → client (ack):**
 
 ```json
-{ "type": "registered", "token_ids": [1, 2, 3] }
+{
+  "type": "registered",
+  "token_ids": [2],
+  "authorized_token_ids": [2],
+  "subject": "machine-1",
+  "auth_method": "keygen"
+}
 ```
 
 3. **Server → client (work):** `solve_job` (one per HTTP `/api/v1/solve` dispatched to this agent’s `token_id`).
@@ -216,7 +247,14 @@ Pydantic reference types: [`src/agent_gateway/schemas.py`](../src/agent_gateway/
 | Variable | Purpose |
 |----------|---------|
 | `GATEWAY_FLOW2API_BEARER` | Must match Flow2API `remote_browser_api_key`. |
-| `GATEWAY_AGENT_DEVICE_TOKEN` | Secret agents send in the WebSocket `register` message. |
+| `GATEWAY_AGENT_DEVICE_TOKEN` | Legacy shared secret (`legacy`/`dual` mode) for WebSocket register. |
+| `GATEWAY_AGENT_AUTH_MODE` | `legacy` (default), `keygen`, or `dual`. |
+| `KEYGEN_VERIFY_MODE` | `jwt` or `introspection`. |
+| `KEYGEN_PUBLIC_KEY` | Keygen public key (jwt mode). |
+| `KEYGEN_API_TOKEN` | Keygen API token (introspection mode). |
+| `KEYGEN_API_URL` | Keygen base URL (default `https://api.keygen.sh`). |
+| `KEYGEN_ISSUER` / `KEYGEN_AUDIENCE` | JWT claim checks for Keygen token verification. |
+| `AGENT_TOKEN_OWNERSHIP_JSON` | Ownership map JSON, e.g. `{"machine-1":[1,2],"license-abc":[3]}`; server intersects this with claimed token_ids. |
 | `SOLVE_TIMEOUT_SECONDS` | Max wait for a token (default 120). |
 | `REDIS_URL` | Reserved for Phase 3 (optional). |
 | `TUNNEL_TOKEN` | See root `.env` — for `cloudflared` in `docker-compose.agent.yml` (merge with `docker-compose.yml`). |

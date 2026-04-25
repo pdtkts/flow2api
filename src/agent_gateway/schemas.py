@@ -11,8 +11,22 @@ from pydantic import BaseModel, Field
 
 class WsRegister(BaseModel):
     type: Literal["register"] = "register"
-    device_token: str
-    token_ids: list[int] = Field(min_length=1)
+    # Legacy shared secret (legacy/dual mode).
+    device_token: str = ""
+    # Keygen-backed identity token (keygen/dual mode).
+    agent_token: str = ""
+    # Optional machine or license identifier (for introspection fallback / debugging).
+    agent_id: str = ""
+    # Client-side hint only; server should intersect against authorized ownership map.
+    token_ids: list[int] = Field(default_factory=list)
+
+
+class AgentIdentity(BaseModel):
+    auth_method: Literal["legacy", "keygen"]
+    subject: str
+    machine_id: str = ""
+    license_id: str = ""
+    account_id: str = ""
 
 
 class WsSolveResult(BaseModel):

@@ -1658,6 +1658,7 @@ async def update_captcha_config(
     remote_browser_base_url = request.get("remote_browser_base_url")
     remote_browser_api_key = request.get("remote_browser_api_key")
     remote_browser_timeout = request.get("remote_browser_timeout", 60)
+    browser_fallback_to_remote_browser = request.get("browser_fallback_to_remote_browser", True)
     browser_proxy_enabled = request.get("browser_proxy_enabled", False)
     browser_proxy_url = request.get("browser_proxy_url", "")
     browser_count = request.get("browser_count", 1)
@@ -1694,6 +1695,7 @@ async def update_captcha_config(
         remote_browser_timeout = max(5, int(remote_browser_timeout or 60))
     except Exception:
         return {"success": False, "message": "远程打码超时时间必须是整数秒"}
+    browser_fallback_to_remote_browser = bool(browser_fallback_to_remote_browser)
 
     if captcha_method == "remote_browser":
         if not (remote_browser_base_url or "").strip():
@@ -1714,6 +1716,7 @@ async def update_captcha_config(
         remote_browser_base_url=remote_browser_base_url,
         remote_browser_api_key=remote_browser_api_key,
         remote_browser_timeout=remote_browser_timeout,
+        browser_fallback_to_remote_browser=browser_fallback_to_remote_browser,
         browser_proxy_enabled=browser_proxy_enabled,
         browser_proxy_url=browser_proxy_url if browser_proxy_enabled else None,
         browser_count=max(1, int(browser_count)) if browser_count else 1,
@@ -1764,6 +1767,9 @@ async def get_captcha_config(token: str = Depends(verify_admin_token)):
         "remote_browser_base_url": captcha_config.remote_browser_base_url,
         "remote_browser_api_key": captcha_config.remote_browser_api_key,
         "remote_browser_timeout": captcha_config.remote_browser_timeout,
+        "browser_fallback_to_remote_browser": bool(
+            getattr(captcha_config, "browser_fallback_to_remote_browser", True)
+        ),
         "browser_proxy_enabled": captcha_config.browser_proxy_enabled,
         "browser_proxy_url": captcha_config.browser_proxy_url or "",
         "browser_count": captcha_config.browser_count,

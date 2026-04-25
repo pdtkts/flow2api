@@ -1,5 +1,6 @@
 import os
 from dataclasses import dataclass
+from typing import Literal
 
 
 @dataclass
@@ -8,6 +9,17 @@ class Settings:
     flow2api_bearer: str
     # WebSocket agents send this in register
     agent_device_token: str
+    agent_auth_mode: Literal["legacy", "keygen", "dual"]
+    keygen_verify_mode: Literal["jwt", "introspection"]
+    keygen_api_url: str
+    keygen_api_token: str
+    keygen_public_key: str
+    keygen_issuer: str
+    keygen_audience: str
+    keygen_leeway_seconds: int
+    # JSON string map: {"machine-id-1":[1,2],"license-id-abc":[3]}
+    # keygen subject identifier -> allowed Flow2API token IDs
+    agent_token_ownership_json: str
     host: str
     port: int
     solve_timeout_seconds: int
@@ -18,9 +30,28 @@ def load_settings() -> Settings:
     t = 120
     if raw_timeout:
         t = max(5, int(raw_timeout))
+    auth_mode = (os.environ.get("GATEWAY_AGENT_AUTH_MODE") or "legacy").strip().lower()
+    if auth_mode not in {"legacy", "keygen", "dual"}:
+        auth_mode = "legacy"
+    verify_mode = (os.environ.get("KEYGEN_VERIFY_MODE") or "jwt").strip().lower()
+    if verify_mode not in {"jwt", "introspection"}:
+        verify_mode = "jwt"
+    raw_leeway = os.environ.get("KEYGEN_LEEWAY_SECONDS")
+    leeway_seconds = 10
+    if raw_leeway:
+        leeway_seconds = max(0, int(raw_leeway))
     return Settings(
         flow2api_bearer=(os.environ.get("GATEWAY_FLOW2API_BEARER") or "").strip(),
         agent_device_token=(os.environ.get("GATEWAY_AGENT_DEVICE_TOKEN") or "").strip(),
+        agent_auth_mode=auth_mode,  # type: ignore[arg-type]
+        keygen_verify_mode=verify_mode,  # type: ignore[arg-type]
+        keygen_api_url=(os.environ.get("KEYGEN_API_URL") or "https://api.keygen.sh").strip(),
+        keygen_api_token=(os.environ.get("KEYGEN_API_TOKEN") or "").strip(),
+        keygen_public_key=(os.environ.get("KEYGEN_PUBLIC_KEY") or "").strip(),
+        keygen_issuer=(os.environ.get("KEYGEN_ISSUER") or "https://api.keygen.sh").strip(),
+        keygen_audience=(os.environ.get("KEYGEN_AUDIENCE") or "flow2api-agent-gateway").strip(),
+        keygen_leeway_seconds=leeway_seconds,
+        agent_token_ownership_json=(os.environ.get("AGENT_TOKEN_OWNERSHIP_JSON") or "").strip(),
         host=(os.environ.get("GATEWAY_HOST") or "0.0.0.0").strip() or "0.0.0.0",
         port=int(os.environ.get("GATEWAY_PORT") or "9080"),
         solve_timeout_seconds=t,

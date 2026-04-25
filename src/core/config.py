@@ -404,6 +404,21 @@ class Config:
         self._config["captcha"]["browser_captcha_page_url"] = (page_url or "").strip()
 
     @property
+    def browser_fallback_to_remote_browser(self) -> bool:
+        """browser 模式失败时是否自动回退到 remote_browser。"""
+        return bool(
+            self._config.get("captcha", {}).get(
+                "browser_fallback_to_remote_browser",
+                True,
+            )
+        )
+
+    def set_browser_fallback_to_remote_browser(self, enabled: bool):
+        if "captcha" not in self._config:
+            self._config["captcha"] = {}
+        self._config["captcha"]["browser_fallback_to_remote_browser"] = bool(enabled)
+
+    @property
     def browser_recaptcha_settle_seconds(self) -> float:
         """有头打码在 reload/clr 就绪后的额外等待秒数。"""
         value = self._config.get("captcha", {}).get("browser_recaptcha_settle_seconds", 3.0)

@@ -2,7 +2,7 @@
 
 Long-running process on a **user PC**:
 
-1. Connects to the **agent gateway** with `wss://…/ws/agents` and the **device** secret.
+1. Connects to the **agent gateway** with `wss://…/ws/agents` and a Keygen-backed **agent token**.
 2. On each `solve_job`, opens **Chromium** (persistent profile) and runs **reCAPTCHA Enterprise** the same way Flow2API’s in-box **browser** mode does.
 
 ### Default `startUrl` (`…/auth/providers`)
@@ -11,45 +11,50 @@ That URL returns **JSON** in a normal navigation, not an HTML page with reCAPTCH
 
 Then: real `token` + new `session_id` + `fingerprint` with `user_agent`.
 
-**Not a wiring test:** this replaces the placeholder `tools/agent-gateway-test/test-agent.mjs` when you need real captcha.
+**Not a wiring test:** this replaces the placeholder `src/tests/agent-gateway-test/test-agent.mjs` when you need real captcha.
 
 ## 1) Install
 
 ```bash
-cd tools/flow2api-pc-agent
+cd src/tests/flow2api-pc-agent
 npm install
 npx playwright install chromium
 ```
 
-## 2) Device token (required)
+## 2) Agent token (required)
 
-Must match the server’s **`GATEWAY_AGENT_DEVICE_TOKEN`** (in Docker `.env` for `agent-gateway`).
+Use a Keygen-issued token that the gateway can verify.
 
 **Option A — environment (no file edit):**
 
 ```powershell
 # PowerShell
-$env:GATEWAY_AGENT_DEVICE_TOKEN = "<paste from server .env>"
+$env:AGENT_TOKEN = "<keygen jwt/introspection token>"
+$env:AGENT_ID = "<optional machine/license hint>"
 $env:AGENT_GATEWAY_WSS = "wss://agents.yourdomain.com/ws/agents"   # optional; see FILE_CONFIG
 npm start
 ```
 
 ```bash
-export GATEWAY_AGENT_DEVICE_TOKEN="..."
+export AGENT_TOKEN="..."
+export AGENT_ID="machine-1"   # optional
 # optional: export AGENT_GATEWAY_WSS=...  export AGENT_TOKEN_IDS=1,2
 npm start
 ```
 
-**Option B — edit `agent.mjs`:** set `FILE_CONFIG.deviceToken` to the same value.
+**Option B — edit `agent.mjs`:** set `FILE_CONFIG.agentToken`.
 
 | Field in `FILE_CONFIG` | Env override | Meaning |
 |------------------------|----------------|--------|
 | `wss` | `AGENT_GATEWAY_WSS` | Public WebSocket URL |
-| `deviceToken` | `GATEWAY_AGENT_DEVICE_TOKEN` | WebSocket **device** secret (not the Flow2API HTTP bearer) |
+| `agentToken` | `AGENT_TOKEN` | Keygen-derived agent credential sent in `register.agent_token` |
+| `agentId` | `AGENT_ID` | Optional machine/license hint for logs/debug |
 | `tokenIds` | `AGENT_TOKEN_IDS` (e.g. `1` or `1,2`) | Flow2API token **row ids** (admin) this PC serves |
 | `userDataDir` | — | Chromium profile; log in to Google/Flow on first run if needed |
 | `startUrl` / `websiteKey` | — | Should match Flow2API captcha **browser** settings |
 | `headless` | — | `false` recommended |
+
+After connect, gateway replies with `registered` and `authorized_token_ids`. Those are the server-accepted IDs after ownership policy intersection.
 
 ## 3) Run
 
@@ -62,7 +67,7 @@ Leave the process running. On first launch, sign in in the profile if prompted.
 ## 4) Server side
 
 - Flow2API: `remote_browser`, `http://agent-gateway:9080`, and HTTP bearer = `GATEWAY_FLOW2API_BEARER`.
-- Docker: `agent-gateway` with both env vars set. Cloudflare: `agents.…` → `http://agent-gateway:9080`.
+- Docker: `agent-gateway` with Keygen verify env vars set (`GATEWAY_AGENT_AUTH_MODE`, `KEYGEN_*`). Cloudflare: `agents.…` → `http://agent-gateway:9080`.
 
 ## Troubleshooting
 

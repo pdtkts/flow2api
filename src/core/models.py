@@ -194,6 +194,7 @@ class CaptchaConfig(BaseModel):
     browser_proxy_enabled: bool = False  # 浏览器打码是否启用代理
     browser_proxy_url: Optional[str] = None  # 浏览器打码代理URL
     browser_captcha_page_url: str = "https://labs.google/fx/api/auth/providers"  # browser 模式打开的首页（可改为 Flow 工具页）
+    browser_fallback_to_remote_browser: bool = True  # browser 模式失败时是否自动回退到 remote_browser
     browser_count: int = 1  # 浏览器打码实例数量
     personal_project_pool_size: int = 4  # 单个 Token 默认维护的项目池数量（仅影响项目轮换）
     personal_max_resident_tabs: int = 5  # 内置浏览器共享打码标签页数量上限

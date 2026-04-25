@@ -6,7 +6,7 @@
  *
  * 1) npm install
  * 2) npx playwright install chromium
- * 3) Edit FILE_CONFIG (wss, deviceToken, startUrl, websiteKey).
+ * 3) Edit FILE_CONFIG (wss, agentToken, tokenIds, startUrl, websiteKey).
  * 4) npm start. Default startUrl is Labs “providers” — that URL returns JSON in a real
  *    browser, so this agent mirrors browser_captcha.py: stub page + enterprise.js
  *    (not JSON-only navigation).
@@ -74,11 +74,14 @@ function parseTokenIdsFromEnv() {
   return ns.length ? ns : null;
 }
 
-/** Default config — override or use env: GATEWAY_AGENT_DEVICE_TOKEN, AGENT_GATEWAY_WSS, AGENT_TOKEN_IDS */
+/** Default config — override or use env: AGENT_TOKEN, AGENT_GATEWAY_WSS, AGENT_TOKEN_IDS */
 const FILE_CONFIG = {
   // WebSocket to agent-gateway (HTTPS https://agents.prismacreative.online/ is the same host; path is /ws/agents)
   wss: "wss://agents.prismacreative.online/ws/agents",
-  deviceToken: "zF0h5SRz7STIz3O1kFIO2iSiEzid9UtWYtjF9EHFWP0",
+  // Keygen-derived agent token (jwt/introspection token)
+  agentToken: "",
+  // Optional machine/license hint (server may ignore; useful for debugging/audit trails).
+  agentId: "",
   tokenIds: [1],
   userDataDir: path.join(__dirname, ".pc-agent-profile"),
   startUrl: "https://labs.google/fx/api/auth/providers",
@@ -90,7 +93,8 @@ const FILE_CONFIG = {
 const CONFIG = {
   ...FILE_CONFIG,
   wss: (process.env.AGENT_GATEWAY_WSS || FILE_CONFIG.wss).trim(),
-  deviceToken: (process.env.GATEWAY_AGENT_DEVICE_TOKEN || FILE_CONFIG.deviceToken || "").trim(),
+  agentToken: (process.env.AGENT_TOKEN || FILE_CONFIG.agentToken || "").trim(),
+  agentId: (process.env.AGENT_ID || FILE_CONFIG.agentId || "").trim(),
   tokenIds: parseTokenIdsFromEnv() ?? FILE_CONFIG.tokenIds,
 };
 
@@ -184,12 +188,12 @@ function sendJson(ws, obj) {
 }
 
 function main() {
-  if (!CONFIG.deviceToken) {
+  if (!CONFIG.agentToken) {
     console.error(
-      "Missing device token. Use one of:\n" +
-        "  PowerShell:  $env:GATEWAY_AGENT_DEVICE_TOKEN=\"<same as server .env>\"; npm start\n" +
-        "  bash:        export GATEWAY_AGENT_DEVICE_TOKEN=... && npm start\n" +
-        "  Or set FILE_CONFIG.deviceToken in agent.mjs (server env name: GATEWAY_AGENT_DEVICE_TOKEN)"
+      "Missing AGENT_TOKEN. Use one of:\n" +
+        "  PowerShell:  $env:AGENT_TOKEN=\"<keygen token>\"; npm start\n" +
+        "  bash:        export AGENT_TOKEN=... && npm start\n" +
+        "  Or set FILE_CONFIG.agentToken in agent.mjs"
     );
     process.exit(1);
   }
@@ -203,11 +207,12 @@ function main() {
   ws.on("open", () => {
     const reg = {
       type: "register",
-      device_token: CONFIG.deviceToken,
+      agent_token: CONFIG.agentToken,
+      agent_id: CONFIG.agentId,
       token_ids: CONFIG.tokenIds,
     };
     ws.send(JSON.stringify(reg));
-    console.log("connected → register", reg.token_ids);
+    console.log("connected → register claimed token_ids", reg.token_ids);
   });
 
   ws.on("message", (data) => {
@@ -218,7 +223,14 @@ function main() {
       return;
     }
     if (msg.type === "registered") {
-      console.log("registered", msg.token_ids);
+      const authorized = Array.isArray(msg.authorized_token_ids)
+        ? msg.authorized_token_ids
+        : msg.token_ids;
+      console.log("registered", {
+        auth_method: msg.auth_method || "unknown",
+        subject: msg.subject || "",
+        authorized_token_ids: authorized || [],
+      });
       return;
     }
     if (msg.type === "error" && msg.detail) {
