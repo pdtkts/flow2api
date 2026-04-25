@@ -258,10 +258,17 @@ class FileCache:
                 response_text=""
             )
 
-    def _generate_cache_filename(self, url: str, media_type: str, api_key_id: Optional[int] = None) -> str:
+    def _generate_cache_filename(
+        self,
+        url: str,
+        media_type: str,
+        api_key_id: Optional[int] = None,
+        flow_project_id: Optional[str] = None,
+    ) -> str:
         """Generate unique filename for cached file"""
-        # Bind cache entries to API key to avoid cross-key sharing.
-        digest_source = f"{api_key_id or 0}:{url}"
+        # Bind cache entries to API key and Flow project to avoid cross-key / cross-project sharing.
+        pid = (flow_project_id or "").strip()
+        digest_source = f"{api_key_id or 0}:{pid}:{url}"
         url_hash = hashlib.md5(digest_source.encode()).hexdigest()
         ext = self._guess_extension(url, media_type)
 
@@ -288,6 +295,7 @@ class FileCache:
         media_type: str,
         api_key_id: Optional[int] = None,
         token_id: Optional[int] = None,
+        flow_project_id: Optional[str] = None,
     ) -> str:
         """
         Download file from URL and cache it locally
@@ -299,7 +307,9 @@ class FileCache:
         Returns:
             Local cache filename
         """
-        filename = self._generate_cache_filename(url, media_type, api_key_id=api_key_id)
+        filename = self._generate_cache_filename(
+            url, media_type, api_key_id=api_key_id, flow_project_id=flow_project_id
+        )
         file_path = self.cache_dir / filename
         download_lock = self._download_locks.setdefault(filename, asyncio.Lock())
 
@@ -311,6 +321,7 @@ class FileCache:
                         filename=filename,
                         api_key_id=api_key_id,
                         token_id=token_id,
+                        flow_project_id=flow_project_id,
                         media_type=media_type,
                         source_url=url,
                     )
@@ -322,6 +333,7 @@ class FileCache:
                         filename=filename,
                         api_key_id=api_key_id,
                         token_id=token_id,
+                        flow_project_id=flow_project_id,
                         media_type=media_type,
                         source_url=url,
                     )
@@ -356,6 +368,7 @@ class FileCache:
                             filename=filename,
                             api_key_id=api_key_id,
                             token_id=token_id,
+                            flow_project_id=flow_project_id,
                             media_type=media_type,
                             source_url=url,
                         )
@@ -412,6 +425,7 @@ class FileCache:
                             filename=filename,
                             api_key_id=api_key_id,
                             token_id=token_id,
+                            flow_project_id=flow_project_id,
                             media_type=media_type,
                             source_url=url,
                         )
@@ -463,6 +477,7 @@ class FileCache:
                             filename=filename,
                             api_key_id=api_key_id,
                             token_id=token_id,
+                            flow_project_id=flow_project_id,
                             media_type=media_type,
                             source_url=url,
                         )
@@ -495,6 +510,7 @@ class FileCache:
         resolution: str = "",
         api_key_id: Optional[int] = None,
         token_id: Optional[int] = None,
+        flow_project_id: Optional[str] = None,
     ) -> str:
         """
         Cache base64 encoded image data to local file
@@ -509,8 +525,10 @@ class FileCache:
         import base64
         import uuid
 
-        # Generate unique filename
-        unique_id = hashlib.md5(f"{uuid.uuid4()}{time.time()}".encode()).hexdigest()
+        pid = (flow_project_id or "").strip()
+        unique_id = hashlib.md5(
+            f"{api_key_id or 0}:{pid}:{uuid.uuid4()}:{time.time()}".encode()
+        ).hexdigest()
         suffix = f"_{resolution}" if resolution else ""
         filename = f"{unique_id}{suffix}.jpg"
         file_path = self.cache_dir / filename
@@ -524,6 +542,7 @@ class FileCache:
                 filename=filename,
                 api_key_id=api_key_id,
                 token_id=token_id,
+                flow_project_id=flow_project_id,
                 media_type="image",
                 source_url=None,
             )
@@ -647,18 +666,21 @@ class FileCache:
         filename: str,
         api_key_id: Optional[int],
         token_id: Optional[int],
+        flow_project_id: Optional[str] = None,
         media_type: str,
         source_url: Optional[str],
     ):
         if self.db is None or api_key_id is None:
             return
         try:
+            fpid = (flow_project_id or "").strip() or None
             await self.db.upsert_cache_file(
                 filename=filename,
                 api_key_id=int(api_key_id),
                 token_id=token_id,
                 media_type=media_type,
                 source_url=source_url,
+                flow_project_id=fpid,
             )
         except Exception as exc:
             debug_logger.log_warning(f"Failed to record cache metadata: {exc}")

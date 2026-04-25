@@ -7,7 +7,7 @@ import random
 import json
 import mimetypes
 import re
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from curl_cffi.requests import AsyncSession
 from pathlib import Path
@@ -192,7 +192,11 @@ def _extract_cache_filename(url: str) -> Optional[str]:
     return Path(filename).name
 
 
-async def retrieve_image_data(url: str, api_key_id: Optional[int] = None) -> Optional[bytes]:
+async def retrieve_image_data(
+    url: str,
+    api_key_id: Optional[int] = None,
+    allowed_token_ids: Optional[Set[int]] = None,
+) -> Optional[bytes]:
     """Read image bytes from protected cache endpoint or remote URL."""
     file_cache = getattr(generation_handler, "file_cache", None)
     try:
@@ -204,6 +208,18 @@ async def retrieve_image_data(url: str, api_key_id: Optional[int] = None) -> Opt
             metadata = await db.get_cache_file_for_api_key(cache_filename, api_key_id)
             if not metadata:
                 return None
+            meta_flow = _strip_optional_project_id(metadata.get("flow_project_id"))
+            if meta_flow:
+                parsed = urlparse(url)
+                q_vals = parse_qs(parsed.query).get("project_id") or []
+                url_project = _strip_optional_project_id(q_vals[0] if q_vals else None)
+                if not url_project or url_project != meta_flow:
+                    return None
+                proj = await db.get_project_by_id(url_project, api_key_id)
+                if not proj:
+                    return None
+                if allowed_token_ids is not None and int(proj.token_id) not in allowed_token_ids:
+                    return None
             filename = Path(cache_filename).name
             local_file_path = file_cache.cache_dir / filename
 
@@ -248,7 +264,11 @@ async def retrieve_image_data(url: str, api_key_id: Optional[int] = None) -> Opt
     return None
 
 
-async def _load_image_bytes_from_uri(uri: str, api_key_id: Optional[int] = None) -> bytes:
+async def _load_image_bytes_from_uri(
+    uri: str,
+    api_key_id: Optional[int] = None,
+    allowed_token_ids: Optional[Set[int]] = None,
+) -> bytes:
     if not uri:
         raise HTTPException(status_code=400, detail="Image URI cannot be empty")
 
@@ -257,7 +277,9 @@ async def _load_image_bytes_from_uri(uri: str, api_key_id: Optional[int] = None)
         return image_bytes
 
     if uri.startswith("http://") or uri.startswith("https://") or "/api/cache/file/" in uri:
-        image_bytes = await retrieve_image_data(uri, api_key_id=api_key_id)
+        image_bytes = await retrieve_image_data(
+            uri, api_key_id=api_key_id, allowed_token_ids=allowed_token_ids
+        )
         if image_bytes:
             return image_bytes
         raise HTTPException(status_code=400, detail=f"Failed to load image from {uri}")
@@ -319,6 +341,7 @@ def _sanitize_media_prompt(prompt: str) -> str:
 async def _extract_prompt_and_images_from_openai_messages(
     messages: List[ChatMessage],
     api_key_id: Optional[int] = None,
+    allowed_token_ids: Optional[Set[int]] = None,
 ) -> tuple[str, List[bytes]]:
     last_message = messages[-1]
     content = last_message.content
@@ -336,7 +359,13 @@ async def _extract_prompt_and_images_from_openai_messages(
                     prompt_parts.append(text)
             elif item_type == "image_url":
                 image_url = item.get("image_url", {}).get("url", "")
-                images.append(await _load_image_bytes_from_uri(image_url, api_key_id=api_key_id))
+                images.append(
+                    await _load_image_bytes_from_uri(
+                        image_url,
+                        api_key_id=api_key_id,
+                        allowed_token_ids=allowed_token_ids,
+                    )
+                )
 
     prompt = "\n".join(part for part in prompt_parts if part).strip()
     return prompt, images
@@ -347,6 +376,7 @@ async def _append_openai_reference_images(
     messages: List[ChatMessage],
     images: List[bytes],
     api_key_id: Optional[int] = None,
+    allowed_token_ids: Optional[Set[int]] = None,
 ) -> List[bytes]:
     model_config = MODEL_CONFIG.get(model)
     if not model_config or model_config["type"] != "image" or len(messages) <= 1:
@@ -364,7 +394,11 @@ async def _append_openai_reference_images(
                 if not image_url.startswith("http") and "/api/cache/file/" not in image_url:
                     continue
                 try:
-                    downloaded_bytes = await retrieve_image_data(image_url, api_key_id=api_key_id)
+                    downloaded_bytes = await retrieve_image_data(
+                        image_url,
+                        api_key_id=api_key_id,
+                        allowed_token_ids=allowed_token_ids,
+                    )
                     if downloaded_bytes:
                         images.insert(0, downloaded_bytes)
                         debug_logger.log_info(
@@ -384,6 +418,7 @@ async def _append_openai_reference_images(
 async def _extract_prompt_and_images_from_gemini_contents(
     contents: List[GeminiContent],
     api_key_id: Optional[int] = None,
+    allowed_token_ids: Optional[Set[int]] = None,
 ) -> tuple[str, List[bytes]]:
     if not contents:
         raise HTTPException(status_code=400, detail="contents cannot be empty")
@@ -416,7 +451,13 @@ async def _extract_prompt_and_images_from_gemini_contents(
                     status_code=400,
                     detail=f"Unsupported fileData mime type: {part.fileData.mimeType}",
                 )
-            images.append(await _load_image_bytes_from_uri(part.fileData.fileUri, api_key_id=api_key_id))
+            images.append(
+                await _load_image_bytes_from_uri(
+                    part.fileData.fileUri,
+                    api_key_id=api_key_id,
+                    allowed_token_ids=allowed_token_ids,
+                )
+            )
 
     prompt = "\n".join(part for part in prompt_parts if part).strip()
     return prompt, images
@@ -445,16 +486,30 @@ def _get_request_base_url(request: Request) -> Optional[str]:
 async def _normalize_openai_request(
     request: ChatCompletionRequest,
     api_key_id: Optional[int] = None,
+    allowed_token_ids: Optional[Set[int]] = None,
 ) -> NormalizedGenerationRequest:
     if request.messages:
         prompt, images = await _extract_prompt_and_images_from_openai_messages(
             request.messages,
             api_key_id=api_key_id,
+            allowed_token_ids=allowed_token_ids,
         )
         if request.image and not images:
-            images.append(await _load_image_bytes_from_uri(request.image, api_key_id=api_key_id))
+            images.append(
+                await _load_image_bytes_from_uri(
+                    request.image,
+                    api_key_id=api_key_id,
+                    allowed_token_ids=allowed_token_ids,
+                )
+            )
         model = _resolve_request_model(request.model, request)
-        images = await _append_openai_reference_images(model, request.messages, images, api_key_id=api_key_id)
+        images = await _append_openai_reference_images(
+            model,
+            request.messages,
+            images,
+            api_key_id=api_key_id,
+            allowed_token_ids=allowed_token_ids,
+        )
         return NormalizedGenerationRequest(
             model=model,
             prompt=prompt,
@@ -469,7 +524,12 @@ async def _normalize_openai_request(
             generationConfig=request.generationConfig,
             project_id=request.project_id,
         )
-        normalized = await _normalize_gemini_request(request.model, gemini_request)
+        normalized = await _normalize_gemini_request(
+            request.model,
+            gemini_request,
+            api_key_id=api_key_id,
+            allowed_token_ids=allowed_token_ids,
+        )
         normalized.messages = request.messages
         if request.project_id is not None and normalized.project_id is None:
             normalized.project_id = _strip_optional_project_id(request.project_id)
@@ -482,9 +542,14 @@ async def _normalize_gemini_request(
     model: str,
     request: GeminiGenerateContentRequest,
     api_key_id: Optional[int] = None,
+    allowed_token_ids: Optional[Set[int]] = None,
 ) -> NormalizedGenerationRequest:
     resolved_model = _resolve_request_model(model, request)
-    prompt, images = await _extract_prompt_and_images_from_gemini_contents(request.contents, api_key_id=api_key_id)
+    prompt, images = await _extract_prompt_and_images_from_gemini_contents(
+        request.contents,
+        api_key_id=api_key_id,
+        allowed_token_ids=allowed_token_ids,
+    )
     system_instruction = _extract_text_from_gemini_content(request.systemInstruction)
     model_config = MODEL_CONFIG.get(resolved_model)
     media_model = bool(model_config and model_config.get("type") in {"image", "video"})
@@ -616,14 +681,20 @@ def _enrich_payload_with_direct_url(payload: Dict[str, Any]) -> Dict[str, Any]:
     return payload
 
 
-async def _build_image_parts_from_uri(uri: str, api_key_id: Optional[int] = None) -> List[Dict[str, Any]]:
+async def _build_image_parts_from_uri(
+    uri: str,
+    api_key_id: Optional[int] = None,
+    allowed_token_ids: Optional[Set[int]] = None,
+) -> List[Dict[str, Any]]:
     if uri.startswith("data:image"):
         mime_type, _ = _decode_data_url(uri)
         match = DATA_URL_RE.match(uri)
         if match:
             return [{"inlineData": {"mimeType": mime_type, "data": match.group("data")}}]
 
-    image_bytes = await retrieve_image_data(uri, api_key_id=api_key_id)
+    image_bytes = await retrieve_image_data(
+        uri, api_key_id=api_key_id, allowed_token_ids=allowed_token_ids
+    )
     if image_bytes:
         mime_type = _detect_image_mime_type(
             image_bytes,
@@ -660,7 +731,11 @@ def _build_video_parts_from_uri(uri: str) -> List[Dict[str, Any]]:
     ]
 
 
-async def _build_gemini_parts_from_output(output: str, api_key_id: Optional[int] = None) -> List[Dict[str, Any]]:
+async def _build_gemini_parts_from_output(
+    output: str,
+    api_key_id: Optional[int] = None,
+    allowed_token_ids: Optional[Set[int]] = None,
+) -> List[Dict[str, Any]]:
     if not output:
         return []
 
@@ -668,7 +743,11 @@ async def _build_gemini_parts_from_output(output: str, api_key_id: Optional[int]
     if image_matches:
         parts: List[Dict[str, Any]] = []
         for uri in image_matches:
-            parts.extend(await _build_image_parts_from_uri(uri, api_key_id=api_key_id))
+            parts.extend(
+                await _build_image_parts_from_uri(
+                    uri, api_key_id=api_key_id, allowed_token_ids=allowed_token_ids
+                )
+            )
         return parts
 
     video_matches = HTML_VIDEO_RE.findall(output)
@@ -689,6 +768,7 @@ async def _build_gemini_success_payload(
     payload: Dict[str, Any],
     response_model: str,
     api_key_id: Optional[int] = None,
+    allowed_token_ids: Optional[Set[int]] = None,
 ) -> Dict[str, Any]:
     output = _extract_openai_message_content(payload)
     return {
@@ -696,7 +776,11 @@ async def _build_gemini_success_payload(
             {
                 "content": {
                     "role": "model",
-                    "parts": await _build_gemini_parts_from_output(output, api_key_id=api_key_id),
+                    "parts": await _build_gemini_parts_from_output(
+                        output,
+                        api_key_id=api_key_id,
+                        allowed_token_ids=allowed_token_ids,
+                    ),
                 },
                 "finishReason": "STOP",
                 "index": 0,
@@ -721,6 +805,7 @@ async def _convert_openai_stream_chunk_to_gemini_event(
     payload: Dict[str, Any],
     response_model: str,
     api_key_id: Optional[int] = None,
+    allowed_token_ids: Optional[Set[int]] = None,
 ) -> Optional[str]:
     choices = payload.get("choices", [])
     if not choices:
@@ -735,7 +820,11 @@ async def _convert_openai_stream_chunk_to_gemini_event(
     if text:
         candidate["content"] = {
             "role": "model",
-            "parts": await _build_gemini_parts_from_output(text, api_key_id=api_key_id),
+            "parts": await _build_gemini_parts_from_output(
+                text,
+                api_key_id=api_key_id,
+                allowed_token_ids=allowed_token_ids,
+            ),
         }
     if finish_reason:
         candidate["finishReason"] = finish_reason
@@ -810,6 +899,7 @@ async def _iterate_gemini_stream(
                 payload,
                 response_model,
                 api_key_id=api_key_id,
+                allowed_token_ids=allowed_token_ids,
             )
             if event:
                 yield event
@@ -826,6 +916,7 @@ async def _iterate_gemini_stream(
             payload,
             response_model,
             api_key_id=api_key_id,
+            allowed_token_ids=allowed_token_ids,
         )
         if event:
             yield event
@@ -1007,7 +1098,11 @@ async def create_flow_project(
 
 
 @router.get("/api/cache/file/{filename}")
-async def get_cached_media(filename: str, auth_ctx: AuthContext = Depends(verify_api_key_flexible)):
+async def get_cached_media(
+    filename: str,
+    project_id: Optional[str] = Query(None),
+    auth_ctx: AuthContext = Depends(verify_api_key_flexible),
+):
     handler = _ensure_generation_handler()
     if auth_ctx.key_id is None:
         raise HTTPException(status_code=403, detail="Managed API key required")
@@ -1015,6 +1110,20 @@ async def get_cached_media(filename: str, auth_ctx: AuthContext = Depends(verify
     metadata = await handler.db.get_cache_file_for_api_key(safe_name, auth_ctx.key_id)
     if not metadata:
         raise HTTPException(status_code=403, detail="Cache file not owned by this API key")
+    meta_flow = _strip_optional_project_id(metadata.get("flow_project_id"))
+    if meta_flow:
+        q = _strip_optional_project_id(project_id)
+        if not q or q != meta_flow:
+            raise HTTPException(
+                status_code=403,
+                detail="project_id query parameter required and must match the cache entry",
+            )
+        proj = await handler.db.get_project_by_id(q, auth_ctx.key_id)
+        if not proj:
+            raise HTTPException(status_code=400, detail="project_id not found for this API key")
+        tid = int(proj.token_id)
+        if tid not in auth_ctx.allowed_accounts:
+            raise HTTPException(status_code=400, detail="project_id is not assigned to this API key")
     file_path = handler.file_cache.cache_dir / safe_name
     if not file_path.exists() or not file_path.is_file():
         raise HTTPException(status_code=404, detail="Cache file not found")
@@ -1094,13 +1203,17 @@ async def create_chat_completion(
     try:
         if auth_ctx.key_id is None:
             raise HTTPException(status_code=403, detail="Managed API key required for generation")
-        normalized = await _normalize_openai_request(request, api_key_id=auth_ctx.key_id)
+        base_allowed = _resolve_allowed_token_ids(auth_ctx)
+        normalized = await _normalize_openai_request(
+            request,
+            api_key_id=auth_ctx.key_id,
+            allowed_token_ids=base_allowed,
+        )
         if not normalized.prompt:
             raise HTTPException(status_code=400, detail="Prompt cannot be empty")
 
         request_base_url = _get_request_base_url(raw_request)
         pin_set, pin_pid = await _resolve_project_pin(normalized.project_id, auth_ctx)
-        base_allowed = _resolve_allowed_token_ids(auth_ctx)
         allowed_token_ids = pin_set if pin_set is not None else base_allowed
         if pin_pid is not None:
             normalized = replace(normalized, project_id=pin_pid)
@@ -1151,13 +1264,18 @@ async def generate_content(
     try:
         if auth_ctx.key_id is None:
             raise HTTPException(status_code=403, detail="Managed API key required for generation")
-        normalized = await _normalize_gemini_request(model, request, api_key_id=auth_ctx.key_id)
+        base_allowed = _resolve_allowed_token_ids(auth_ctx)
+        normalized = await _normalize_gemini_request(
+            model,
+            request,
+            api_key_id=auth_ctx.key_id,
+            allowed_token_ids=base_allowed,
+        )
         if not normalized.prompt:
             raise HTTPException(status_code=400, detail="Prompt cannot be empty")
 
         request_base_url = _get_request_base_url(raw_request)
         pin_set, pin_pid = await _resolve_project_pin(normalized.project_id, auth_ctx)
-        base_allowed = _resolve_allowed_token_ids(auth_ctx)
         allowed_token_ids = pin_set if pin_set is not None else base_allowed
         if pin_pid is not None:
             normalized = replace(normalized, project_id=pin_pid)
@@ -1176,7 +1294,12 @@ async def generate_content(
             return _build_gemini_error_response_from_handler(payload)
 
         return JSONResponse(
-            content=await _build_gemini_success_payload(payload, normalized.model, api_key_id=auth_ctx.key_id)
+            content=await _build_gemini_success_payload(
+                payload,
+                normalized.model,
+                api_key_id=auth_ctx.key_id,
+                allowed_token_ids=allowed_token_ids,
+            )
         )
 
     except HTTPException as exc:
@@ -1204,13 +1327,18 @@ async def stream_generate_content(
     try:
         if auth_ctx.key_id is None:
             raise HTTPException(status_code=403, detail="Managed API key required for generation")
-        normalized = await _normalize_gemini_request(model, request, api_key_id=auth_ctx.key_id)
+        base_allowed = _resolve_allowed_token_ids(auth_ctx)
+        normalized = await _normalize_gemini_request(
+            model,
+            request,
+            api_key_id=auth_ctx.key_id,
+            allowed_token_ids=base_allowed,
+        )
         if not normalized.prompt:
             raise HTTPException(status_code=400, detail="Prompt cannot be empty")
 
         request_base_url = _get_request_base_url(raw_request)
         pin_set, pin_pid = await _resolve_project_pin(normalized.project_id, auth_ctx)
-        base_allowed = _resolve_allowed_token_ids(auth_ctx)
         allowed_token_ids = pin_set if pin_set is not None else base_allowed
         if pin_pid is not None:
             normalized = replace(normalized, project_id=pin_pid)

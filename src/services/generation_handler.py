@@ -4,6 +4,7 @@ import base64
 import json
 import time
 from pathlib import Path
+from urllib.parse import quote
 from typing import Optional, AsyncGenerator, List, Dict, Any
 from ..core.logger import debug_logger
 from ..core.config import config
@@ -1322,8 +1323,11 @@ class GenerationHandler:
                                     resolution_name,
                                     api_key_id=api_key_id,
                                     token_id=token.id,
+                                    flow_project_id=project_id,
                                 )
-                                local_url = self._build_cache_url(cached_filename, response_state)
+                                local_url = self._build_cache_url(
+                                    cached_filename, response_state, flow_project_id=project_id
+                                )
                                 response_state["url"] = local_url
                                 response_state["generated_assets"]["upscaled_image"]["local_url"] = local_url
                                 response_state["generated_assets"]["upscaled_image"]["url"] = local_url
@@ -1419,8 +1423,11 @@ class GenerationHandler:
                         "image",
                         api_key_id=api_key_id,
                         token_id=token.id,
+                        flow_project_id=project_id,
                     )
-                    local_url = self._build_cache_url(cached_filename, response_state)
+                    local_url = self._build_cache_url(
+                        cached_filename, response_state, flow_project_id=project_id
+                    )
                     if stream:
                         yield self._create_stream_chunk("✅ 1K 图片缓存成功,准备返回缓存地址...\n")
                 except Exception as e:
@@ -1836,8 +1843,11 @@ class GenerationHandler:
                                 "video",
                                 api_key_id=api_key_id,
                                 token_id=token.id,
+                                flow_project_id=project_id,
                             )
-                            local_url = self._build_cache_url(cached_filename, response_state)
+                            local_url = self._build_cache_url(
+                                cached_filename, response_state, flow_project_id=project_id
+                            )
                             if stream:
                                 yield self._create_stream_chunk("✅ 视频缓存成功,准备返回缓存地址...\n")
                         except Exception as e:
@@ -2077,8 +2087,17 @@ class GenerationHandler:
 
         return f"http://{server_host}:{config.server_port}"
 
-    def _build_cache_url(self, filename: str, response_state: Optional[Dict[str, Any]] = None) -> str:
-        return f"{self._get_base_url(response_state)}/api/cache/file/{filename}"
+    def _build_cache_url(
+        self,
+        filename: str,
+        response_state: Optional[Dict[str, Any]] = None,
+        flow_project_id: Optional[str] = None,
+    ) -> str:
+        base = f"{self._get_base_url(response_state)}/api/cache/file/{filename}"
+        pid = (flow_project_id or "").strip()
+        if pid:
+            return f"{base}?project_id={quote(pid, safe='')}"
+        return base
 
     async def _update_request_log_progress(
         self,

@@ -483,6 +483,7 @@ class Database:
                         filename TEXT NOT NULL UNIQUE,
                         api_key_id INTEGER NOT NULL,
                         token_id INTEGER,
+                        flow_project_id TEXT,
                         media_type TEXT,
                         source_url TEXT,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -670,6 +671,14 @@ class Database:
                         except Exception as e:
                             print(f"  ✗ Failed to add column '{col_name}': {e}")
 
+            if await self._table_exists(db, "cache_files"):
+                if not await self._column_exists(db, "cache_files", "flow_project_id"):
+                    try:
+                        await db.execute("ALTER TABLE cache_files ADD COLUMN flow_project_id TEXT")
+                        print("  ✓ Added column 'flow_project_id' to cache_files table")
+                    except Exception as e:
+                        print(f"  ✗ Failed to add column 'flow_project_id' to cache_files: {e}")
+
             # ========== Step 3: Ensure all config tables have default rows ==========
             # Note: This will NOT overwrite existing config rows
             # It only ensures missing rows are created with default values from setting.toml
@@ -678,6 +687,7 @@ class Database:
             await db.execute("CREATE INDEX IF NOT EXISTS idx_projects_api_key_created_at ON projects(api_key_id, created_at DESC)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_request_logs_api_key_id_created_at ON request_logs(api_key_id, created_at DESC)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_cache_files_api_key_filename ON cache_files(api_key_id, filename)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_cache_files_api_key_project ON cache_files(api_key_id, flow_project_id)")
 
             await db.commit()
             print("Database migration check completed.")
@@ -798,6 +808,7 @@ class Database:
                     filename TEXT NOT NULL UNIQUE,
                     api_key_id INTEGER NOT NULL,
                     token_id INTEGER,
+                    flow_project_id TEXT,
                     media_type TEXT,
                     source_url TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -1020,6 +1031,7 @@ class Database:
             await db.execute("CREATE INDEX IF NOT EXISTS idx_request_logs_token_id_created_at ON request_logs(token_id, created_at DESC)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_request_logs_api_key_id_created_at ON request_logs(api_key_id, created_at DESC)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_cache_files_api_key_filename ON cache_files(api_key_id, filename)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_cache_files_api_key_project ON cache_files(api_key_id, flow_project_id)")
 
             # Token stats lookup index
             await db.execute("CREATE INDEX IF NOT EXISTS idx_token_stats_token_id ON token_stats(token_id)")
@@ -1041,6 +1053,10 @@ class Database:
                 if not await self._column_exists(db, "request_logs", "api_key_id"):
                     await db.execute("ALTER TABLE request_logs ADD COLUMN api_key_id INTEGER")
                     print("  ✓ Added column 'api_key_id' to request_logs (init_db upgrade)")
+            if await self._table_exists(db, "cache_files"):
+                if not await self._column_exists(db, "cache_files", "flow_project_id"):
+                    await db.execute("ALTER TABLE cache_files ADD COLUMN flow_project_id TEXT")
+                    print("  ✓ Added column 'flow_project_id' to cache_files (init_db upgrade)")
         except Exception as e:
             print(f"  ✗ api_key_id column upgrade failed: {e}")
             raise
@@ -2027,21 +2043,23 @@ class Database:
         token_id: Optional[int],
         media_type: str,
         source_url: Optional[str] = None,
+        flow_project_id: Optional[str] = None,
     ):
         """Upsert cache file ownership metadata."""
         async with self._connect(write=True) as db:
             await db.execute(
                 """
-                INSERT INTO cache_files (filename, api_key_id, token_id, media_type, source_url, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                INSERT INTO cache_files (filename, api_key_id, token_id, flow_project_id, media_type, source_url, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                 ON CONFLICT(filename) DO UPDATE SET
                     api_key_id = excluded.api_key_id,
                     token_id = excluded.token_id,
+                    flow_project_id = excluded.flow_project_id,
                     media_type = excluded.media_type,
                     source_url = excluded.source_url,
                     updated_at = CURRENT_TIMESTAMP
                 """,
-                (filename, api_key_id, token_id, media_type, source_url),
+                (filename, api_key_id, token_id, flow_project_id, media_type, source_url),
             )
             await db.commit()
 
