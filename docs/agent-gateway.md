@@ -48,8 +48,15 @@ You can keep `captcha_method=browser` (local headed Playwright pool) and enable 
 Behavior:
 
 - Local headed solve succeeds → gateway is not used.
-- Local headed solve fails → Flow2API calls gateway `/api/v1/solve`.
+- Local headed solve fails → Flow2API can call gateway `/api/v1/solve`.
 - If fallback is disabled, Flow2API keeps the existing browser-only failure behavior.
+
+For headed Docker path (`docker-compose.headed.yml`) with `browser_fallback_to_remote_browser=true`, upstream
+reCAPTCHA rejection (`PUBLIC_ERROR_UNUSUAL_ACTIVITY` / `reCAPTCHA evaluation failed`) follows a fixed sequence:
+
+- attempt 1: local headed browser
+- attempt 2: local headed browser retry
+- attempt 3: remote gateway fallback
 
 ## Request and response payloads
 
