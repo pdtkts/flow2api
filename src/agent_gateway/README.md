@@ -48,7 +48,6 @@ Set `GATEWAY_AGENT_AUTH_MODE=keygen` (or `dual` during migration) and configure:
 - `KEYGEN_VERIFY_MODE=jwt|introspection`
 - `KEYGEN_PUBLIC_KEY` (jwt mode) or `KEYGEN_API_TOKEN` + `KEYGEN_API_URL` (introspection mode)
 - `KEYGEN_ACCOUNT` (required for account-scoped introspection)
-- `AGENT_TOKEN_OWNERSHIP_JSON` map, e.g. `{"machine-1":[1,2],"license-abc":[3]}`
 
 In Keygen mode, each agent sends `agent_token` and receives `registered` with identity metadata.
 

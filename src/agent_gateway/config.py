@@ -20,9 +20,6 @@ class Settings:
     keygen_issuer: str
     keygen_audience: str
     keygen_leeway_seconds: int
-    # JSON string map: {"machine-id-1":[1,2],"license-id-abc":[3]}
-    # keygen subject identifier -> allowed Flow2API token IDs
-    agent_token_ownership_json: str
     host: str
     port: int
     solve_timeout_seconds: int
@@ -56,7 +53,6 @@ def load_settings() -> Settings:
         keygen_issuer=(os.environ.get("KEYGEN_ISSUER") or "https://api.keygen.sh").strip(),
         keygen_audience=(os.environ.get("KEYGEN_AUDIENCE") or "flow2api-agent-gateway").strip(),
         keygen_leeway_seconds=leeway_seconds,
-        agent_token_ownership_json=(os.environ.get("AGENT_TOKEN_OWNERSHIP_JSON") or "").strip(),
         host=(os.environ.get("GATEWAY_HOST") or "0.0.0.0").strip() or "0.0.0.0",
         port=int(os.environ.get("GATEWAY_PORT") or "9080"),
         solve_timeout_seconds=t,
