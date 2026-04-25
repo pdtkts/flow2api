@@ -679,6 +679,7 @@ class GenerationHandler:
             default_timeout=config.cache_timeout,
             proxy_manager=proxy_manager,
             flow_client=flow_client,
+            db=db,
         )
 
     def _create_generation_result(self) -> Dict[str, Any]:
@@ -778,6 +779,7 @@ class GenerationHandler:
         stream: bool = False,
         base_url_override: Optional[str] = None,
         allowed_token_ids: Optional[set[int]] = None,
+        api_key_id: Optional[int] = None,
     ) -> AsyncGenerator:
         """统一生成入口
 
@@ -800,7 +802,7 @@ class GenerationHandler:
         generation_result = self._create_generation_result()
         response_state = self._create_response_state()
         response_state["base_url"] = (base_url_override or "").strip().rstrip("/") or None
-        request_log_state: Dict[str, Any] = {"id": None, "progress": 0}
+        request_log_state: Dict[str, Any] = {"id": None, "progress": 0, "api_key_id": api_key_id}
 
         # 防止并发链路复用到上一次请求的指纹上下文
         if hasattr(self.flow_client, "clear_request_fingerprint"):
@@ -832,6 +834,7 @@ class GenerationHandler:
             )
             request_log_state["id"] = await self._log_request(
                 token_id=None,
+                api_key_id=api_key_id,
                 operation=request_operation,
                 request_data=request_payload,
                 response_data={"status": "processing", "status_text": "started", "progress": 0, "request_id": request_id},
@@ -878,6 +881,7 @@ class GenerationHandler:
             debug_logger.log_error(f"[GENERATION] {error_msg}")
             await self._log_request(
                 token_id=None,
+                api_key_id=api_key_id,
                 operation=request_operation,
                 request_data=request_payload,
                 response_data={"error": error_msg, "performance": perf_trace},
@@ -938,7 +942,7 @@ class GenerationHandler:
                 return
 
             ensure_project_started_at = time.time()
-            project_id = await self.token_manager.ensure_project_exists(token.id)
+            project_id = await self.token_manager.ensure_project_exists(token.id, api_key_id=api_key_id)
             perf_trace["ensure_project_ms"] = int((time.time() - ensure_project_started_at) * 1000)
             debug_logger.log_info(f"[GENERATION] Project ID: {project_id}")
             await self._update_request_log_progress(
@@ -961,6 +965,7 @@ class GenerationHandler:
                 debug_logger.log_info(f"[GENERATION] 开始图片生成流程...")
                 async for chunk in self._handle_image_generation(
                     token, project_id, model_config, prompt, images, stream,
+                    api_key_id=api_key_id,
                     perf_trace=perf_trace,
                     generation_result=generation_result,
                     response_state=response_state,
@@ -972,6 +977,7 @@ class GenerationHandler:
                 debug_logger.log_info(f"[GENERATION] 开始视频生成流程...")
                 async for chunk in self._handle_video_generation(
                     token, project_id, model_config, prompt, images, stream,
+                    api_key_id=api_key_id,
                     perf_trace=perf_trace,
                     generation_result=generation_result,
                     response_state=response_state,
@@ -994,6 +1000,7 @@ class GenerationHandler:
                 prompt_for_log = prompt if len(prompt) <= 2000 else f"{prompt[:2000]}...(truncated)"
                 await self._log_request(
                     token.id if token else None,
+                    api_key_id,
                     request_operation,
                     request_payload,
                     {"error": error_msg, "performance": perf_trace},
@@ -1053,6 +1060,7 @@ class GenerationHandler:
 
             await self._log_request(
                 token.id,
+                api_key_id,
                 request_operation,
                 request_payload,
                 response_data,
@@ -1073,6 +1081,7 @@ class GenerationHandler:
             prompt_for_log = prompt if len(prompt) <= 2000 else f"{prompt[:2000]}...(truncated)"
             await self._log_request(
                 token.id if token else None,
+                api_key_id,
                 request_operation if generation_type else "generate_unknown",
                 request_payload if 'request_payload' in locals() else {"model": model},
                 {"error": error_msg, "performance": perf_trace},
@@ -1098,6 +1107,7 @@ class GenerationHandler:
             prompt_for_log = prompt if len(prompt) <= 2000 else f"{prompt[:2000]}...(truncated)"
             await self._log_request(
                 token.id if token else None,
+                api_key_id,
                 request_operation if generation_type else "generate_unknown",
                 request_payload if 'request_payload' in locals() else {"model": model},
                 {"error": error_msg, "performance": perf_trace},
@@ -1135,6 +1145,7 @@ class GenerationHandler:
         prompt: str,
         images: Optional[List[bytes]],
         stream: bool,
+        api_key_id: Optional[int] = None,
         perf_trace: Optional[Dict[str, Any]] = None,
         generation_result: Optional[Dict[str, Any]] = None,
         response_state: Optional[Dict[str, Any]] = None,
@@ -1291,8 +1302,13 @@ class GenerationHandler:
                                 )
                                 if stream:
                                     yield self._create_stream_chunk(f"缓存 {resolution_name} 图片中...\n")
-                                cached_filename = await self.file_cache.cache_base64_image(encoded_image, resolution_name)
-                                local_url = f"{self._get_base_url(response_state)}/tmp/{cached_filename}"
+                                cached_filename = await self.file_cache.cache_base64_image(
+                                    encoded_image,
+                                    resolution_name,
+                                    api_key_id=api_key_id,
+                                    token_id=token.id,
+                                )
+                                local_url = self._build_cache_url(cached_filename, response_state)
                                 response_state["url"] = local_url
                                 response_state["generated_assets"]["upscaled_image"]["local_url"] = local_url
                                 response_state["generated_assets"]["upscaled_image"]["url"] = local_url
@@ -1301,12 +1317,18 @@ class GenerationHandler:
                                     yield self._create_stream_chunk(f"✅ {resolution_name} 图片缓存成功\n")
                                     yield self._create_stream_chunk(
                                         f"![Generated Image]({local_url})",
-                                        finish_reason="stop"
+                                        finish_reason="stop",
+                                        extra_fields={
+                                            "generated_assets": response_state.get("generated_assets")
+                                        },
                                     )
                                 else:
                                     yield self._create_completion_response(
                                         local_url,
-                                        media_type="image"
+                                        media_type="image",
+                                        extra_fields={
+                                            "generated_assets": response_state.get("generated_assets")
+                                        },
                                     )
                                 if image_trace is not None:
                                     image_trace["upsample_ms"] = int((time.time() - upsample_started_at) * 1000)
@@ -1324,12 +1346,18 @@ class GenerationHandler:
                                     yield self._create_stream_chunk(f"⚠️ 缓存失败: {cache_error}，返回内联图片...\n")
                                     yield self._create_stream_chunk(
                                         f"![Generated Image]({base64_url})",
-                                        finish_reason="stop"
+                                        finish_reason="stop",
+                                        extra_fields={
+                                            "generated_assets": response_state.get("generated_assets")
+                                        },
                                     )
                                 else:
                                     yield self._create_completion_response(
                                         base64_url,
-                                        media_type="image"
+                                        media_type="image",
+                                        extra_fields={
+                                            "generated_assets": response_state.get("generated_assets")
+                                        },
                                     )
                                 if image_trace is not None:
                                     image_trace["upsample_ms"] = int((time.time() - upsample_started_at) * 1000)
@@ -1371,8 +1399,13 @@ class GenerationHandler:
                 if stream:
                     yield self._create_stream_chunk("正在缓存 1K 图片文件...\n")
                 try:
-                    cached_filename = await self.file_cache.download_and_cache(image_url, "image")
-                    local_url = f"{self._get_base_url(response_state)}/tmp/{cached_filename}"
+                    cached_filename = await self.file_cache.download_and_cache(
+                        image_url,
+                        "image",
+                        api_key_id=api_key_id,
+                        token_id=token.id,
+                    )
+                    local_url = self._build_cache_url(cached_filename, response_state)
                     if stream:
                         yield self._create_stream_chunk("✅ 1K 图片缓存成功,准备返回缓存地址...\n")
                 except Exception as e:
@@ -1399,12 +1432,14 @@ class GenerationHandler:
             if stream:
                 yield self._create_stream_chunk(
                     f"![Generated Image]({local_url})",
-                    finish_reason="stop"
+                    finish_reason="stop",
+                    extra_fields={"generated_assets": response_state.get("generated_assets")},
                 )
             else:
                 yield self._create_completion_response(
                     local_url,  # 直接传URL,让方法内部格式化
-                    media_type="image"
+                    media_type="image",
+                    extra_fields={"generated_assets": response_state.get("generated_assets")},
                 )
 
         finally:
@@ -1418,6 +1453,7 @@ class GenerationHandler:
         prompt: str,
         images: Optional[List[bytes]],
         stream: bool,
+        api_key_id: Optional[int] = None,
         perf_trace: Optional[Dict[str, Any]] = None,
         generation_result: Optional[Dict[str, Any]] = None,
         response_state: Optional[Dict[str, Any]] = None,
@@ -1627,6 +1663,7 @@ class GenerationHandler:
             task = Task(
                 task_id=task_id,
                 token_id=token.id,
+                api_key_id=api_key_id,
                 model=model_config["model_key"],
                 prompt=prompt,
                 status="processing",
@@ -1654,6 +1691,7 @@ class GenerationHandler:
                 operations,
                 stream,
                 upsample_config,
+                api_key_id,
                 generation_result,
                 response_state,
                 request_log_state,
@@ -1670,6 +1708,7 @@ class GenerationHandler:
         operations: List[Dict],
         stream: bool,
         upsample_config: Optional[Dict] = None,
+        api_key_id: Optional[int] = None,
         generation_result: Optional[Dict[str, Any]] = None,
         response_state: Optional[Dict[str, Any]] = None,
         request_log_state: Optional[Dict[str, Any]] = None
@@ -1758,7 +1797,7 @@ class GenerationHandler:
                                 
                                 # 递归轮询放大结果（不再放大）
                                 async for chunk in self._poll_video_result(
-                                    token, project_id, upsample_operations, stream, None, generation_result, response_state, request_log_state
+                                    token, project_id, upsample_operations, stream, None, api_key_id, generation_result, response_state, request_log_state
                                 ):
                                     yield chunk
                                 return
@@ -1777,8 +1816,13 @@ class GenerationHandler:
                         try:
                             if stream:
                                 yield self._create_stream_chunk("正在缓存视频文件...\n")
-                            cached_filename = await self.file_cache.download_and_cache(video_url, "video")
-                            local_url = f"{self._get_base_url(response_state)}/tmp/{cached_filename}"
+                            cached_filename = await self.file_cache.download_and_cache(
+                                video_url,
+                                "video",
+                                api_key_id=api_key_id,
+                                token_id=token.id,
+                            )
+                            local_url = self._build_cache_url(cached_filename, response_state)
                             if stream:
                                 yield self._create_stream_chunk("✅ 视频缓存成功,准备返回缓存地址...\n")
                         except Exception as e:
@@ -1815,12 +1859,14 @@ class GenerationHandler:
                     if stream:
                         yield self._create_stream_chunk(
                             f"<video src='{local_url}' controls style='max-width:100%'></video>",
-                            finish_reason="stop"
+                            finish_reason="stop",
+                            extra_fields={"generated_assets": response_state.get("generated_assets")},
                         )
                     else:
                         yield self._create_completion_response(
                             local_url,  # 直接传URL,让方法内部格式化
-                            media_type="video"
+                            media_type="video",
+                            extra_fields={"generated_assets": response_state.get("generated_assets")},
                         )
                     return
 
@@ -1892,7 +1938,13 @@ class GenerationHandler:
             return ""
         return "\n\n".join(lines) + "\n\n"
 
-    def _create_stream_chunk(self, content: str, role: str = None, finish_reason: str = None) -> str:
+    def _create_stream_chunk(
+        self,
+        content: str,
+        role: str = None,
+        finish_reason: str = None,
+        extra_fields: Optional[Dict[str, Any]] = None,
+    ) -> str:
         """创建流式响应chunk"""
         import json
         import time
@@ -1917,9 +1969,20 @@ class GenerationHandler:
         else:
             chunk["choices"][0]["delta"]["reasoning_content"] = self._format_stream_reasoning_for_ui(content)
 
+        if extra_fields and finish_reason:
+            for key, value in extra_fields.items():
+                if value is not None and key not in chunk:
+                    chunk[key] = value
+
         return f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
 
-    def _create_completion_response(self, content: str, media_type: str = "image", is_availability_check: bool = False) -> str:
+    def _create_completion_response(
+        self,
+        content: str,
+        media_type: str = "image",
+        is_availability_check: bool = False,
+        extra_fields: Optional[Dict[str, Any]] = None,
+    ) -> str:
         """创建非流式响应
 
         Args:
@@ -1958,6 +2021,11 @@ class GenerationHandler:
             }]
         }
 
+        if extra_fields:
+            for key, value in extra_fields.items():
+                if value is not None and key not in response:
+                    response[key] = value
+
         return json.dumps(response, ensure_ascii=False)
 
     def _create_error_response(self, error_message: str, status_code: int = 500) -> str:
@@ -1994,11 +2062,15 @@ class GenerationHandler:
 
         return f"http://{server_host}:{config.server_port}"
 
+    def _build_cache_url(self, filename: str, response_state: Optional[Dict[str, Any]] = None) -> str:
+        return f"{self._get_base_url(response_state)}/api/cache/{filename}"
+
     async def _update_request_log_progress(
         self,
         request_log_state: Optional[Dict[str, Any]],
         *,
         token_id: Optional[int] = None,
+        api_key_id: Optional[int] = None,
         status_text: str,
         progress: int,
         response_extra: Optional[Dict[str, Any]] = None,
@@ -2039,9 +2111,13 @@ class GenerationHandler:
         request_log_state["last_progress_update_at"] = now
 
         try:
+            effective_api_key_id = api_key_id
+            if effective_api_key_id is None and isinstance(request_log_state, dict):
+                effective_api_key_id = request_log_state.get("api_key_id")
             await self.db.update_request_log(
                 log_id,
                 token_id=token_id,
+                api_key_id=effective_api_key_id,
                 response_body=json.dumps(payload, ensure_ascii=False),
                 status_code=102,
                 duration=0,
@@ -2054,6 +2130,7 @@ class GenerationHandler:
     async def _log_request(
         self,
         token_id: Optional[int],
+        api_key_id: Optional[int],
         operation: str,
         request_data: Dict[str, Any],
         response_data: Dict[str, Any],
@@ -2080,6 +2157,7 @@ class GenerationHandler:
                 await self.db.update_request_log(
                     log_id,
                     token_id=token_id,
+                    api_key_id=api_key_id,
                     operation=operation,
                     request_body=request_body,
                     response_body=response_body,
@@ -2092,6 +2170,7 @@ class GenerationHandler:
 
             log = RequestLog(
                 token_id=token_id,
+                api_key_id=api_key_id,
                 operation=operation,
                 request_body=request_body,
                 response_body=response_body,
