@@ -329,7 +329,22 @@ class FlowClient:
                     debug_logger.log_error(f"[API FAILED] Request Body: {json_data}")
                     debug_logger.log_error(f"[API FAILED] Response: {response.text}")
                     
+                    self._log_recaptcha_verdict_from_response(
+                        url=url,
+                        json_data=json_data,
+                        status_code=response.status_code,
+                        error_reason=error_reason,
+                        response_text=response.text,
+                    )
                     raise Exception(error_reason)
+
+                self._log_recaptcha_verdict_from_response(
+                    url=url,
+                    json_data=json_data,
+                    status_code=response.status_code,
+                    error_reason="",
+                    response_text=response.text,
+                )
 
                 return response.json()
 
@@ -366,6 +381,65 @@ class FlowClient:
                     )
 
             raise Exception(f"Flow API request failed: {error_msg}")
+
+    def _is_generation_request_with_recaptcha(self, url: str, json_data: Optional[Dict[str, Any]]) -> bool:
+        """Best-effort detection for generation requests carrying recaptchaContext token."""
+        if not isinstance(json_data, dict):
+            return False
+        lowered = (url or "").lower()
+        if not any(key in lowered for key in [
+            "batchgenerateimages",
+            "batchasyncgeneratevideotext",
+            "batchasyncgeneratevideoimage",
+            "upsampleimage",
+            "remix",
+        ]):
+            return False
+        cc = json_data.get("clientContext")
+        if not isinstance(cc, dict):
+            return False
+        rc = cc.get("recaptchaContext")
+        if not isinstance(rc, dict):
+            return False
+        token = rc.get("token")
+        return isinstance(token, str) and bool(token.strip())
+
+    def _log_recaptcha_verdict_from_response(
+        self,
+        url: str,
+        json_data: Optional[Dict[str, Any]],
+        status_code: int,
+        error_reason: str,
+        response_text: str,
+    ) -> None:
+        """Emit explicit accepted/rejected verdict for recaptcha-protected generation endpoints."""
+        if not debug_logger.should_log_recaptcha():
+            return
+        if not self._is_generation_request_with_recaptcha(url, json_data):
+            return
+
+        short_url = (url or "").split("?")[0]
+        if status_code < 400:
+            debug_logger.log_info(
+                f"[reCAPTCHA verdict] ACCEPTED by upstream endpoint: status={status_code}, url={short_url}"
+            )
+            return
+
+        detail = (error_reason or response_text or "").strip().replace("\n", " ")
+        detail_lower = detail.lower()
+        if len(detail) > 240:
+            detail = detail[:240] + "..."
+
+        if "public_error_unusual_activity" in detail_lower or "recaptcha evaluation failed" in detail_lower:
+            debug_logger.log_warning(
+                f"[reCAPTCHA verdict] REJECTED by upstream endpoint: status={status_code}, reason={detail}"
+            )
+            return
+
+        if "recaptcha" in detail_lower or "public_error" in detail_lower:
+            debug_logger.log_warning(
+                f"[reCAPTCHA verdict] UPSTREAM captcha-related error: status={status_code}, reason={detail}"
+            )
 
     def _should_fallback_to_urllib(self, error_message: str) -> bool:
         """判断是否应从 curl_cffi 回退到 urllib。"""
