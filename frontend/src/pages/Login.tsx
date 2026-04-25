@@ -10,6 +10,7 @@ import { toast } from "sonner"
 export default function Login() {
   const [username, setUsername] = useState("")
   const [password, setPassword] = useState("")
+  const [rememberMe, setRememberMe] = useState(true)
   const [loading, setLoading] = useState(false)
   const navigate = useNavigate()
   const { login, isAuthenticated } = useAuth()
@@ -28,7 +29,7 @@ export default function Login() {
       const r = await fetch("/api/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username, password }),
+        body: JSON.stringify({ username, password, remember_me: rememberMe }),
       })
       const d = await r.json()
       if (d.success) {
@@ -85,6 +86,19 @@ export default function Login() {
                   onChange={(e) => setPassword(e.target.value)}
                   className="transition-all duration-200 focus:ring-2 focus:ring-primary/20"
                 />
+              </div>
+              <div className="flex items-center gap-2 pt-1">
+                <input
+                  id="remember-me"
+                  name="remember-me"
+                  type="checkbox"
+                  checked={rememberMe}
+                  onChange={(e) => setRememberMe(e.target.checked)}
+                  className="h-4 w-4 rounded border border-input accent-primary"
+                />
+                <Label htmlFor="remember-me" className="text-sm font-normal text-muted-foreground cursor-pointer">
+                  Keep me signed in (30 days). Uncheck for this device only (24 hours).
+                </Label>
               </div>
             </CardContent>
             <CardFooter>

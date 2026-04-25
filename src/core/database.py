@@ -819,6 +819,17 @@ class Database:
                 )
             """)
 
+            # Admin UI session tokens (survive process restarts)
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS admin_sessions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    token TEXT NOT NULL UNIQUE,
+                    created_at INTEGER NOT NULL,
+                    expires_at INTEGER NOT NULL,
+                    last_used_at INTEGER
+                )
+            """)
+
             # Proxy config table
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS proxy_config (
@@ -1563,6 +1574,50 @@ class Database:
                 query = f"UPDATE admin_config SET {', '.join(updates)} WHERE id = 1"
                 await db.execute(query, params)
                 await db.commit()
+
+    async def insert_admin_session(self, token: str, expires_at_unix: int) -> None:
+        now = int(datetime.now().timestamp())
+        async with self._connect(write=True) as db:
+            await db.execute(
+                """
+                INSERT INTO admin_sessions (token, created_at, expires_at, last_used_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (token, now, expires_at_unix, now),
+            )
+            await db.commit()
+
+    async def is_admin_session_valid(self, token: str) -> bool:
+        now = int(datetime.now().timestamp())
+        async with self._connect(write=True) as db:
+            cursor = await db.execute(
+                "SELECT expires_at FROM admin_sessions WHERE token = ?",
+                (token,),
+            )
+            row = await cursor.fetchone()
+            if not row:
+                return False
+            expires_at = int(row[0])
+            if expires_at <= now:
+                await db.execute("DELETE FROM admin_sessions WHERE token = ?", (token,))
+                await db.commit()
+                return False
+            await db.execute(
+                "UPDATE admin_sessions SET last_used_at = ? WHERE token = ?",
+                (now, token),
+            )
+            await db.commit()
+            return True
+
+    async def delete_admin_session(self, token: str) -> None:
+        async with self._connect(write=True) as db:
+            await db.execute("DELETE FROM admin_sessions WHERE token = ?", (token,))
+            await db.commit()
+
+    async def delete_all_admin_sessions(self) -> None:
+        async with self._connect(write=True) as db:
+            await db.execute("DELETE FROM admin_sessions")
+            await db.commit()
 
     async def get_proxy_config(self) -> Optional[ProxyConfig]:
         """Get proxy configuration"""

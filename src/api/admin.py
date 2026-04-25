@@ -36,8 +36,10 @@ db: Database = None
 concurrency_manager: Optional[ConcurrencyManager] = None
 api_key_manager: Optional[ApiKeyManager] = None
 
-# Store active admin session tokens (in production, use Redis or database)
-active_admin_tokens = set()
+# Admin session TTLs (seconds)
+_ADMIN_SESSION_TTL_REMEMBER = 30 * 24 * 3600  # 30 days when "remember me" is on
+_ADMIN_SESSION_TTL_BROWSER = 24 * 3600  # 24 hours when off
+
 SUPPORTED_API_CAPTCHA_METHODS = {"yescaptcha", "capmonster", "ezcaptcha", "capsolver"}
 
 
@@ -531,6 +533,7 @@ def set_dependencies(
 class LoginRequest(BaseModel):
     username: str
     password: str
+    remember_me: bool = True
 
 
 class AddTokenRequest(BaseModel):
@@ -657,8 +660,7 @@ async def verify_admin_token(authorization: str = Header(None)):
 
     token = authorization[7:]
 
-    # Check if token is in active session tokens
-    if token not in active_admin_tokens:
+    if not await db.is_admin_session_valid(token):
         raise HTTPException(status_code=401, detail="Invalid or expired admin token")
 
     return token
@@ -677,8 +679,9 @@ async def admin_login(request: LoginRequest):
     # Generate independent session token
     session_token = f"admin-{secrets.token_urlsafe(32)}"
 
-    # Store in active tokens
-    active_admin_tokens.add(session_token)
+    ttl = _ADMIN_SESSION_TTL_REMEMBER if request.remember_me else _ADMIN_SESSION_TTL_BROWSER
+    expires_at = int(time.time()) + ttl
+    await db.insert_admin_session(session_token, expires_at)
 
     return {
         "success": True,
@@ -690,7 +693,7 @@ async def admin_login(request: LoginRequest):
 @router.post("/api/admin/logout")
 async def admin_logout(token: str = Depends(verify_admin_token)):
     """Admin logout - invalidate session token"""
-    active_admin_tokens.discard(token)
+    await db.delete_admin_session(token)
     return {"success": True, "message": "退出登录成功"}
 
 
@@ -717,7 +720,7 @@ async def change_password(
     await db.reload_config_to_memory()
 
     # 🔑 Invalidate all admin session tokens (force re-login for security)
-    active_admin_tokens.clear()
+    await db.delete_all_admin_sessions()
 
     return {"success": True, "message": "密码修改成功,请重新登录"}
 
