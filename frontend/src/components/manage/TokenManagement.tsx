@@ -518,6 +518,7 @@ export function TokenManagement() {
             <Table>
               <TableHeader>
                 <TableRow>
+                  <TableHead className="w-16 text-center">ID</TableHead>
                   <TableHead>Email</TableHead>
                   <TableHead className="text-center">Status</TableHead>
                   <TableHead className="text-center">Expires</TableHead>
@@ -533,7 +534,7 @@ export function TokenManagement() {
               <TableBody>
                 {!tokens.length ? (
                   <TableRow>
-                    <TableCell colSpan={10} className="text-center text-muted-foreground py-8">
+                    <TableCell colSpan={11} className="text-center text-muted-foreground py-8">
                       {loading ? "Loading…" : "No tokens"}
                     </TableCell>
                   </TableRow>
@@ -545,6 +546,7 @@ export function TokenManagement() {
                     const shortPid = pid.length > 8 ? `${pid.slice(0, 8)}…` : pid || "—"
                     return (
                       <TableRow key={t.id}>
+                        <TableCell className="text-center font-medium">{t.id}</TableCell>
                         <TableCell className="font-medium max-w-[180px] truncate" title={t.email || ""}>
                           {t.email || "—"}
                         </TableCell>
