@@ -1468,3 +1468,31 @@ async def stream_generate_content(
             status_code=500,
             content=_build_gemini_error_payload(500, str(exc)),
         )
+
+
+@router.get("/v1/api-key/allowed-tokens")
+async def get_allowed_tokens(
+    auth_ctx: AuthContext = Depends(verify_api_key_flexible),
+):
+    """Get the allowed tokens (accounts) and their credits for the current API key."""
+    handler = _ensure_generation_handler()
+    db = handler.db
+    
+    tokens_info = []
+    for token_id in auth_ctx.allowed_accounts:
+        token = await db.get_token(token_id)
+        if token and token.is_active:
+            tokens_info.append({
+                "id": token.id,
+                "email": token.email,
+                "label": token.remark or token.name or "default",
+                "credits": token.credits,
+                "user_paygate_tier": token.user_paygate_tier,
+                "is_active": token.is_active
+            })
+            
+    return {
+        "success": True,
+        "api_key_label": auth_ctx.key_label,
+        "allowed_tokens": tokens_info
+    }
