@@ -313,6 +313,12 @@ export function ApiKeyManagement() {
   }
 
   const tokenEmail = (tid: number) => tokens.find((x) => x.id === tid)?.email || "—"
+  const activeProjectByToken = new Map(
+    keyProjectAccounts.map((a) => [
+      a.token_id,
+      a.active_project_id || a.current_project_id || null,
+    ])
+  )
 
   const submitEditKey = async () => {
     if (!token || editingKeyId == null) return
@@ -735,28 +741,43 @@ export function ApiKeyManagement() {
                 </p>
 
                 {keyProjectAccounts.length ? (
-                  <div className="grid gap-2 sm:grid-cols-2">
-                    {keyProjectAccounts.map((a) => (
-                      <Card key={a.token_id} className="border bg-card shadow-none">
-                        <CardHeader className="space-y-1 p-3 pb-2">
-                          <CardTitle className="text-xs font-medium text-muted-foreground">Account #{a.token_id}</CardTitle>
-                          <p className="truncate text-sm font-medium" title={a.email || ""}>
-                            {a.email || "—"}
-                          </p>
-                        </CardHeader>
-                        <CardContent className="space-y-1 p-3 pt-0 text-xs">
-                          <p className="text-muted-foreground">Current project</p>
-                          <p className="font-mono text-[10px] break-all" title={a.current_project_id || ""}>
-                            {a.current_project_id || "—"}
-                          </p>
-                          {a.current_project_name ? (
-                            <p className="text-muted-foreground truncate" title={a.current_project_name}>
-                              {a.current_project_name}
-                            </p>
-                          ) : null}
-                        </CardContent>
-                      </Card>
-                    ))}
+                  <div className="rounded-md border bg-background">
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead className="text-xs">Account</TableHead>
+                          <TableHead className="text-xs">Email</TableHead>
+                          <TableHead className="text-xs">Active project ID</TableHead>
+                          <TableHead className="text-xs">Active project name</TableHead>
+                          <TableHead className="text-xs">Status</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {keyProjectAccounts.map((a) => {
+                          const activeProjectId = a.active_project_id || a.current_project_id || null
+                          const activeProjectName = a.active_project_name || a.current_project_name || null
+                          return (
+                            <TableRow key={a.token_id}>
+                              <TableCell className="text-xs">#{a.token_id}</TableCell>
+                              <TableCell className="max-w-[220px] truncate text-xs" title={a.email || ""}>
+                                {a.email || "—"}
+                              </TableCell>
+                              <TableCell className="max-w-[280px] truncate font-mono text-[10px]" title={activeProjectId || ""}>
+                                {activeProjectId || "—"}
+                              </TableCell>
+                              <TableCell className="max-w-[200px] truncate text-xs" title={activeProjectName || ""}>
+                                {activeProjectName || "—"}
+                              </TableCell>
+                              <TableCell>
+                                <Badge variant={activeProjectId ? "default" : "secondary"} className="text-[10px]">
+                                  {activeProjectId ? "has active project" : "no active project"}
+                                </Badge>
+                              </TableCell>
+                            </TableRow>
+                          )
+                        })}
+                      </TableBody>
+                    </Table>
                   </div>
                 ) : (
                   <p className="text-xs text-muted-foreground">No accounts assigned — add accounts above to manage projects.</p>
@@ -765,12 +786,12 @@ export function ApiKeyManagement() {
                 <div className="rounded-md border bg-background">
                   <Table>
                     <TableHeader>
-                      <TableRow>
+                        <TableRow>
                         <TableHead className="text-xs">Project ID</TableHead>
                         <TableHead className="text-xs">Name</TableHead>
                         <TableHead className="text-xs">Token</TableHead>
                         <TableHead className="text-xs">Created</TableHead>
-                        <TableHead className="text-xs">Active</TableHead>
+                          <TableHead className="text-xs">Active row</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
@@ -800,8 +821,21 @@ export function ApiKeyManagement() {
                             </TableCell>
                             <TableCell className="text-[10px] text-muted-foreground">{p.created_at || "—"}</TableCell>
                             <TableCell>
-                              <Badge variant={p.is_active !== false ? "default" : "secondary"} className="text-[10px]">
-                                {p.is_active !== false ? "yes" : "no"}
+                              <Badge
+                                variant={
+                                  p.is_current_for_token ||
+                                  (typeof p.token_id === "number" &&
+                                    activeProjectByToken.get(p.token_id) === p.project_id)
+                                    ? "default"
+                                    : "secondary"
+                                }
+                                className="text-[10px]"
+                              >
+                                {p.is_current_for_token ||
+                                (typeof p.token_id === "number" &&
+                                  activeProjectByToken.get(p.token_id) === p.project_id)
+                                  ? "current"
+                                  : "inactive"}
                               </Badge>
                             </TableCell>
                           </TableRow>

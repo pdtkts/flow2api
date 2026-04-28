@@ -1629,13 +1629,19 @@ async def list_managed_api_key_projects(
     projects = await db.list_projects_by_api_key(key_id, limit=limit, offset=offset)
 
     accounts_out = []
+    active_by_token: dict[int, str] = {}
     for account_id in await db.get_api_key_account_ids(key_id):
         t = await token_manager.get_token(account_id)
         if t:
+            active_pid = t.current_project_id
+            if active_pid:
+                active_by_token[int(t.id)] = str(active_pid)
             accounts_out.append(
                 {
                     "token_id": t.id,
                     "email": t.email or None,
+                    "active_project_id": active_pid,
+                    "active_project_name": t.current_project_name,
                     "current_project_id": t.current_project_id,
                     "current_project_name": t.current_project_name,
                 }
@@ -1645,14 +1651,26 @@ async def list_managed_api_key_projects(
                 {
                     "token_id": account_id,
                     "email": None,
+                    "active_project_id": None,
+                    "active_project_name": None,
                     "current_project_id": None,
                     "current_project_name": None,
                 }
             )
 
+    projects_out = []
+    for p in projects:
+        pd = _project_to_dict(p)
+        tid_raw = pd.get("token_id")
+        tid = int(tid_raw) if isinstance(tid_raw, int) else None
+        pd["is_current_for_token"] = bool(
+            tid is not None and active_by_token.get(tid) == str(pd.get("project_id") or "")
+        )
+        projects_out.append(pd)
+
     return {
         "success": True,
-        "projects": [_project_to_dict(p) for p in projects],
+        "projects": projects_out,
         "total": total,
         "limit": limit,
         "offset": offset,

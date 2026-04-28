@@ -114,6 +114,7 @@ export interface TokenProjectRow {
   project_name: string
   token_id?: number
   is_active?: boolean
+  is_current_for_token?: boolean
   created_at?: string | null
 }
 
@@ -121,6 +122,8 @@ export interface TokenProjectRow {
 export interface ManagedApiKeyAccountSummary {
   token_id: number
   email?: string | null
+  active_project_id?: string | null
+  active_project_name?: string | null
   current_project_id?: string | null
   current_project_name?: string | null
 }
