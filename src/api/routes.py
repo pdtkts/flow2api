@@ -1,6 +1,7 @@
 """API routes for OpenAI-compatible and Gemini generateContent endpoints."""
 
 from dataclasses import dataclass, replace
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Set, Tuple
 import base64
 import json
@@ -1106,7 +1107,15 @@ async def create_flow_project(
         target_accounts = sorted(auth_ctx.allowed_accounts)
 
     handler = _ensure_generation_handler()
-    title = (body.title or "").strip() or None
+    raw_title = (body.title or "").strip()
+    if raw_title:
+        title = raw_title
+    else:
+        label = " ".join((auth_ctx.key_label or "managed").split()) or "managed"
+        now = datetime.now()
+        month = now.strftime("%b").upper()
+        date_time = f"{month} {now.strftime('%d %Y %I:%M %p')}".replace("AM", "am").replace("PM", "pm")
+        title = f"{label} {date_time}"
     created_projects = []
     try:
         for account_id in target_accounts:

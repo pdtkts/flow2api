@@ -291,6 +291,7 @@ class FlowProjectCreateRequest(BaseModel):
 
     # If omitted, the server creates one project for each assigned account.
     account_id: Optional[int] = None
+    # If omitted, API key label + current date is used (for example: "default 2026-04-28").
     title: Optional[str] = None
     set_as_current: bool = True
 
