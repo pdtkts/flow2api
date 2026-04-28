@@ -601,14 +601,17 @@ class TokenManager:
             if config.captcha_method == "personal":
                 from .browser_captcha_personal import BrowserCaptchaService
                 service = await BrowserCaptchaService.get_instance(self.db)
+                refresh_kwargs = {}
             else:
                 from .browser_captcha import BrowserCaptchaService
                 service = await BrowserCaptchaService.get_instance(self.db)
+                # Browser headed mode supports token-level proxy resolution during ST refresh.
+                refresh_kwargs = {"token_id": token_id}
 
             refresh_timeout_seconds = 45.0
             try:
                 new_st = await asyncio.wait_for(
-                    service.refresh_session_token(token.current_project_id),
+                    service.refresh_session_token(token.current_project_id, **refresh_kwargs),
                     timeout=refresh_timeout_seconds,
                 )
             except asyncio.TimeoutError:
