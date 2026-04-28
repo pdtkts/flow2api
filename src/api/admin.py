@@ -1663,9 +1663,11 @@ async def list_managed_api_key_projects(
         pd = _project_to_dict(p)
         tid_raw = pd.get("token_id")
         tid = int(tid_raw) if isinstance(tid_raw, int) else None
-        pd["is_current_for_token"] = bool(
+        is_current_for_token = bool(
             tid is not None and active_by_token.get(tid) == str(pd.get("project_id") or "")
         )
+        pd["is_current_for_token"] = is_current_for_token
+        pd["project_status"] = "active" if is_current_for_token else "old"
         projects_out.append(pd)
 
     return {

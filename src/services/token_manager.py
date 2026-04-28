@@ -722,11 +722,9 @@ class TokenManager:
             if not st:
                 raise ValueError("Token has no session token")
 
-            projects = [
-                p for p in await self.db.get_projects_by_token(token_id, api_key_id=api_key_id) if p.is_active
-            ]
-            projects = self._sort_projects(projects)
-            next_index = len(projects) + 1
+            all_projects = await self.db.get_projects_by_token(token_id, api_key_id=api_key_id)
+            projects = self._sort_projects([p for p in all_projects if p.is_active])
+            next_index = len(all_projects) + 1
 
             raw = (title or "").strip()
             if raw:
@@ -745,6 +743,8 @@ class TokenManager:
                 project_name=project_title,
                 tool_name="PINHOLE",
             )
+            # Enforce one active project per (api_key_id, token_id) scope.
+            await self.db.deactivate_projects_for_token_scope(token_id, api_key_id=api_key_id)
             project.id = await self.db.add_project(project)
             if set_as_current:
                 await self.db.update_token(

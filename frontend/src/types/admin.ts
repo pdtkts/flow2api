@@ -115,6 +115,7 @@ export interface TokenProjectRow {
   token_id?: number
   is_active?: boolean
   is_current_for_token?: boolean
+  project_status?: "active" | "old"
   created_at?: string | null
 }
 

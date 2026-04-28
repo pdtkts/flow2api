@@ -791,7 +791,7 @@ export function ApiKeyManagement() {
                         <TableHead className="text-xs">Name</TableHead>
                         <TableHead className="text-xs">Token</TableHead>
                         <TableHead className="text-xs">Created</TableHead>
-                          <TableHead className="text-xs">Active row</TableHead>
+                          <TableHead className="text-xs">Status</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
@@ -821,22 +821,18 @@ export function ApiKeyManagement() {
                             </TableCell>
                             <TableCell className="text-[10px] text-muted-foreground">{p.created_at || "—"}</TableCell>
                             <TableCell>
-                              <Badge
-                                variant={
+                              {(() => {
+                                const isActive =
+                                  p.project_status === "active" ||
                                   p.is_current_for_token ||
                                   (typeof p.token_id === "number" &&
                                     activeProjectByToken.get(p.token_id) === p.project_id)
-                                    ? "default"
-                                    : "secondary"
-                                }
-                                className="text-[10px]"
-                              >
-                                {p.is_current_for_token ||
-                                (typeof p.token_id === "number" &&
-                                  activeProjectByToken.get(p.token_id) === p.project_id)
-                                  ? "current"
-                                  : "inactive"}
-                              </Badge>
+                                return (
+                                  <Badge variant={isActive ? "default" : "secondary"} className="text-[10px]">
+                                    {isActive ? "active" : "old"}
+                                  </Badge>
+                                )
+                              })()}
                             </TableCell>
                           </TableRow>
                         ))

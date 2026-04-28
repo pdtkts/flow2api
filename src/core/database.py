@@ -1318,6 +1318,36 @@ class Database:
             await db.commit()
             return cursor.lastrowid
 
+    async def deactivate_projects_for_token_scope(
+        self, token_id: int, api_key_id: Optional[int] = None
+    ) -> int:
+        """Set prior projects inactive for one token scope.
+
+        Scope is token + api_key when api_key_id is provided; otherwise token + NULL api_key.
+        Returns affected row count.
+        """
+        async with self._connect(write=True) as db:
+            if api_key_id is None:
+                cursor = await db.execute(
+                    """
+                    UPDATE projects
+                    SET is_active = 0
+                    WHERE token_id = ? AND api_key_id IS NULL AND is_active = 1
+                    """,
+                    (token_id,),
+                )
+            else:
+                cursor = await db.execute(
+                    """
+                    UPDATE projects
+                    SET is_active = 0
+                    WHERE token_id = ? AND api_key_id = ? AND is_active = 1
+                    """,
+                    (token_id, api_key_id),
+                )
+            await db.commit()
+            return int(cursor.rowcount or 0)
+
     async def get_project_by_id(self, project_id: str, api_key_id: Optional[int] = None) -> Optional[Project]:
         """Get project by UUID"""
         async with self._connect() as db:
