@@ -951,8 +951,18 @@ async def refresh_at(
             debug_logger.log_error(f"[API] AT 刷新失败: token_id={token_id}")
             
             error_detail = "AT刷新失败"
-            if config.captcha_method != "personal":
-                error_detail += f"（当前打码模式: {config.captcha_method}，ST自动刷新仅在 personal 模式下可用）"
+            if config.captcha_method in {"personal", "browser"}:
+                error_detail += (
+                    f"（当前打码模式: {config.captcha_method}，已尝试 ST 自动刷新后重试 AT）"
+                )
+            else:
+                error_detail += (
+                    f"（当前打码模式: {config.captcha_method}，当前模式不支持 ST 自动刷新）"
+                )
+            if config.captcha_method == "browser":
+                error_detail += (
+                    f"，gateway fallback={'on' if bool(config.browser_fallback_to_remote_browser) else 'off'}"
+                )
             
             raise HTTPException(status_code=500, detail=error_detail)
     except HTTPException:

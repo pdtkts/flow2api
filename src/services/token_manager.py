@@ -447,7 +447,7 @@ class TokenManager:
             if not token:
                 return False
 
-            result = await self._do_refresh_at(token_id, token.st)
+            result = await self._do_refresh_at(token_id, token.st, previous_at_expires=token.at_expires)
             if result:
                 return True
 
@@ -455,7 +455,9 @@ class TokenManager:
             new_st = await self._try_refresh_st(token_id, token)
             if new_st:
                 debug_logger.log_info(f"[AT_REFRESH] Token {token_id}: ST refreshed, retrying AT refresh...")
-                result = await self._do_refresh_at(token_id, new_st)
+                current_after_st = await self.db.get_token(token_id)
+                previous_expires = current_after_st.at_expires if current_after_st else token.at_expires
+                result = await self._do_refresh_at(token_id, new_st, previous_at_expires=previous_expires)
                 if result:
                     return True
 
@@ -481,7 +483,12 @@ class TokenManager:
         self._refresh_futures[token_id] = task
         return await task
 
-    async def _do_refresh_at(self, token_id: int, st: str) -> bool:
+    async def _do_refresh_at(
+        self,
+        token_id: int,
+        st: str,
+        previous_at_expires: Optional[datetime] = None,
+    ) -> bool:
         """执行 AT 刷新的核心逻辑
 
         Args:
@@ -507,6 +514,20 @@ class TokenManager:
                 except:
                     pass
 
+            expiry_advanced = False
+            if previous_at_expires and new_at_expires:
+                prev_aware = (
+                    previous_at_expires.replace(tzinfo=timezone.utc)
+                    if previous_at_expires.tzinfo is None
+                    else previous_at_expires
+                )
+                new_aware = (
+                    new_at_expires.replace(tzinfo=timezone.utc)
+                    if new_at_expires.tzinfo is None
+                    else new_at_expires
+                )
+                expiry_advanced = new_aware > prev_aware
+
             # 更新数据库
             await self.db.update_token(
                 token_id,
@@ -516,6 +537,11 @@ class TokenManager:
 
             debug_logger.log_info(f"[AT_REFRESH] Token {token_id}: AT刷新成功")
             debug_logger.log_info(f"  - 新过期时间: {new_at_expires}")
+            if previous_at_expires and new_at_expires and not expiry_advanced:
+                debug_logger.log_warning(
+                    f"[AT_REFRESH] Token {token_id}: AT refreshed but expires unchanged "
+                    f"(prev={previous_at_expires}, new={new_at_expires})"
+                )
 
             # 验证 AT 有效性：通过 get_credits 测试
             try:
@@ -557,19 +583,27 @@ class TokenManager:
         try:
             from ..core.config import config
 
-            # 仅在 personal 模式下支持 ST 自动刷新
-            if config.captcha_method != "personal":
-                debug_logger.log_info(f"[ST_REFRESH] 非 personal 模式，跳过 ST 自动刷新")
+            # 仅在 personal / browser 模式下支持 ST 自动刷新
+            if config.captcha_method not in {"personal", "browser"}:
+                debug_logger.log_info(
+                    f"[ST_REFRESH] 模式={config.captcha_method}，跳过 ST 自动刷新（仅 personal/browser 支持）"
+                )
                 return None
 
             if not token.current_project_id:
                 debug_logger.log_warning(f"[ST_REFRESH] Token {token_id} 没有 project_id，无法刷新 ST")
                 return None
 
-            debug_logger.log_info(f"[ST_REFRESH] Token {token_id}: 尝试通过浏览器刷新 ST...")
+            debug_logger.log_info(
+                f"[ST_REFRESH] Token {token_id}: 尝试通过浏览器刷新 ST (mode={config.captcha_method})..."
+            )
 
-            from .browser_captcha_personal import BrowserCaptchaService
-            service = await BrowserCaptchaService.get_instance(self.db)
+            if config.captcha_method == "personal":
+                from .browser_captcha_personal import BrowserCaptchaService
+                service = await BrowserCaptchaService.get_instance(self.db)
+            else:
+                from .browser_captcha import BrowserCaptchaService
+                service = await BrowserCaptchaService.get_instance(self.db)
 
             refresh_timeout_seconds = 45.0
             try:
@@ -585,10 +619,15 @@ class TokenManager:
             if new_st and new_st != token.st:
                 # 更新数据库中的 ST
                 await self.db.update_token(token_id, st=new_st)
-                debug_logger.log_info(f"[ST_REFRESH] Token {token_id}: ST 已自动更新")
+                debug_logger.log_info(
+                    f"[ST_REFRESH] Token {token_id}: ST 已自动更新 (mode={config.captcha_method})"
+                )
                 return new_st
             elif new_st == token.st:
-                debug_logger.log_warning(f"[ST_REFRESH] Token {token_id}: 获取到的 ST 与原 ST 相同，可能登录已失效")
+                debug_logger.log_warning(
+                    f"[ST_REFRESH] Token {token_id}: 获取到的 ST 与原 ST 相同 (mode={config.captcha_method})，"
+                    "可能上游会话未续期或登录已失效"
+                )
                 return None
             else:
                 debug_logger.log_warning(f"[ST_REFRESH] Token {token_id}: 无法获取新 ST")

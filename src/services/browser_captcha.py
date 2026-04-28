@@ -2124,6 +2124,87 @@ class BrowserCaptchaService:
         )
         return payload, browser_id
 
+    async def refresh_session_token(self, project_id: str, token_id: Optional[int] = None) -> Optional[str]:
+        """Refresh session cookie from an active headed browser slot."""
+        self._check_available()
+        if not project_id:
+            return None
+
+        token_proxy_url = await self._resolve_token_proxy_url(token_id)
+        max_attempts = 2
+
+        async def _refresh_with_slot(slot_id: int) -> Optional[str]:
+            browser = await self._get_or_create_browser(slot_id)
+            page = None
+            started_at = time.time()
+            try:
+                _, _, context = await browser._get_or_create_shared_browser(token_proxy_url=token_proxy_url)
+                page = await context.new_page()
+                try:
+                    await page.goto(
+                        BROWSER_CAPTCHA_DEFAULT_PAGE_URL,
+                        wait_until="domcontentloaded",
+                        timeout=30000,
+                    )
+                except Exception:
+                    pass
+                await asyncio.sleep(2)
+
+                cookies = await context.cookies()
+                for cookie in cookies:
+                    name = str(cookie.get("name") or "").strip()
+                    if name == "__Secure-next-auth.session-token":
+                        value = str(cookie.get("value") or "").strip()
+                        if value:
+                            elapsed_ms = int((time.time() - started_at) * 1000)
+                            debug_logger.log_info(
+                                f"[BrowserCaptcha] refreshed session token from slot {slot_id} ({elapsed_ms}ms)"
+                            )
+                            return value
+
+                debug_logger.log_warning(
+                    f"[BrowserCaptcha] slot {slot_id} has no __Secure-next-auth.session-token cookie"
+                )
+                return None
+            except Exception as e:
+                debug_logger.log_warning(
+                    f"[BrowserCaptcha] refresh_session_token failed on slot {slot_id}: {type(e).__name__}: {str(e)[:200]}"
+                )
+                return None
+            finally:
+                if page:
+                    try:
+                        await page.close()
+                    except Exception:
+                        pass
+
+        for attempt in range(max_attempts):
+            if self._token_semaphore:
+                async with self._token_semaphore:
+                    browser_id: Optional[int] = None
+                    try:
+                        browser_id = await self._select_browser_id(project_id)
+                        refreshed = await _refresh_with_slot(browser_id)
+                    finally:
+                        await self._release_slot_reservation(browser_id)
+            else:
+                browser_id = None
+                try:
+                    browser_id = await self._select_browser_id(project_id)
+                    refreshed = await _refresh_with_slot(browser_id)
+                finally:
+                    await self._release_slot_reservation(browser_id)
+
+            if refreshed:
+                return refreshed
+
+            debug_logger.log_warning(
+                f"[BrowserCaptcha] refresh_session_token attempt {attempt + 1}/{max_attempts} returned empty token"
+            )
+            await asyncio.sleep(0.5)
+
+        return None
+
     async def get_fingerprint(self, browser_ref: Optional[Union[int, str]]) -> Optional[Dict[str, Any]]:
         """获取指定浏览器最近一次打码时的指纹快照。"""
         browser_id, _ = self._parse_browser_ref(browser_ref)
