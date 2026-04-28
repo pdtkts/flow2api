@@ -3,7 +3,6 @@
 from dataclasses import dataclass, replace
 from typing import Any, Dict, List, Optional, Set, Tuple
 import base64
-import random
 import json
 import mimetypes
 import re
@@ -1089,7 +1088,7 @@ async def create_flow_project(
     body: FlowProjectCreateRequest,
     auth_ctx: AuthContext = Depends(verify_api_key_flexible),
 ):
-    """Create a VideoFX project for an assigned account; row is tagged with the managed api_key_id."""
+    """Create VideoFX project(s) for managed key assigned account(s)."""
     if auth_ctx.key_id is None:
         raise HTTPException(status_code=403, detail="Managed API key required")
     _require_managed_projects_write(auth_ctx)
@@ -1102,29 +1101,50 @@ async def create_flow_project(
         account_id = int(body.account_id)
         if account_id not in auth_ctx.allowed_accounts:
             raise HTTPException(status_code=400, detail="account_id is not assigned to this API key")
+        target_accounts = [account_id]
     else:
-        account_id = random.choice(list(auth_ctx.allowed_accounts))
+        target_accounts = sorted(auth_ctx.allowed_accounts)
 
     handler = _ensure_generation_handler()
     title = (body.title or "").strip() or None
+    created_projects = []
     try:
-        project = await handler.token_manager.create_project_for_token(
-            account_id,
-            title=title,
-            set_as_current=bool(body.set_as_current),
-            api_key_id=auth_ctx.key_id,
-        )
+        for account_id in target_accounts:
+            project = await handler.token_manager.create_project_for_token(
+                account_id,
+                title=title,
+                set_as_current=bool(body.set_as_current),
+                api_key_id=auth_ctx.key_id,
+            )
+            created_projects.append(project)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Create project failed: {str(e)}")
 
+    if body.account_id is not None:
+        project = created_projects[0]
+        return {
+            "object": "flow_project",
+            "project_id": project.project_id,
+            "project_name": project.project_name,
+            "token_id": project.token_id,
+            "set_as_current": body.set_as_current,
+        }
+
     return {
-        "object": "flow_project",
-        "project_id": project.project_id,
-        "project_name": project.project_name,
-        "token_id": project.token_id,
-        "set_as_current": body.set_as_current,
+        "object": "list",
+        "data": [
+            {
+                "object": "flow_project",
+                "project_id": project.project_id,
+                "project_name": project.project_name,
+                "token_id": project.token_id,
+                "set_as_current": body.set_as_current,
+            }
+            for project in created_projects
+        ],
+        "total": len(created_projects),
     }
 
 

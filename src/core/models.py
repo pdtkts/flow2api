@@ -289,7 +289,7 @@ class GeminiGenerateContentRequest(BaseModel):
 class FlowProjectCreateRequest(BaseModel):
     """Create a VideoFX (Flow) project using a managed API key."""
 
-    # If omitted, the server picks a random token from this key's assigned accounts.
+    # If omitted, the server creates one project for each assigned account.
     account_id: Optional[int] = None
     title: Optional[str] = None
     set_as_current: bool = True
