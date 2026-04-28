@@ -1234,8 +1234,31 @@ async def create_flow_project(
         title = f"{label} {date_time}"
     created_projects = []
     should_set_as_current = True if body.account_id is None else bool(body.set_as_current)
+    # API-key account assignments can become stale if a token is deleted later.
+    # Filter to currently existing tokens so one stale id does not fail the whole request.
+    existing_target_accounts: List[int] = []
+    missing_target_accounts: List[int] = []
+    for account_id in target_accounts:
+        token_obj = await handler.db.get_token(int(account_id))
+        if token_obj:
+            existing_target_accounts.append(int(account_id))
+        else:
+            missing_target_accounts.append(int(account_id))
+
+    if body.account_id is not None and missing_target_accounts:
+        raise HTTPException(status_code=400, detail="account_id token not found")
+    if not existing_target_accounts:
+        raise HTTPException(
+            status_code=400,
+            detail="No valid assigned tokens found for this API key",
+        )
+    if missing_target_accounts:
+        debug_logger.log_warning(
+            f"[PROJECT] 跳过不存在的已分配账号: {missing_target_accounts}"
+        )
+
     try:
-        for account_id in target_accounts:
+        for account_id in existing_target_accounts:
             project = await handler.token_manager.create_project_for_token(
                 account_id,
                 title=title,
