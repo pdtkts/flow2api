@@ -8,12 +8,13 @@ import json
 import mimetypes
 import random
 import re
+import uuid
 from urllib.parse import parse_qs, quote, urlparse
 
 from curl_cffi.requests import AsyncSession
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 from ..core.auth import verify_api_key_flexible
@@ -28,6 +29,7 @@ from ..core.models import (
     GeminiContent,
     GeminiGenerateContentRequest,
     Project,
+    Task,
 )
 from ..services.generation_handler import MODEL_CONFIG, GenerationHandler
 
@@ -718,6 +720,152 @@ def _with_projectid(payload: Dict[str, Any], project_id: Optional[str]) -> Dict[
     if project_id and not payload.get("projectid"):
         payload["projectid"] = project_id
     return payload
+
+
+def _infer_requested_resolution(model: str) -> Optional[str]:
+    model_config = MODEL_CONFIG.get(model) or {}
+    upsample_cfg = model_config.get("upsample")
+    if isinstance(upsample_cfg, str):
+        if "4K" in upsample_cfg:
+            return "4k"
+        if "2K" in upsample_cfg:
+            return "2k"
+        return upsample_cfg
+    if isinstance(upsample_cfg, dict):
+        resolution = upsample_cfg.get("resolution")
+        if isinstance(resolution, str) and resolution:
+            if "1080" in resolution:
+                return "1080p"
+            if "4K" in resolution:
+                return "4k"
+            return resolution
+    return None
+
+
+def _extract_async_delivery_fields(
+    payload: Dict[str, Any], model: str
+) -> Dict[str, Any]:
+    direct_url = payload.get("url")
+    direct_urls = [direct_url] if isinstance(direct_url, str) and direct_url.strip() else []
+    generated_assets = payload.get("generated_assets") if isinstance(payload, dict) else None
+
+    requested_resolution = _infer_requested_resolution(model)
+    output_resolution: Optional[str] = None
+    upscale_status = "not_requested" if requested_resolution is None else "failed"
+    upscale_error_message: Optional[str] = None
+
+    base_result_urls = list(direct_urls)
+    result_urls = list(direct_urls)
+    delivery_urls = list(direct_urls)
+
+    if isinstance(generated_assets, dict):
+        asset_type = generated_assets.get("type")
+        if asset_type == "image":
+            origin_image_url = generated_assets.get("origin_image_url")
+            if isinstance(origin_image_url, str) and origin_image_url.strip():
+                base_result_urls = [origin_image_url.strip()]
+                if not delivery_urls:
+                    delivery_urls = list(base_result_urls)
+                    result_urls = list(base_result_urls)
+            upscaled_image = generated_assets.get("upscaled_image")
+            if isinstance(upscaled_image, dict):
+                upscale_url = upscaled_image.get("url") or upscaled_image.get("local_url")
+                if isinstance(upscale_url, str) and upscale_url.strip():
+                    result_urls = [upscale_url.strip()]
+                    delivery_urls = [upscale_url.strip()]
+                resolution = upscaled_image.get("resolution")
+                if isinstance(resolution, str) and resolution.strip():
+                    output_resolution = resolution.lower()
+                delivery_mode = upscaled_image.get("delivery_mode")
+                if delivery_mode == "inline_base64_fallback":
+                    upscale_status = "failed"
+                    upscale_error_message = "Upscale cache delivery failed; returned base64 fallback"
+                else:
+                    upscale_status = "completed"
+            elif requested_resolution is not None:
+                upscale_status = "failed"
+                if base_result_urls:
+                    delivery_urls = list(base_result_urls)
+        elif asset_type == "video":
+            final_video_url = generated_assets.get("final_video_url")
+            if isinstance(final_video_url, str) and final_video_url.strip():
+                result_urls = [final_video_url.strip()]
+                delivery_urls = [final_video_url.strip()]
+                if not base_result_urls:
+                    base_result_urls = [final_video_url.strip()]
+            if requested_resolution is not None:
+                # Current payload does not expose pre-upscale URL for video.
+                upscale_status = "completed"
+                output_resolution = requested_resolution
+    elif requested_resolution is None:
+        upscale_status = "not_requested"
+
+    if not delivery_urls and base_result_urls:
+        delivery_urls = list(base_result_urls)
+    if not output_resolution and delivery_urls:
+        output_resolution = requested_resolution
+
+    return {
+        "result_urls": result_urls or None,
+        "base_result_urls": base_result_urls or None,
+        "delivery_urls": delivery_urls or None,
+        "requested_resolution": requested_resolution,
+        "output_resolution": output_resolution,
+        "upscale_status": upscale_status,
+        "upscale_error_message": upscale_error_message,
+    }
+
+
+async def _run_async_generation_task(
+    task_id: str,
+    normalized: NormalizedGenerationRequest,
+    base_url_override: Optional[str],
+    allowed_token_ids: Optional[set[int]],
+    api_key_id: Optional[int],
+) -> None:
+    handler = _ensure_generation_handler()
+    try:
+        raw_result = await _collect_non_stream_result(
+            normalized,
+            base_url_override,
+            allowed_token_ids,
+            api_key_id,
+        )
+        payload = _enrich_payload_with_direct_url(_parse_handler_result(raw_result))
+        if "error" in payload:
+            error_msg = payload.get("error", {}).get("message", "Upstream generation error")
+            await handler.db.update_task(
+                task_id,
+                status="failed",
+                error_message=error_msg,
+                upscale_status="failed" if _infer_requested_resolution(normalized.model) else "not_requested",
+                completed_at=datetime.utcnow(),
+            )
+            return
+
+        fields = _extract_async_delivery_fields(payload, normalized.model)
+        await handler.db.update_task(
+            task_id,
+            status="completed",
+            progress=100,
+            result_urls=fields["result_urls"],
+            base_result_urls=fields["base_result_urls"],
+            delivery_urls=fields["delivery_urls"],
+            requested_resolution=fields["requested_resolution"],
+            output_resolution=fields["output_resolution"],
+            upscale_status=fields["upscale_status"],
+            upscale_error_message=fields["upscale_error_message"],
+            completed_at=datetime.utcnow(),
+        )
+    except Exception as exc:
+        debug_logger.log_error(f"[ASYNC JOB] Generation failed for task {task_id}: {exc}")
+        await handler.db.update_task(
+            task_id,
+            status="failed",
+            error_message=str(exc),
+            upscale_status="failed" if _infer_requested_resolution(normalized.model) else "not_requested",
+            completed_at=datetime.utcnow(),
+        )
 
 
 def _inject_projectid_into_openai_sse_chunk(
@@ -1544,6 +1692,101 @@ async def create_chat_completion(
         raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.post("/v1/async/chat/completions")
+async def create_chat_completion_async(
+    request: ChatCompletionRequest,
+    raw_request: Request,
+    background_tasks: BackgroundTasks,
+    auth_ctx: AuthContext = Depends(verify_api_key_flexible),
+):
+    """OpenAI-compatible async generation endpoint with polling support."""
+    try:
+        if auth_ctx.key_id is None:
+            raise HTTPException(status_code=403, detail="Managed API key required for generation")
+        _reject_explicit_project_id(request.project_id)
+        base_allowed = _resolve_allowed_token_ids(auth_ctx)
+        normalized = await _normalize_openai_request(
+            request,
+            api_key_id=auth_ctx.key_id,
+            allowed_token_ids=base_allowed,
+        )
+        if not normalized.prompt:
+            raise HTTPException(status_code=400, detail="Prompt cannot be empty")
+
+        request_base_url = _get_request_base_url(raw_request)
+        allowed_token_ids, selected_project_id = await _select_random_active_project_for_api_key(
+            auth_ctx,
+            normalized.model,
+        )
+        normalized = replace(normalized, project_id=selected_project_id)
+
+        handler = _ensure_generation_handler()
+        selected_token_id = min(allowed_token_ids) if allowed_token_ids else 0
+        new_task_id = f"gen-async-{uuid.uuid4().hex[:12]}"
+        await handler.db.create_task(
+            Task(
+                task_id=new_task_id,
+                token_id=selected_token_id,
+                api_key_id=auth_ctx.key_id,
+                model=normalized.model,
+                prompt=normalized.prompt,
+                status="processing",
+                progress=0,
+                requested_resolution=_infer_requested_resolution(normalized.model),
+                upscale_status="processing" if _infer_requested_resolution(normalized.model) else "not_requested",
+            )
+        )
+
+        background_tasks.add_task(
+            _run_async_generation_task,
+            task_id=new_task_id,
+            normalized=normalized,
+            base_url_override=request_base_url,
+            allowed_token_ids=allowed_token_ids,
+            api_key_id=auth_ctx.key_id,
+        )
+        return JSONResponse(
+            status_code=202,
+            content={"job_id": new_task_id, "status": "processing"},
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.get("/v1/jobs/{job_id}")
+async def get_job_status(
+    job_id: str,
+    auth_ctx: AuthContext = Depends(verify_api_key_flexible),
+):
+    """Poll async generation job status."""
+    handler = _ensure_generation_handler()
+    task = await handler.db.get_task(job_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    if auth_ctx.key_id is None or task.api_key_id != auth_ctx.key_id:
+        raise HTTPException(status_code=403, detail="Not authorized to view this job")
+
+    return {
+        "job_id": task.task_id,
+        "status": task.status,
+        "progress": task.progress,
+        "model": task.model,
+        "result_urls": task.result_urls,
+        "base_result_urls": task.base_result_urls,
+        "delivery_urls": task.delivery_urls,
+        "requested_resolution": task.requested_resolution,
+        "output_resolution": task.output_resolution,
+        "upscale_status": task.upscale_status,
+        "upscale_error_message": task.upscale_error_message,
+        "error_message": task.error_message,
+        "created_at": task.created_at.isoformat() if task.created_at else None,
+        "completed_at": task.completed_at.isoformat() if task.completed_at else None,
+    }
 
 
 @router.post("/v1beta/models/{model}:generateContent")

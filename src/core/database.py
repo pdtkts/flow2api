@@ -838,6 +838,12 @@ class Database:
                     status TEXT NOT NULL DEFAULT 'processing',
                     progress INTEGER DEFAULT 0,
                     result_urls TEXT,
+                    base_result_urls TEXT,
+                    delivery_urls TEXT,
+                    requested_resolution TEXT,
+                    output_resolution TEXT,
+                    upscale_status TEXT,
+                    upscale_error_message TEXT,
                     error_message TEXT,
                     scene_id TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -1088,6 +1094,7 @@ class Database:
 
             # Existing DBs: tables were created before api_key_id; CREATE IF NOT EXISTS does not add columns.
             await self._ensure_api_key_ownership_columns(db)
+            await self._ensure_task_async_columns(db)
 
             # Create indexes
             await db.execute("CREATE INDEX IF NOT EXISTS idx_task_id ON tasks(task_id)")
@@ -1137,6 +1144,27 @@ class Database:
                     print("  ✓ Added column 'flow_project_id' to cache_files (init_db upgrade)")
         except Exception as e:
             print(f"  ✗ api_key_id column upgrade failed: {e}")
+            raise
+
+    async def _ensure_task_async_columns(self, db):
+        """Add async job metadata columns to tasks for polling payload enrichment."""
+        try:
+            if not await self._table_exists(db, "tasks"):
+                return
+            async_columns = {
+                "base_result_urls": "TEXT",
+                "delivery_urls": "TEXT",
+                "requested_resolution": "TEXT",
+                "output_resolution": "TEXT",
+                "upscale_status": "TEXT",
+                "upscale_error_message": "TEXT",
+            }
+            for column_name, column_type in async_columns.items():
+                if not await self._column_exists(db, "tasks", column_name):
+                    await db.execute(f"ALTER TABLE tasks ADD COLUMN {column_name} {column_type}")
+                    print(f"  ✓ Added column '{column_name}' to tasks (init_db upgrade)")
+        except Exception as e:
+            print(f"  ✗ tasks async columns upgrade failed: {e}")
             raise
 
     async def _migrate_request_logs(self, db):
@@ -1533,10 +1561,30 @@ class Database:
         """Create a new task"""
         async with self._connect(write=True) as db:
             cursor = await db.execute("""
-                INSERT INTO tasks (task_id, token_id, api_key_id, model, prompt, status, progress, scene_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (task.task_id, task.token_id, task.api_key_id, task.model, task.prompt,
-                  task.status, task.progress, task.scene_id))
+                INSERT INTO tasks (
+                    task_id, token_id, api_key_id, model, prompt, status, progress,
+                    result_urls, base_result_urls, delivery_urls,
+                    requested_resolution, output_resolution, upscale_status, upscale_error_message,
+                    scene_id
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                task.task_id,
+                task.token_id,
+                task.api_key_id,
+                task.model,
+                task.prompt,
+                task.status,
+                task.progress,
+                json.dumps(task.result_urls) if isinstance(task.result_urls, list) else task.result_urls,
+                json.dumps(task.base_result_urls) if isinstance(task.base_result_urls, list) else task.base_result_urls,
+                json.dumps(task.delivery_urls) if isinstance(task.delivery_urls, list) else task.delivery_urls,
+                task.requested_resolution,
+                task.output_resolution,
+                task.upscale_status,
+                task.upscale_error_message,
+                task.scene_id,
+            ))
             await db.commit()
             return cursor.lastrowid
 
@@ -1551,6 +1599,10 @@ class Database:
                 # Parse result_urls from JSON
                 if task_dict.get("result_urls"):
                     task_dict["result_urls"] = json.loads(task_dict["result_urls"])
+                if task_dict.get("base_result_urls"):
+                    task_dict["base_result_urls"] = json.loads(task_dict["base_result_urls"])
+                if task_dict.get("delivery_urls"):
+                    task_dict["delivery_urls"] = json.loads(task_dict["delivery_urls"])
                 return Task(**task_dict)
             return None
 
@@ -1563,7 +1615,7 @@ class Database:
             for key, value in kwargs.items():
                 if value is not None:
                     # Convert list to JSON string for result_urls
-                    if key == "result_urls" and isinstance(value, list):
+                    if key in {"result_urls", "base_result_urls", "delivery_urls"} and isinstance(value, list):
                         value = json.dumps(value)
                     updates.append(f"{key} = ?")
                     params.append(value)

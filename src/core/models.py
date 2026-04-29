@@ -92,6 +92,12 @@ class Task(BaseModel):
     status: str  # processing, completed, failed
     progress: int = 0  # 0-100
     result_urls: Optional[List[str]] = None
+    base_result_urls: Optional[List[str]] = None
+    delivery_urls: Optional[List[str]] = None
+    requested_resolution: Optional[str] = None
+    output_resolution: Optional[str] = None
+    upscale_status: Optional[str] = None  # not_requested, processing, completed, failed
+    upscale_error_message: Optional[str] = None
     error_message: Optional[str] = None
     scene_id: Optional[str] = None  # Flow API的sceneId
     created_at: Optional[datetime] = None
