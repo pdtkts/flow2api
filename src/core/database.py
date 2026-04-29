@@ -833,6 +833,7 @@ class Database:
                     task_id TEXT UNIQUE NOT NULL,
                     token_id INTEGER NOT NULL,
                     api_key_id INTEGER,
+                    project_id TEXT,
                     model TEXT NOT NULL,
                     prompt TEXT NOT NULL,
                     status TEXT NOT NULL DEFAULT 'processing',
@@ -1152,6 +1153,7 @@ class Database:
             if not await self._table_exists(db, "tasks"):
                 return
             async_columns = {
+                "project_id": "TEXT",
                 "base_result_urls": "TEXT",
                 "delivery_urls": "TEXT",
                 "requested_resolution": "TEXT",
@@ -1562,16 +1564,17 @@ class Database:
         async with self._connect(write=True) as db:
             cursor = await db.execute("""
                 INSERT INTO tasks (
-                    task_id, token_id, api_key_id, model, prompt, status, progress,
+                    task_id, token_id, api_key_id, project_id, model, prompt, status, progress,
                     result_urls, base_result_urls, delivery_urls,
                     requested_resolution, output_resolution, upscale_status, upscale_error_message,
                     scene_id
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 task.task_id,
                 task.token_id,
                 task.api_key_id,
+                task.project_id,
                 task.model,
                 task.prompt,
                 task.status,

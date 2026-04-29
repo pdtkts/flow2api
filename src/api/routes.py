@@ -742,6 +742,11 @@ def _infer_requested_resolution(model: str) -> Optional[str]:
     return None
 
 
+def _new_async_job_id() -> str:
+    # Example: gen-20260429-181455-a1b2c3d4
+    return f"gen-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
+
+
 def _extract_async_delivery_fields(
     payload: Dict[str, Any], model: str
 ) -> Dict[str, Any]:
@@ -1724,12 +1729,13 @@ async def create_chat_completion_async(
 
         handler = _ensure_generation_handler()
         selected_token_id = min(allowed_token_ids) if allowed_token_ids else 0
-        new_task_id = f"gen-async-{uuid.uuid4().hex[:12]}"
+        new_task_id = _new_async_job_id()
         await handler.db.create_task(
             Task(
                 task_id=new_task_id,
                 token_id=selected_token_id,
                 api_key_id=auth_ctx.key_id,
+                project_id=selected_project_id,
                 model=normalized.model,
                 prompt=normalized.prompt,
                 status="processing",
@@ -1749,7 +1755,11 @@ async def create_chat_completion_async(
         )
         return JSONResponse(
             status_code=202,
-            content={"job_id": new_task_id, "status": "processing"},
+            content={
+                "job_id": new_task_id,
+                "status": "processing",
+                "project_id": selected_project_id,
+            },
         )
     except HTTPException:
         raise
@@ -1776,6 +1786,7 @@ async def get_job_status(
         "status": task.status,
         "progress": task.progress,
         "model": task.model,
+        "project_id": task.project_id,
         "result_urls": task.result_urls,
         "base_result_urls": task.base_result_urls,
         "delivery_urls": task.delivery_urls,

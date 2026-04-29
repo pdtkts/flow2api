@@ -87,6 +87,7 @@ class Task(BaseModel):
     task_id: str  # Flow API返回的operation name
     token_id: int
     api_key_id: Optional[int] = None
+    project_id: Optional[str] = None
     model: str
     prompt: str
     status: str  # processing, completed, failed
