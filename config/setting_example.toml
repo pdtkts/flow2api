@@ -64,8 +64,8 @@ timeout = 7200  # 缓存超时时间(秒), 默认2小时; 设置为0表示不自
 base_url = ""   # 缓存文件访问的基础URL, 留空则按请求/本机回退
 
 [captcha]
-# 打码方式: browser（默认）| personal | remote_browser | yescaptcha | capmonster | ezcaptcha | capsolver
-captcha_method = "browser"
+# 打码方式: extension（默认）| browser | personal | remote_browser | yescaptcha | capmonster | ezcaptcha | capsolver
+captcha_method = "extension"
 # browser 模式打开的首页：默认 auth/providers（轻量）；有头 Docker 等可改为 https://labs.google/fx/tools/flow
 browser_captcha_page_url = "https://labs.google/fx/api/auth/providers"
 browser_launch_background = true  # 有头浏览器是否默认后台启动；设为 false 可直接看到窗口
