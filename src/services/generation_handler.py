@@ -282,14 +282,14 @@ MODEL_CONFIG = {
     "veo_3_1_t2v_portrait": {
         "type": "video",
         "video_type": "t2v",
-        "model_key": "veo_3_1_t2v_portrait",
+        "model_key": "veo_3_1_t2v_fast_portrait",
         "aspect_ratio": "VIDEO_ASPECT_RATIO_PORTRAIT",
         "supports_images": False
     },
     "veo_3_1_t2v_landscape": {
         "type": "video",
         "video_type": "t2v",
-        "model_key": "veo_3_1_t2v",
+        "model_key": "veo_3_1_t2v_fast",
         "aspect_ratio": "VIDEO_ASPECT_RATIO_LANDSCAPE",
         "supports_images": False
     },
@@ -685,6 +685,25 @@ MODEL_CONFIG = {
 }
 
 
+def _known_video_model_keys() -> set[str]:
+    return {
+        cfg["model_key"]
+        for cfg in MODEL_CONFIG.values()
+        if cfg.get("type") == "video" and cfg.get("model_key")
+    }
+
+
+def _resolve_tier_two_model_key(model_key: str) -> str:
+    """Only upgrade to an ultra key when that exact upstream key is known valid."""
+    if "ultra" in model_key:
+        return model_key
+    if "_fl" in model_key:
+        candidate = model_key.replace("_fl", "_ultra_fl")
+    else:
+        candidate = model_key + "_ultra"
+    return candidate if candidate in _known_video_model_keys() else model_key
+
+
 class GenerationHandler:
     """统一生成处理器"""
 
@@ -743,14 +762,15 @@ class GenerationHandler:
 
         if user_tier == "PAYGATE_TIER_TWO":
             if allow_tier_upgrade and "ultra" not in model_key:
-                if "_fl" in model_key:
-                    model_key = model_key.replace("_fl", "_ultra_fl")
-                else:
-                    model_key = model_key + "_ultra"
-                return model_key, f"TIER_TWO 账号自动切换到 ultra 模型: {model_key}"
+                original_model_key = model_key
+                model_key = _resolve_tier_two_model_key(model_key)
+                if model_key != original_model_key:
+                    return model_key, f"TIER_TWO 账号自动切换到 ultra 模型: {model_key}"
+                return model_key, f"TIER_TWO 账号保持当前模型: {model_key}"
             return model_key, None
 
         if user_tier == "PAYGATE_TIER_ONE" and "ultra" in model_key:
+            # veo_3_1_extend_fast_portrait_ultra -> veo_3_1_extend_fast_portrait
             model_key = model_key.replace("_ultra_fl", "_fl").replace("_ultra", "")
             return model_key, f"TIER_ONE 账号自动切换到标准模型: {model_key}"
 
@@ -1998,6 +2018,15 @@ class GenerationHandler:
                     if stream:
                         yield self._create_stream_chunk(f"❌ {friendly_error}\n")
                     yield self._create_error_response(friendly_error, status_code=502)
+                    return
+                elif status == "MEDIA_GENERATION_STATUS_ACTIVE" and attempt > 80:
+                    # 如果持续4分钟（80次 * 3秒 = 240秒）依然是 ACTIVE 状态，则判定为卡死
+                    error_msg = "视频生成超时 (上游卡顿超过4分钟，已自动取消)"
+                    await self._fail_video_task(checked_operations, error_msg)
+                    self._mark_generation_failed(generation_result, error_msg)
+                    if stream:
+                        yield self._create_stream_chunk(f"❌ {error_msg}\n")
+                    yield self._create_error_response(error_msg, status_code=504)
                     return
 
                 elif status.startswith("MEDIA_GENERATION_STATUS_ERROR"):
