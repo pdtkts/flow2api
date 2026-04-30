@@ -593,6 +593,38 @@ class FlowClient:
             "timeout",
         ])
 
+    def _get_video_submit_timeout(self) -> int:
+        """视频提交接口应快速返回 operation，避免单次网络挂死拖满整条链路。"""
+        return max(30, min(int(self.timeout or 0) or 120, 75))
+
+    def _get_video_poll_timeout(self) -> int:
+        """视频状态查询是轻量轮询，请求超时不应超过下一轮轮询太久。"""
+        return max(10, min(int(self.timeout or 0) or 120, 45))
+
+    async def _make_video_api_request(
+        self,
+        url: str,
+        json_data: Dict[str, Any],
+        at: str,
+        timeout: int,
+    ) -> Dict[str, Any]:
+        """视频 API 加硬截止，避免底层请求偶发卡住导致整条请求悬挂。"""
+        try:
+            return await asyncio.wait_for(
+                self._make_request(
+                    method="POST",
+                    url=url,
+                    json_data=json_data,
+                    use_at=True,
+                    at_token=at,
+                    timeout=timeout,
+                    allow_urllib_fallback=False,
+                ),
+                timeout=timeout + 5,
+            )
+        except asyncio.TimeoutError as exc:
+            raise Exception(f"Flow video API request timed out after {timeout}s") from exc
+
     def _get_control_plane_timeout(self) -> int:
         """控制轻量控制面请求的超时，避免认证/项目接口长时间挂起。"""
         return max(5, min(int(self.timeout or 0) or 120, 10))
@@ -1436,12 +1468,11 @@ class FlowClient:
                 json_data["useV2ModelConfig"] = True
 
             try:
-                result = await self._make_request(
-                    method="POST",
+                result = await self._make_video_api_request(
                     url=url,
                     json_data=json_data,
-                    use_at=True,
-                    at_token=at
+                    at=at,
+                    timeout=self._get_video_submit_timeout(),
                 )
                 return result
             except Exception as e:
@@ -1568,12 +1599,11 @@ class FlowClient:
             }
 
             try:
-                result = await self._make_request(
-                    method="POST",
+                result = await self._make_video_api_request(
                     url=url,
                     json_data=json_data,
-                    use_at=True,
-                    at_token=at
+                    at=at,
+                    timeout=self._get_video_submit_timeout(),
                 )
                 return result
             except Exception as e:
@@ -1703,12 +1733,11 @@ class FlowClient:
                 json_data["useV2ModelConfig"] = True
 
             try:
-                result = await self._make_request(
-                    method="POST",
+                result = await self._make_video_api_request(
                     url=url,
                     json_data=json_data,
-                    use_at=True,
-                    at_token=at
+                    at=at,
+                    timeout=self._get_video_submit_timeout(),
                 )
                 return result
             except Exception as e:
@@ -1834,12 +1863,11 @@ class FlowClient:
                 json_data["useV2ModelConfig"] = True
 
             try:
-                result = await self._make_request(
-                    method="POST",
+                result = await self._make_video_api_request(
                     url=url,
                     json_data=json_data,
-                    use_at=True,
-                    at_token=at
+                    at=at,
+                    timeout=self._get_video_submit_timeout(),
                 )
                 return result
             except Exception as e:
@@ -1933,12 +1961,11 @@ class FlowClient:
                 "useV2ModelConfig": True,
             }
             try:
-                return await self._make_request(
-                    method="POST",
+                return await self._make_video_api_request(
                     url=url,
                     json_data=json_data,
-                    use_at=True,
-                    at_token=at,
+                    at=at,
+                    timeout=self._get_video_submit_timeout(),
                 )
             except Exception as e:
                 last_error = e
@@ -1981,12 +2008,11 @@ class FlowClient:
                 },
             ]
         }
-        return await self._make_request(
-            method="POST",
+        return await self._make_video_api_request(
             url=url,
             json_data=json_data,
-            use_at=True,
-            at_token=at,
+            at=at,
+            timeout=self._get_video_submit_timeout(),
         )
 
     async def poll_concatenation_status(
@@ -2001,13 +2027,11 @@ class FlowClient:
         json_data = {"operation": {"operation": {"name": operation_name}}}
         start_time = time.time()
         while time.time() - start_time < timeout:
-            result = await self._make_request(
-                method="POST",
+            result = await self._make_video_api_request(
                 url=url,
                 json_data=json_data,
-                use_at=True,
-                at_token=at,
-                timeout=300,
+                at=at,
+                timeout=self._get_video_poll_timeout(),
             )
             status = result.get("status", "")
             output_uri = result.get("outputUri", "")
@@ -2122,12 +2146,11 @@ class FlowClient:
             }
 
             try:
-                result = await self._make_request(
-                    method="POST",
+                result = await self._make_video_api_request(
                     url=url,
                     json_data=json_data,
-                    use_at=True,
-                    at_token=at
+                    at=at,
+                    timeout=self._get_video_submit_timeout(),
                 )
                 return result
             except Exception as e:
@@ -2178,12 +2201,11 @@ class FlowClient:
 
         for retry_attempt in range(max_retries):
             try:
-                return await self._make_request(
-                    method="POST",
+                return await self._make_video_api_request(
                     url=url,
                     json_data=json_data,
-                    use_at=True,
-                    at_token=at
+                    at=at,
+                    timeout=self._get_video_poll_timeout(),
                 )
             except Exception as e:
                 last_error = e
@@ -3036,6 +3058,20 @@ class FlowClient:
             # Do not use curl_cffi impersonation for captcha API JSON endpoints: some ASGI
             # servers (for example FastAPI/Uvicorn) may receive an empty body and return 422.
             async with AsyncSession() as session:
+                # curl_cffi: SOCKS5 uses `proxy`, HTTP/HTTPS uses `proxies`
+                proxies = None
+                proxy = None
+                if self.proxy_manager:
+                    try:
+                        proxy_url = await self.proxy_manager.get_request_proxy_url()
+                        if proxy_url:
+                            if proxy_url.startswith("socks5://"):
+                                proxy = proxy_url
+                            else:
+                                proxies = {"http": proxy_url, "https": proxy_url}
+                    except Exception as e:
+                        debug_logger.log_warning(f"[reCAPTCHA {method}] Failed to get proxy: {e}")
+
                 create_url = f"{base_url}/createTask"
                 create_data = {
                     "clientKey": client_key,
@@ -3047,7 +3083,10 @@ class FlowClient:
                     }
                 }
 
-                result = await session.post(create_url, json=create_data)
+                if proxy:
+                    result = await session.post(create_url, json=create_data, impersonate="chrome124", proxy=proxy)
+                else:
+                    result = await session.post(create_url, json=create_data, impersonate="chrome124", proxies=proxies)
                 result_json = result.json()
                 task_id = result_json.get('taskId')
 
@@ -3068,7 +3107,10 @@ class FlowClient:
                         "clientKey": client_key,
                         "taskId": task_id
                     }
-                    result = await session.post(get_url, json=get_data)
+                    if proxy:
+                        result = await session.post(get_url, json=get_data, impersonate="chrome124", proxy=proxy)
+                    else:
+                        result = await session.post(get_url, json=get_data, impersonate="chrome124", proxies=proxies)
                     result_json = result.json()
 
                     debug_logger.log_info(f"[reCAPTCHA {method}] polling #{i+1}: {result_json}")
