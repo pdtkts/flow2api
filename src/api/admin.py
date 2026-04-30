@@ -1,8 +1,7 @@
 """Admin API routes"""
 import asyncio
 import json
-import urllib.error
-import urllib.request
+from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Header, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -10,14 +9,22 @@ from typing import Optional, List, Dict, Any
 import secrets
 import time
 import re
+import urllib.error
+import urllib.request
 from urllib.parse import urlparse
 from curl_cffi.requests import AsyncSession
 from ..core.auth import AuthManager
 from ..core.database import Database
 from ..core.config import config
+from ..core.monitoring import build_public_health_snapshot
 from ..services.token_manager import TokenManager
 from ..services.proxy_manager import ProxyManager
 from ..services.concurrency_manager import ConcurrencyManager
+
+try:
+    import httpx
+except ImportError:
+    httpx = None
 
 router = APIRouter()
 
@@ -178,7 +185,29 @@ def _get_remote_browser_client_config() -> tuple[str, str, int]:
     return base_url, api_key, timeout
 
 
-def _sync_json_http_request(
+def _build_remote_browser_http_timeout(read_timeout: float) -> Any:
+    read_value = max(3.0, float(read_timeout))
+    write_value = min(10.0, max(3.0, read_value))
+    if httpx is None:
+        return read_value
+    return httpx.Timeout(
+        connect=2.5,
+        read=read_value,
+        write=write_value,
+        pool=2.5,
+    )
+
+
+def _parse_json_response_text(text: str) -> Optional[Any]:
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except Exception:
+        return None
+
+
+async def _stdlib_json_http_request(
     method: str,
     url: str,
     headers: Dict[str, str],
@@ -187,36 +216,85 @@ def _sync_json_http_request(
 ) -> tuple[int, Optional[Any], str]:
     req_headers = dict(headers or {})
     req_headers.setdefault("Accept", "application/json")
+    request_method = (method or "GET").upper()
+    request_data: Optional[bytes] = None
 
-    data = None
     if payload is not None:
-        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         req_headers["Content-Type"] = "application/json; charset=utf-8"
+        if request_method != "GET":
+            request_data = json.dumps(payload).encode("utf-8")
 
-    request = urllib.request.Request(
-        url=url,
-        data=data,
-        headers=req_headers,
-        method=(method or "GET").upper(),
-    )
+    def do_request() -> tuple[int, str]:
+        request = urllib.request.Request(
+            url=url,
+            data=request_data,
+            headers=req_headers,
+            method=request_method,
+        )
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        try:
+            with opener.open(request, timeout=max(1.0, float(timeout))) as response:
+                status_code = int(getattr(response, "status", 0) or response.getcode() or 0)
+                body = response.read()
+                charset = response.headers.get_content_charset() or "utf-8"
+                return status_code, body.decode(charset, errors="replace")
+        except urllib.error.HTTPError as exc:
+            body = exc.read()
+            charset = exc.headers.get_content_charset() if exc.headers else None
+            return int(getattr(exc, "code", 0) or 0), body.decode(charset or "utf-8", errors="replace")
 
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            status_code = int(response.getcode() or 0)
-            raw_body = response.read()
-    except urllib.error.HTTPError as e:
-        status_code = int(getattr(e, "code", 500))
-        raw_body = e.read() if hasattr(e, "read") else b""
+        status_code, text = await asyncio.to_thread(do_request)
     except Exception as e:
         raise RuntimeError(f"远程打码服务请求失败: {e}") from e
 
-    text = raw_body.decode("utf-8", errors="replace") if raw_body else ""
-    parsed: Optional[Any] = None
-    if text:
-        try:
-            parsed = json.loads(text)
-        except Exception:
-            parsed = None
+    return status_code, _parse_json_response_text(text), text
+
+
+async def _sync_json_http_request(
+    method: str,
+    url: str,
+    headers: Dict[str, str],
+    payload: Optional[Dict[str, Any]],
+    timeout: int,
+) -> tuple[int, Optional[Any], str]:
+    req_headers = dict(headers or {})
+    req_headers.setdefault("Accept", "application/json")
+    request_method = (method or "GET").upper()
+    request_kwargs: Dict[str, Any] = {
+        "headers": req_headers,
+        "timeout": _build_remote_browser_http_timeout(timeout),
+    }
+
+    if payload is not None:
+        req_headers["Content-Type"] = "application/json; charset=utf-8"
+        if request_method != "GET":
+            request_kwargs["json"] = payload
+
+    if httpx is None:
+        return await _stdlib_json_http_request(
+            method=method,
+            url=url,
+            headers=req_headers,
+            payload=payload,
+            timeout=timeout,
+        )
+
+    try:
+        # remote_browser 控制面是服务间 JSON API，使用 httpx 避免 curl_cffi 在当前
+        # Windows + impersonate 场景下 POST body 丢失导致 FastAPI 直接判定 body 缺失。
+        async with httpx.AsyncClient(follow_redirects=False, trust_env=False) as session:
+            response = await session.request(
+                method=request_method,
+                url=url,
+                **request_kwargs,
+            )
+    except Exception as e:
+        raise RuntimeError(f"远程打码服务请求失败: {e}") from e
+
+    status_code = int(getattr(response, "status_code", 0) or 0)
+    text = response.text or ""
+    parsed = _parse_json_response_text(text)
 
     return status_code, parsed, text
 
@@ -361,13 +439,12 @@ async def _score_test_with_remote_browser_service(
         "enterprise": enterprise,
     }
 
-    status_code, response_payload, response_text = await asyncio.to_thread(
-        _sync_json_http_request,
-        "POST",
-        endpoint,
-        {"Authorization": f"Bearer {api_key}"},
-        request_payload,
-        timeout,
+    status_code, response_payload, response_text = await _sync_json_http_request(
+        method="POST",
+        url=endpoint,
+        headers={"Authorization": f"Bearer {api_key}"},
+        payload=request_payload,
+        timeout=timeout,
     )
 
     if status_code >= 400:
@@ -447,8 +524,9 @@ class CaptchaScoreTestRequest(BaseModel):
 
 
 class GenerationConfigRequest(BaseModel):
-    image_timeout: int
-    video_timeout: int
+    image_timeout: Optional[int] = None
+    video_timeout: Optional[int] = None
+    max_retries: Optional[int] = None
 
 
 class CallLogicConfigRequest(BaseModel):
@@ -578,12 +656,31 @@ async def get_tokens(token: str = Depends(verify_admin_token)):
     """Get all tokens with statistics"""
     token_rows = await db.get_all_tokens_with_stats()
     to_iso = lambda value: value.isoformat() if hasattr(value, "isoformat") else value
+    now = datetime.now(timezone.utc)
+
+    def normalize_dt(value):
+        if not value:
+            return None
+        if isinstance(value, str):
+            try:
+                value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except Exception:
+                return None
+        if getattr(value, "tzinfo", None) is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
 
     return [{
         "id": row.get("id"),
         "st": row.get("st"),  # Session Token for editing
         "at": row.get("at"),  # Access Token for editing (从ST转换而来)
         "at_expires": to_iso(row.get("at_expires")) if row.get("at_expires") else None,  # 🆕 AT过期时间
+        "at_expired": bool(normalize_dt(row.get("at_expires")) and normalize_dt(row.get("at_expires")) <= now),
+        "at_expiring_within_1h": bool(
+            normalize_dt(row.get("at_expires"))
+            and normalize_dt(row.get("at_expires")) > now
+            and (normalize_dt(row.get("at_expires")) - now).total_seconds() < 3600
+        ),
         "token": row.get("at"),  # 兼容前端 token.token 的访问方式
         "email": row.get("email"),
         "name": row.get("name"),
@@ -604,7 +701,12 @@ async def get_tokens(token: str = Depends(verify_admin_token)):
         "video_concurrency": row.get("video_concurrency"),
         "image_count": row.get("image_count", 0),
         "video_count": row.get("video_count", 0),
-        "error_count": row.get("error_count", 0)
+        "error_count": row.get("error_count", 0),
+        "today_error_count": row.get("today_error_count", 0),
+        "consecutive_error_count": row.get("consecutive_error_count", 0),
+        "last_error_at": to_iso(row.get("last_error_at")) if row.get("last_error_at") else None,
+        "ban_reason": row.get("ban_reason"),
+        "banned_at": to_iso(row.get("banned_at")) if row.get("banned_at") else None,
     } for row in token_rows]  # 直接返回数组,兼容前端
 
 
@@ -715,6 +817,8 @@ async def delete_token(
     """Delete token"""
     try:
         await token_manager.delete_token(token_id)
+        if concurrency_manager:
+            await concurrency_manager.remove_token(token_id)
         return {"success": True, "message": "Token删除成功"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -1076,7 +1180,8 @@ async def get_generation_config(token: str = Depends(verify_admin_token)):
         "success": True,
         "config": {
             "image_timeout": config.image_timeout,
-            "video_timeout": config.video_timeout
+            "video_timeout": config.video_timeout,
+            "max_retries": config.max_retries,
         }
     }
 
@@ -1087,7 +1192,11 @@ async def update_generation_config(
     token: str = Depends(verify_admin_token)
 ):
     """Update generation timeout configuration"""
-    await db.update_generation_config(request.image_timeout, request.video_timeout)
+    await db.update_generation_config(
+        image_timeout=request.image_timeout,
+        video_timeout=request.video_timeout,
+        max_retries=request.max_retries,
+    )
 
     # 🔥 Hot reload: sync database config to memory
     await db.reload_config_to_memory()
@@ -1170,11 +1279,9 @@ async def logout(token: str = Depends(verify_admin_token)):
 async def health_check():
     """Public health check endpoint - no auth required"""
     try:
-        stats = await db.get_dashboard_stats()
-        has_active_tokens = stats.get("active_tokens", 0) > 0
+        return await build_public_health_snapshot(db)
     except Exception:
         return {"backend_running": True, "has_active_tokens": False}
-    return {"backend_running": True, "has_active_tokens": has_active_tokens}
 
 
 @router.get("/api/stats")
@@ -1334,7 +1441,11 @@ async def update_generation_timeout(
     token: str = Depends(verify_admin_token)
 ):
     """Update generation timeout configuration"""
-    await db.update_generation_config(request.image_timeout, request.video_timeout)
+    await db.update_generation_config(
+        image_timeout=request.image_timeout,
+        video_timeout=request.video_timeout,
+        max_retries=request.max_retries,
+    )
 
     # 🔥 Hot reload: sync database config to memory
     await db.reload_config_to_memory()
@@ -1366,10 +1477,12 @@ async def update_token_refresh_enabled(
     }
 
 
-def _sync_runtime_cache_config():
+async def _sync_runtime_cache_config():
     from . import routes
     if routes.generation_handler and routes.generation_handler.file_cache:
-        routes.generation_handler.file_cache.set_timeout(config.cache_timeout)
+        file_cache = routes.generation_handler.file_cache
+        file_cache.set_timeout(config.cache_timeout)
+        await file_cache.refresh_cleanup_task()
 
 # ========== Cache Configuration Endpoints ==========
 
@@ -1403,7 +1516,7 @@ async def update_cache_enabled(
 
     # 🔥 Hot reload: sync database config to memory
     await db.reload_config_to_memory()
-    _sync_runtime_cache_config()
+    await _sync_runtime_cache_config()
 
     return {"success": True, "message": f"缓存已{'启用' if enabled else '禁用'}"}
 
@@ -1430,7 +1543,7 @@ async def update_cache_config_full(
 
     # 🔥 Hot reload: sync database config to memory
     await db.reload_config_to_memory()
-    _sync_runtime_cache_config()
+    await _sync_runtime_cache_config()
 
     return {"success": True, "message": "缓存配置更新成功"}
 
@@ -1446,7 +1559,7 @@ async def update_cache_base_url(
 
     # 🔥 Hot reload: sync database config to memory
     await db.reload_config_to_memory()
-    _sync_runtime_cache_config()
+    await _sync_runtime_cache_config()
 
     return {"success": True, "message": "缓存Base URL更新成功"}
 
@@ -1474,6 +1587,9 @@ async def update_captcha_config(
     browser_proxy_enabled = request.get("browser_proxy_enabled", False)
     browser_proxy_url = request.get("browser_proxy_url", "")
     browser_count = request.get("browser_count", 1)
+    personal_project_pool_size = request.get("personal_project_pool_size")
+    personal_max_resident_tabs = request.get("personal_max_resident_tabs")
+    personal_idle_tab_ttl_seconds = request.get("personal_idle_tab_ttl_seconds")
 
     # 验证浏览器代理URL格式
     if browser_proxy_enabled and browser_proxy_url:
@@ -1513,8 +1629,14 @@ async def update_captcha_config(
         remote_browser_timeout=remote_browser_timeout,
         browser_proxy_enabled=browser_proxy_enabled,
         browser_proxy_url=browser_proxy_url if browser_proxy_enabled else None,
-        browser_count=max(1, int(browser_count)) if browser_count else 1
+        browser_count=max(1, int(browser_count)) if browser_count else 1,
+        personal_project_pool_size=personal_project_pool_size,
+        personal_max_resident_tabs=personal_max_resident_tabs,
+        personal_idle_tab_ttl_seconds=personal_idle_tab_ttl_seconds
     )
+
+    # 🔥 Hot reload: sync database config to memory
+    await db.reload_config_to_memory()
 
     # 如果使用 browser 打码，热重载浏览器数量配置
     if captcha_method == "browser":
@@ -1525,8 +1647,14 @@ async def update_captcha_config(
         except Exception:
             pass
 
-    # 🔥 Hot reload: sync database config to memory
-    await db.reload_config_to_memory()
+    # 如果使用 personal 打码，热重载配置
+    if captcha_method == "personal":
+        try:
+            from ..services.browser_captcha_personal import BrowserCaptchaService
+            service = await BrowserCaptchaService.get_instance(db)
+            await service.reload_config()
+        except Exception as e:
+            print(f"[Admin] Personal 配置热更新失败: {e}")
 
     return {"success": True, "message": "验证码配置更新成功"}
 
@@ -1550,14 +1678,17 @@ async def get_captcha_config(token: str = Depends(verify_admin_token)):
         "remote_browser_timeout": captcha_config.remote_browser_timeout,
         "browser_proxy_enabled": captcha_config.browser_proxy_enabled,
         "browser_proxy_url": captcha_config.browser_proxy_url or "",
-        "browser_count": captcha_config.browser_count
+        "browser_count": captcha_config.browser_count,
+        "personal_project_pool_size": captcha_config.personal_project_pool_size,
+        "personal_max_resident_tabs": captcha_config.personal_max_resident_tabs,
+        "personal_idle_tab_ttl_seconds": captcha_config.personal_idle_tab_ttl_seconds
     }
 
 
 @router.post("/api/captcha/score-test")
 async def test_captcha_score(
-    request: Optional[CaptchaScoreTestRequest] = None,
-    token: str = Depends(verify_admin_token)
+    _request: Optional[CaptchaScoreTestRequest] = None,
+    _token: str = Depends(verify_admin_token)
 ):
     """使用当前打码方式获取 token，并提交到 antcpt 校验分数。"""
     req = request or CaptchaScoreTestRequest()

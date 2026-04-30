@@ -3,9 +3,11 @@ import asyncio
 import base64
 import json
 import time
+from pathlib import Path
 from typing import Optional, AsyncGenerator, List, Dict, Any
 from ..core.logger import debug_logger
 from ..core.config import config
+from ..core.monitoring import record_generation_result
 from ..core.models import Task, RequestLog
 from ..core.account_tiers import (
     PAYGATE_TIER_NOT_PAID,
@@ -243,38 +245,6 @@ MODEL_CONFIG = {
         "supports_images": False
     },
 
-    # veo_2_1_fast_d_15_t2v (需要新增横竖屏)
-    "veo_2_1_fast_d_15_t2v_portrait": {
-        "type": "video",
-        "video_type": "t2v",
-        "model_key": "veo_2_1_fast_d_15_t2v",
-        "aspect_ratio": "VIDEO_ASPECT_RATIO_PORTRAIT",
-        "supports_images": False
-    },
-    "veo_2_1_fast_d_15_t2v_landscape": {
-        "type": "video",
-        "video_type": "t2v",
-        "model_key": "veo_2_1_fast_d_15_t2v",
-        "aspect_ratio": "VIDEO_ASPECT_RATIO_LANDSCAPE",
-        "supports_images": False
-    },
-
-    # veo_2_0_t2v (需要新增横竖屏)
-    "veo_2_0_t2v_portrait": {
-        "type": "video",
-        "video_type": "t2v",
-        "model_key": "veo_2_0_t2v",
-        "aspect_ratio": "VIDEO_ASPECT_RATIO_PORTRAIT",
-        "supports_images": False
-    },
-    "veo_2_0_t2v_landscape": {
-        "type": "video",
-        "video_type": "t2v",
-        "model_key": "veo_2_0_t2v",
-        "aspect_ratio": "VIDEO_ASPECT_RATIO_LANDSCAPE",
-        "supports_images": False
-    },
-
     # veo_3_1_t2v_fast_ultra (横竖屏)
     "veo_3_1_t2v_fast_portrait_ultra": {
         "type": "video",
@@ -322,6 +292,25 @@ MODEL_CONFIG = {
         "aspect_ratio": "VIDEO_ASPECT_RATIO_LANDSCAPE",
         "supports_images": False
     },
+    # veo_3_1_t2v_lite (横竖屏，来自 labs.google.har)
+    "veo_3_1_t2v_lite_portrait": {
+        "type": "video",
+        "video_type": "t2v",
+        "model_key": "veo_3_1_t2v_lite",
+        "aspect_ratio": "VIDEO_ASPECT_RATIO_PORTRAIT",
+        "supports_images": False,
+        "use_v2_model_config": True,
+        "allow_tier_upgrade": False
+    },
+    "veo_3_1_t2v_lite_landscape": {
+        "type": "video",
+        "video_type": "t2v",
+        "model_key": "veo_3_1_t2v_lite",
+        "aspect_ratio": "VIDEO_ASPECT_RATIO_LANDSCAPE",
+        "supports_images": False,
+        "use_v2_model_config": True,
+        "allow_tier_upgrade": False
+    },
 
     # ========== 首尾帧模型 (I2V - Image to Video) ==========
     # 支持1-2张图片：1张作为首帧，2张作为首尾帧
@@ -340,46 +329,6 @@ MODEL_CONFIG = {
         "type": "video",
         "video_type": "i2v",
         "model_key": "veo_3_1_i2v_s_fast_fl",
-        "aspect_ratio": "VIDEO_ASPECT_RATIO_LANDSCAPE",
-        "supports_images": True,
-        "min_images": 1,
-        "max_images": 2
-    },
-
-    # veo_2_1_fast_d_15_i2v (需要新增横竖屏)
-    "veo_2_1_fast_d_15_i2v_portrait": {
-        "type": "video",
-        "video_type": "i2v",
-        "model_key": "veo_2_1_fast_d_15_i2v",
-        "aspect_ratio": "VIDEO_ASPECT_RATIO_PORTRAIT",
-        "supports_images": True,
-        "min_images": 1,
-        "max_images": 2
-    },
-    "veo_2_1_fast_d_15_i2v_landscape": {
-        "type": "video",
-        "video_type": "i2v",
-        "model_key": "veo_2_1_fast_d_15_i2v",
-        "aspect_ratio": "VIDEO_ASPECT_RATIO_LANDSCAPE",
-        "supports_images": True,
-        "min_images": 1,
-        "max_images": 2
-    },
-
-    # veo_2_0_i2v (需要新增横竖屏)
-    "veo_2_0_i2v_portrait": {
-        "type": "video",
-        "video_type": "i2v",
-        "model_key": "veo_2_0_i2v",
-        "aspect_ratio": "VIDEO_ASPECT_RATIO_PORTRAIT",
-        "supports_images": True,
-        "min_images": 1,
-        "max_images": 2
-    },
-    "veo_2_0_i2v_landscape": {
-        "type": "video",
-        "video_type": "i2v",
-        "model_key": "veo_2_0_i2v",
         "aspect_ratio": "VIDEO_ASPECT_RATIO_LANDSCAPE",
         "supports_images": True,
         "min_images": 1,
@@ -444,6 +393,52 @@ MODEL_CONFIG = {
         "supports_images": True,
         "min_images": 1,
         "max_images": 2
+    },
+    # veo_3_1_i2v_lite (横竖屏，仅首帧，来自 labs.google.har)
+    "veo_3_1_i2v_lite_portrait": {
+        "type": "video",
+        "video_type": "i2v",
+        "model_key": "veo_3_1_i2v_lite",
+        "aspect_ratio": "VIDEO_ASPECT_RATIO_PORTRAIT",
+        "supports_images": True,
+        "min_images": 1,
+        "max_images": 1,
+        "use_v2_model_config": True,
+        "allow_tier_upgrade": False
+    },
+    "veo_3_1_i2v_lite_landscape": {
+        "type": "video",
+        "video_type": "i2v",
+        "model_key": "veo_3_1_i2v_lite",
+        "aspect_ratio": "VIDEO_ASPECT_RATIO_LANDSCAPE",
+        "supports_images": True,
+        "min_images": 1,
+        "max_images": 1,
+        "use_v2_model_config": True,
+        "allow_tier_upgrade": False
+    },
+    # veo_3_1_interpolation_lite (横竖屏，首尾帧，来自 labs.google.har)
+    "veo_3_1_interpolation_lite_portrait": {
+        "type": "video",
+        "video_type": "i2v",
+        "model_key": "veo_3_1_interpolation_lite",
+        "aspect_ratio": "VIDEO_ASPECT_RATIO_PORTRAIT",
+        "supports_images": True,
+        "min_images": 2,
+        "max_images": 2,
+        "use_v2_model_config": True,
+        "allow_tier_upgrade": False
+    },
+    "veo_3_1_interpolation_lite_landscape": {
+        "type": "video",
+        "video_type": "i2v",
+        "model_key": "veo_3_1_interpolation_lite",
+        "aspect_ratio": "VIDEO_ASPECT_RATIO_LANDSCAPE",
+        "supports_images": True,
+        "min_images": 2,
+        "max_images": 2,
+        "use_v2_model_config": True,
+        "allow_tier_upgrade": False
     },
 
     # ========== 多图生成 (R2V - Reference Images to Video) ==========
@@ -715,22 +710,30 @@ class GenerationHandler:
     """统一生成处理器"""
 
     def __init__(self, flow_client, token_manager, load_balancer, db, concurrency_manager, proxy_manager):
+        cache_dir = Path(__file__).resolve().parents[2] / "tmp"
         self.flow_client = flow_client
         self.token_manager = token_manager
         self.load_balancer = load_balancer
         self.db = db
         self.concurrency_manager = concurrency_manager
         self.file_cache = FileCache(
-            cache_dir="tmp",
+            cache_dir=str(cache_dir),
             default_timeout=config.cache_timeout,
-            proxy_manager=proxy_manager
+            proxy_manager=proxy_manager,
+            flow_client=flow_client,
         )
-        self._last_generated_url = None
-        self._last_generation_assets = None
 
     def _create_generation_result(self) -> Dict[str, Any]:
         """????????????????"""
         return dict(success=False, error_message=None, error_emitted=False)
+
+    def _create_response_state(self) -> Dict[str, Any]:
+        """为单次请求创建独立的响应状态，避免并发请求互相污染。"""
+        return {
+            "url": None,
+            "generated_assets": None,
+            "base_url": None,
+        }
 
     def _mark_generation_failed(self, generation_result: Optional[Dict[str, Any]], error_message: str):
         """????????????????????"""
@@ -752,6 +755,26 @@ class GenerationHandler:
         if len(text) <= max_length:
             return text
         return f"{text[:max_length - 3]}..."
+
+    def _resolve_video_model_key_for_tier(self, model_config: Dict[str, Any], user_tier: str) -> tuple[str, Optional[str]]:
+        """根据账号层级调整视频模型 key。"""
+        model_key = model_config["model_key"]
+        allow_tier_upgrade = bool(model_config.get("allow_tier_upgrade", True))
+
+        if user_tier == "PAYGATE_TIER_TWO":
+            if allow_tier_upgrade and "ultra" not in model_key:
+                if "_fl" in model_key:
+                    model_key = model_key.replace("_fl", "_ultra_fl")
+                else:
+                    model_key = model_key + "_ultra"
+                return model_key, f"TIER_TWO 账号自动切换到 ultra 模型: {model_key}"
+            return model_key, None
+
+        if user_tier == "PAYGATE_TIER_ONE" and "ultra" in model_key:
+            model_key = model_key.replace("_ultra_fl", "_fl").replace("_ultra", "")
+            return model_key, f"TIER_ONE 账号自动切换到标准模型: {model_key}"
+
+        return model_key, None
 
     async def _fail_video_task(self, operations: Optional[List[Dict[str, Any]]], error_message: str):
         """将视频任务收口到失败态，避免残留 processing。"""
@@ -816,9 +839,9 @@ class GenerationHandler:
             "status": "processing",
         }
         generation_result = self._create_generation_result()
+        response_state = self._create_response_state()
+        response_state["base_url"] = (base_url_override or "").strip().rstrip("/") or None
         request_log_state: Dict[str, Any] = {"id": None, "progress": 0}
-        self._last_generated_url = None
-        self._last_generation_assets = None
 
         # 防止并发链路复用到上一次请求的指纹上下文
         if hasattr(self.flow_client, "clear_request_fingerprint"):
@@ -828,6 +851,7 @@ class GenerationHandler:
         if model not in MODEL_CONFIG:
             error_msg = f"不支持的模型: {model}"
             debug_logger.log_error(error_msg)
+            record_generation_result("unknown", "invalid", time.time() - start_time)
             yield self._create_error_response(error_msg, status_code=400)
             return
 
@@ -883,8 +907,17 @@ class GenerationHandler:
         perf_trace["token_select_ms"] = int((time.time() - token_select_started_at) * 1000)
 
         if not token:
-            error_msg = self._get_no_token_error_message(generation_type)
+            error_msg = None
+            if self.load_balancer and hasattr(self.load_balancer, "get_unavailable_reason"):
+                error_msg = await self.load_balancer.get_unavailable_reason(
+                    for_image_generation=(generation_type == "image"),
+                    for_video_generation=(generation_type == "video"),
+                    model=model,
+                )
+            if not error_msg:
+                error_msg = self._get_no_token_error_message(generation_type)
             debug_logger.log_error(f"[GENERATION] {error_msg}")
+            record_generation_result(generation_type, "no_token", time.time() - start_time)
             await self._log_request(
                 token_id=None,
                 operation=request_operation,
@@ -929,6 +962,7 @@ class GenerationHandler:
             if not token:
                 error_msg = "Token AT无效或刷新失败"
                 debug_logger.log_error(f"[GENERATION] {error_msg}")
+                record_generation_result(generation_type, "failed", time.time() - start_time)
                 if stream:
                     yield self._create_stream_chunk(f"❌ {error_msg}\n")
                 yield self._create_error_response(error_msg, status_code=503)
@@ -941,6 +975,7 @@ class GenerationHandler:
                 required_tier = get_required_paygate_tier_for_model(model)
                 error_msg = "当前模型需要 " + get_paygate_tier_label(required_tier) + " 账号: " + model
                 debug_logger.log_error(f"[GENERATION] {error_msg}")
+                record_generation_result(generation_type, "failed", time.time() - start_time)
                 if stream:
                     yield self._create_stream_chunk(f"❌ {error_msg}\n")
                 yield self._create_error_response(error_msg, status_code=403)
@@ -957,6 +992,12 @@ class GenerationHandler:
                 progress=22,
                 response_extra={"project_id": project_id},
             )
+            prefill_action = "IMAGE_GENERATION" if generation_type == "image" else "VIDEO_GENERATION"
+            await self.flow_client.prefill_remote_browser_pool(
+                project_id=project_id,
+                action=prefill_action,
+                token_id=token.id,
+            )
 
             # 5. 根据类型处理
             generation_pipeline_started_at = time.time()
@@ -966,6 +1007,7 @@ class GenerationHandler:
                     token, project_id, model_config, prompt, images, stream,
                     perf_trace=perf_trace,
                     generation_result=generation_result,
+                    response_state=response_state,
                     request_log_state=request_log_state,
                     pending_token_state=pending_token_state
                 ):
@@ -976,6 +1018,7 @@ class GenerationHandler:
                     token, project_id, model_config, prompt, images, stream,
                     perf_trace=perf_trace,
                     generation_result=generation_result,
+                    response_state=response_state,
                     request_log_state=request_log_state,
                     pending_token_state=pending_token_state,
                     video_media_id=video_media_id,
@@ -990,6 +1033,7 @@ class GenerationHandler:
                 if token:
                     await self.token_manager.record_error(token.id)
                 duration = time.time() - start_time
+                record_generation_result(generation_type, "failed", duration)
                 perf_trace["status"] = "failed"
                 perf_trace["total_ms"] = int(duration * 1000)
                 perf_trace["error"] = error_msg
@@ -1005,8 +1049,6 @@ class GenerationHandler:
                     status_text="failed",
                     progress=request_log_state.get("progress", 0),
                 )
-                self._last_generated_url = None
-                self._last_generation_assets = None
                 if not generation_result.get("error_emitted"):
                     if stream:
                         yield self._create_stream_chunk(f"❌ {error_msg}\n")
@@ -1023,6 +1065,7 @@ class GenerationHandler:
 
             # 7. 记录成功日志
             duration = time.time() - start_time
+            record_generation_result(generation_type, "success", duration)
             perf_trace["status"] = "success"
             perf_trace["total_ms"] = int(duration * 1000)
             # 日志中保留更完整的 prompt，避免管理页只看到过短内容
@@ -1037,14 +1080,10 @@ class GenerationHandler:
             }
 
             # 添加生成的URL（如果有）
-            if hasattr(self, '_last_generated_url') and self._last_generated_url:
-                response_data["url"] = self._last_generated_url
-            if hasattr(self, "_last_generation_assets") and self._last_generation_assets:
-                response_data["generated_assets"] = self._last_generation_assets
-
-            # 清除临时存储，避免污染后续请求
-            self._last_generated_url = None
-            self._last_generation_assets = None
+            if response_state.get("url"):
+                response_data["url"] = response_state["url"]
+            if response_state.get("generated_assets"):
+                response_data["generated_assets"] = response_state["generated_assets"]
             image_perf = perf_trace.get("image_generation", {}) if isinstance(perf_trace, dict) else {}
             video_perf = perf_trace.get("video_generation", {}) if isinstance(perf_trace, dict) else {}
             debug_logger.log_info(
@@ -1075,6 +1114,7 @@ class GenerationHandler:
             error_msg = "生成已取消: 客户端连接已断开"
             debug_logger.log_warning(f"[GENERATION] ⚠️ {error_msg}")
             duration = time.time() - start_time
+            record_generation_result(generation_type or "unknown", "cancelled", duration)
             perf_trace["status"] = "failed"
             perf_trace["total_ms"] = int(duration * 1000)
             perf_trace["error"] = error_msg
@@ -1100,6 +1140,7 @@ class GenerationHandler:
 
             # 先将最终失败状态落库，再返回错误响应，避免日志停在 102。
             duration = time.time() - start_time
+            record_generation_result(generation_type or "unknown", "failed", duration)
             perf_trace["status"] = "failed"
             perf_trace["total_ms"] = int(duration * 1000)
             perf_trace["error"] = error_msg
@@ -1145,10 +1186,14 @@ class GenerationHandler:
         stream: bool,
         perf_trace: Optional[Dict[str, Any]] = None,
         generation_result: Optional[Dict[str, Any]] = None,
+        response_state: Optional[Dict[str, Any]] = None,
         request_log_state: Optional[Dict[str, Any]] = None,
         pending_token_state: Optional[Dict[str, bool]] = None
     ) -> AsyncGenerator:
         """处理图片生成 (同步返回)"""
+
+        if response_state is None:
+            response_state = self._create_response_state()
 
         image_trace: Optional[Dict[str, Any]] = None
         if isinstance(perf_trace, dict):
@@ -1242,7 +1287,7 @@ class GenerationHandler:
 
             image_url = media[0]["image"]["generatedImage"]["fifeUrl"]
             media_id = media[0].get("name")  # 用于 upsample
-            self._last_generation_assets = {
+            response_state["generated_assets"] = {
                 "type": "image",
                 "origin_image_url": image_url
             }
@@ -1256,8 +1301,8 @@ class GenerationHandler:
                 if stream:
                     yield self._create_stream_chunk(f"正在放大图片到 {resolution_name}...\n")
 
-                # 4K/2K 图片重试逻辑 - 最多重试3次
-                max_retries = 3
+                # 4K/2K 图片重试逻辑 - 使用配置的最大重试次数
+                max_retries = config.flow_max_retries
                 for retry_attempt in range(max_retries):
                     try:
                         # 调用 upsample API
@@ -1277,71 +1322,67 @@ class GenerationHandler:
                             if stream:
                                 yield self._create_stream_chunk(f"✅ 图片已放大到 {resolution_name}\n")
 
-                            # 缓存放大后的图片 (如果启用)
-                            # 日志统一记录原图URL + 2K/4K 信息
-                            self._last_generated_url = image_url
-                            self._last_generation_assets = {
+                            # 2K/4K 图片统一落盘为真实文件，日志里只保留链接。
+                            response_state["generated_assets"] = {
                                 "type": "image",
                                 "origin_image_url": image_url,
                                 "upscaled_image": {
-                                    "resolution": resolution_name,
-                                    "base64": encoded_image
+                                    "resolution": resolution_name
                                 }
                             }
 
-                            if config.cache_enabled:
-                                try:
-                                    await self._update_request_log_progress(
-                                        request_log_state,
-                                        token_id=token.id,
-                                        status_text="caching_image",
-                                        progress=90,
+                            try:
+                                await self._update_request_log_progress(
+                                    request_log_state,
+                                    token_id=token.id,
+                                    status_text="caching_image",
+                                    progress=90,
+                                )
+                                if stream:
+                                    yield self._create_stream_chunk(f"缓存 {resolution_name} 图片中...\n")
+                                cached_filename = await self.file_cache.cache_base64_image(encoded_image, resolution_name)
+                                local_url = f"{self._get_base_url(response_state)}/tmp/{cached_filename}"
+                                response_state["url"] = local_url
+                                response_state["generated_assets"]["upscaled_image"]["local_url"] = local_url
+                                response_state["generated_assets"]["upscaled_image"]["url"] = local_url
+                                self._mark_generation_succeeded(generation_result)
+                                if stream:
+                                    yield self._create_stream_chunk(f"✅ {resolution_name} 图片缓存成功\n")
+                                    yield self._create_stream_chunk(
+                                        f"![Generated Image]({local_url})",
+                                        finish_reason="stop"
                                     )
-                                    if stream:
-                                        yield self._create_stream_chunk(f"缓存 {resolution_name} 图片中...\n")
-                                    cached_filename = await self.file_cache.cache_base64_image(encoded_image, resolution_name)
-                                    local_url = f"{self._get_base_url()}/tmp/{cached_filename}"
-                                    self._last_generation_assets["upscaled_image"]["local_url"] = local_url
-                                    self._last_generation_assets["upscaled_image"]["url"] = local_url
-                                    self._mark_generation_succeeded(generation_result)
-                                    if stream:
-                                        yield self._create_stream_chunk(f"✅ {resolution_name} 图片缓存成功\n")
-                                        yield self._create_stream_chunk(
-                                            f"![Generated Image]({local_url})",
-                                            finish_reason="stop"
-                                        )
-                                    else:
-                                        yield self._create_completion_response(
-                                            local_url,
-                                            media_type="image"
-                                        )
-                                    if image_trace is not None:
-                                        image_trace["upsample_ms"] = int((time.time() - upsample_started_at) * 1000)
-                                    return
-                                except Exception as e:
-                                    debug_logger.log_error(f"Failed to cache {resolution_name} image: {str(e)}")
-                                    if stream:
-                                        cache_error = self._normalize_error_message(e, max_length=120)
-                                        yield self._create_stream_chunk(f"⚠️ 缓存失败: {cache_error}，返回 base64...\n")
-
-                            # 缓存未启用或缓存失败，返回 base64 格式
-                            base64_url = f"data:image/jpeg;base64,{encoded_image}"
-                            self._last_generation_assets["upscaled_image"]["local_url"] = None
-                            self._last_generation_assets["upscaled_image"]["url"] = base64_url
-                            self._mark_generation_succeeded(generation_result)
-                            if stream:
-                                yield self._create_stream_chunk(
-                                    f"![Generated Image]({base64_url})",
-                                    finish_reason="stop"
-                                )
-                            else:
-                                yield self._create_completion_response(
-                                    base64_url,
-                                    media_type="image"
-                                )
-                            if image_trace is not None:
-                                image_trace["upsample_ms"] = int((time.time() - upsample_started_at) * 1000)
-                            return
+                                else:
+                                    yield self._create_completion_response(
+                                        local_url,
+                                        media_type="image"
+                                    )
+                                if image_trace is not None:
+                                    image_trace["upsample_ms"] = int((time.time() - upsample_started_at) * 1000)
+                                return
+                            except Exception as e:
+                                debug_logger.log_error(f"Failed to cache {resolution_name} image: {str(e)}")
+                                response_state["url"] = image_url
+                                response_state["generated_assets"]["upscaled_image"]["local_url"] = None
+                                response_state["generated_assets"]["upscaled_image"]["url"] = image_url
+                                response_state["generated_assets"]["upscaled_image"]["delivery_mode"] = "inline_base64_fallback"
+                                self._mark_generation_succeeded(generation_result)
+                                base64_url = f"data:image/jpeg;base64,{encoded_image}"
+                                if stream:
+                                    cache_error = self._normalize_error_message(e, max_length=120)
+                                    yield self._create_stream_chunk(f"⚠️ 缓存失败: {cache_error}，返回内联图片...\n")
+                                    yield self._create_stream_chunk(
+                                        f"![Generated Image]({base64_url})",
+                                        finish_reason="stop"
+                                    )
+                                else:
+                                    yield self._create_completion_response(
+                                        base64_url,
+                                        media_type="image"
+                                    )
+                                if image_trace is not None:
+                                    image_trace["upsample_ms"] = int((time.time() - upsample_started_at) * 1000)
+                                return
                         else:
                             debug_logger.log_warning("[UPSAMPLE] 返回结果为空")
                             if stream:
@@ -1367,17 +1408,37 @@ class GenerationHandler:
                 if image_trace is not None:
                     image_trace["upsample_ms"] = int((time.time() - upsample_started_at) * 1000)
 
-            # 1K 原图统一直接返回官方直链，避免额外下载缓存依赖 curl/wget。
             local_url = image_url
-            if stream:
-                yield self._create_stream_chunk("正在返回官方图片链接...\n")
+            cache_started_at = time.time()
+            if config.cache_enabled:
+                await self._update_request_log_progress(
+                    request_log_state,
+                    token_id=token.id,
+                    status_text="caching_image",
+                    progress=90,
+                )
+                if stream:
+                    yield self._create_stream_chunk("正在缓存 1K 图片文件...\n")
+                try:
+                    cached_filename = await self.file_cache.download_and_cache(image_url, "image")
+                    local_url = f"{self._get_base_url(response_state)}/tmp/{cached_filename}"
+                    if stream:
+                        yield self._create_stream_chunk("✅ 1K 图片缓存成功,准备返回缓存地址...\n")
+                except Exception as e:
+                    debug_logger.log_error(f"Failed to cache 1K image: {str(e)}")
+                    local_url = image_url
+                    if stream:
+                        cache_error = self._normalize_error_message(e, max_length=120)
+                        yield self._create_stream_chunk(f"⚠️ 缓存失败: {cache_error}\n正在返回源链接...\n")
+            elif stream:
+                yield self._create_stream_chunk("缓存已关闭,正在返回官方图片链接...\n")
             if image_trace is not None:
-                image_trace["cache_image_ms"] = 0
+                image_trace["cache_image_ms"] = int((time.time() - cache_started_at) * 1000)
 
             # 返回结果
             # 存储URL用于日志记录
-            self._last_generated_url = local_url
-            self._last_generation_assets = {
+            response_state["url"] = local_url
+            response_state["generated_assets"] = {
                 "type": "image",
                 "origin_image_url": image_url,
                 "final_image_url": local_url
@@ -1408,11 +1469,15 @@ class GenerationHandler:
         stream: bool,
         perf_trace: Optional[Dict[str, Any]] = None,
         generation_result: Optional[Dict[str, Any]] = None,
+        response_state: Optional[Dict[str, Any]] = None,
         request_log_state: Optional[Dict[str, Any]] = None,
         pending_token_state: Optional[Dict[str, bool]] = None,
         video_media_id: Optional[str] = None,
     ) -> AsyncGenerator:
         """处理视频生成 (异步轮询)"""
+
+        if response_state is None:
+            response_state = self._create_response_state()
 
         video_trace: Optional[Dict[str, Any]] = None
         if isinstance(perf_trace, dict):
@@ -1433,9 +1498,9 @@ class GenerationHandler:
             supports_images = model_config.get("supports_images", False)
             min_images = model_config.get("min_images", 0)
             max_images = model_config.get("max_images", 0)
+            use_v2_model_config = bool(model_config.get("use_v2_model_config", False))
 
             # 根据账号tier自动调整模型 key
-            model_key = model_config["model_key"]
             user_tier = normalized_tier
 
             # Extend 模型跳过 ultra 自动降级（只有 ultra 版本有效）
@@ -1570,6 +1635,7 @@ class GenerationHandler:
                         aspect_ratio=model_config["aspect_ratio"],
                         start_media_id=start_media_id,
                         end_media_id=end_media_id,
+                        use_v2_model_config=use_v2_model_config,
                         user_paygate_tier=normalized_tier,
                         token_id=token.id,
                         token_video_concurrency=token.video_concurrency,
@@ -1589,6 +1655,7 @@ class GenerationHandler:
                         model_key=actual_model_key,
                         aspect_ratio=model_config["aspect_ratio"],
                         start_media_id=start_media_id,
+                        use_v2_model_config=use_v2_model_config,
                         user_paygate_tier=normalized_tier,
                         token_id=token.id,
                         token_video_concurrency=token.video_concurrency,
@@ -1642,6 +1709,7 @@ class GenerationHandler:
                     prompt=prompt,
                     model_key=model_config["model_key"],
                     aspect_ratio=model_config["aspect_ratio"],
+                    use_v2_model_config=use_v2_model_config,
                     user_paygate_tier=normalized_tier,
                     token_id=token.id,
                     token_video_concurrency=token.video_concurrency,
@@ -1709,6 +1777,9 @@ class GenerationHandler:
         Args:
             upsample_config: 放大配置 {"resolution": "VIDEO_RESOLUTION_4K", "model_key": "veo_3_1_upsampler_4k"}
         """
+
+        if response_state is None:
+            response_state = self._create_response_state()
 
         max_attempts = config.max_poll_attempts
         poll_interval = config.poll_interval
@@ -1791,7 +1862,7 @@ class GenerationHandler:
                                 
                                 # 递归轮询放大结果（不再放大）
                                 async for chunk in self._poll_video_result(
-                                    token, project_id, upsample_operations, stream, None, generation_result, request_log_state
+                                    token, project_id, upsample_operations, stream, None, generation_result, response_state, request_log_state
                                 ):
                                     yield chunk
                                 return
@@ -1870,7 +1941,7 @@ class GenerationHandler:
                             if stream:
                                 yield self._create_stream_chunk("正在缓存视频文件...\n")
                             cached_filename = await self.file_cache.download_and_cache(video_url, "video")
-                            local_url = f"{self._get_base_url()}/tmp/{cached_filename}"
+                            local_url = f"{self._get_base_url(response_state)}/tmp/{cached_filename}"
                             if stream:
                                 yield self._create_stream_chunk("✅ 视频缓存成功,准备返回缓存地址...\n")
                         except Exception as e:
@@ -1895,8 +1966,8 @@ class GenerationHandler:
                     )
 
                     # 存储URL用于日志记录
-                    self._last_generated_url = local_url
-                    self._last_generation_assets = {
+                    response_state["url"] = local_url
+                    response_state["generated_assets"] = {
                         "type": "video",
                         "final_video_url": local_url,
                         "mediaGenerationId": video_media_id,
@@ -2064,13 +2135,24 @@ class GenerationHandler:
 
         return json.dumps(error, ensure_ascii=False)
 
-    def _get_base_url(self) -> str:
+    def _get_base_url(self, response_state: Optional[Dict[str, Any]] = None) -> str:
         """获取基础URL用于缓存文件访问"""
-        # 优先使用配置的cache_base_url
+        # 已配置缓存访问域名时，始终优先使用它，避免被请求 Host/IP 覆盖。
         if config.cache_base_url:
-            return config.cache_base_url
-        # 否则使用服务器地址
-        return f"http://{config.server_host}:{config.server_port}"
+            return config.cache_base_url.rstrip("/")
+
+        request_base_url = ""
+        if isinstance(response_state, dict):
+            request_base_url = (response_state.get("base_url") or "").strip().rstrip("/")
+        if request_base_url:
+            return request_base_url
+
+        # 回退到服务地址，避免把监听地址 0.0.0.0 / :: 直接返回给客户端
+        server_host = (config.server_host or "").strip()
+        if server_host in {"", "0.0.0.0", "::", "[::]"}:
+            server_host = "127.0.0.1"
+
+        return f"http://{server_host}:{config.server_port}"
 
     async def _update_request_log_progress(
         self,
@@ -2089,7 +2171,14 @@ class GenerationHandler:
             return
 
         safe_progress = max(0, min(100, int(progress)))
+        now = time.time()
+        last_status_text = str(request_log_state.get("last_status_text") or "").strip()
+        last_progress = int(request_log_state.get("last_progress") or 0)
+        last_updated_at = float(request_log_state.get("last_progress_update_at") or 0)
+
         request_log_state["progress"] = safe_progress
+        request_log_state["last_status_text"] = status_text
+        request_log_state["last_progress"] = safe_progress
         payload = {
             "status": "processing",
             "status_text": status_text,
@@ -2097,6 +2186,17 @@ class GenerationHandler:
         }
         if isinstance(response_extra, dict):
             payload.update(response_extra)
+
+        should_write = (
+            safe_progress in (0, 100)
+            or status_text != last_status_text
+            or safe_progress >= last_progress + 5
+            or (now - last_updated_at) >= 1.0
+        )
+        if not should_write:
+            return
+
+        request_log_state["last_progress_update_at"] = now
 
         try:
             await self.db.update_request_log(
