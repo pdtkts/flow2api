@@ -2368,6 +2368,17 @@ class FlowClient:
                 )
             except Exception as e:
                 debug_logger.log_warning(f"[reCAPTCHA RemoteBrowser] 上报 error 失败: {e}")
+        elif config.captcha_method == "extension":
+            try:
+                from .browser_captcha_extension import ExtensionCaptchaService
+                service = await ExtensionCaptchaService.get_instance(self.db)
+                await service.report_flow_error(
+                    project_id=project_id,
+                    error_reason=error_reason or "",
+                    error_message=error_message or "",
+                )
+            except Exception:
+                pass
 
     async def _notify_browser_captcha_request_finished(self, browser_id: Optional[Union[int, str]] = None):
         """通知有头浏览器：上游图片/视频请求已结束，可关闭对应打码浏览器。"""
@@ -2738,6 +2749,24 @@ class FlowClient:
         debug_logger.log_info(f"[reCAPTCHA] 开始获取 token: method={captcha_method}, project_id={project_id}, action={action}")
         await self._log_recaptcha_headed_proxy_context(captcha_method, token_id)
         self._recaptcha_begin_request(action)
+
+        if captcha_method == "extension":
+            try:
+                from .browser_captcha_extension import ExtensionCaptchaService
+                service = await ExtensionCaptchaService.get_instance(self.db)
+                extension_timeout = 45 if action == "VIDEO_GENERATION" else 25
+                token = await service.get_token(
+                    project_id,
+                    action,
+                    timeout=extension_timeout,
+                    token_id=token_id,
+                )
+                self._set_request_fingerprint(None)
+                return token, None
+            except Exception as e:
+                debug_logger.log_error(f"[reCAPTCHA Extension] 错误: {str(e)}")
+                self._set_request_fingerprint(None)
+                return None, None
 
         # 内置浏览器打码 (nodriver)
         if captcha_method == "personal":

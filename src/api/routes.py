@@ -14,7 +14,7 @@ from urllib.parse import parse_qs, quote, urlparse
 from curl_cffi.requests import AsyncSession
 from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 from ..core.auth import verify_api_key_flexible
@@ -31,6 +31,7 @@ from ..core.models import (
     Project,
     Task,
 )
+from ..services.browser_captcha_extension import ExtensionCaptchaService
 from ..services.generation_handler import MODEL_CONFIG, GenerationHandler
 
 router = APIRouter()
@@ -1931,6 +1932,21 @@ async def stream_generate_content(
             status_code=500,
             content=_build_gemini_error_payload(500, str(exc)),
         )
+
+
+@router.websocket("/captcha_ws")
+async def captcha_websocket_endpoint(websocket: WebSocket):
+    service = await ExtensionCaptchaService.get_instance()
+    await service.connect(websocket)
+    try:
+        while True:
+            data = await websocket.receive_text()
+            await service.handle_message(websocket, data)
+    except WebSocketDisconnect:
+        service.disconnect(websocket)
+    except Exception as exc:
+        debug_logger.log_error(f"WebSocket error: {exc}")
+        service.disconnect(websocket)
 
 
 @router.get("/v1/api-key/allowed-tokens")

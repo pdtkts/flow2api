@@ -1,5 +1,6 @@
 """Admin API routes"""
 import asyncio
+import inspect
 import json
 import mimetypes
 from pathlib import Path
@@ -523,6 +524,14 @@ async def _fetch_agent_gateway_connections(base_url: str, api_key: str) -> Dict[
     return response_payload
 
 
+def _supports_kwarg(fn: Any, kwarg: str) -> bool:
+    """Best-effort compatibility helper for rolling upgrades."""
+    try:
+        return kwarg in inspect.signature(fn).parameters
+    except Exception:
+        return False
+
+
 def set_dependencies(
     tm: TokenManager,
     pm: ProxyManager,
@@ -553,6 +562,7 @@ class AddTokenRequest(BaseModel):
     project_name: Optional[str] = None
     remark: Optional[str] = None
     captcha_proxy_url: Optional[str] = None
+    extension_route_key: Optional[str] = None
     image_enabled: bool = True
     video_enabled: bool = True
     image_concurrency: int = -1
@@ -565,6 +575,7 @@ class UpdateTokenRequest(BaseModel):
     project_name: Optional[str] = None
     remark: Optional[str] = None
     captcha_proxy_url: Optional[str] = None
+    extension_route_key: Optional[str] = None
     image_enabled: Optional[bool] = None
     video_enabled: Optional[bool] = None
     image_concurrency: Optional[int] = None
@@ -651,6 +662,7 @@ class ImportTokenItem(BaseModel):
     session_token: Optional[str] = None
     is_active: bool = True
     captcha_proxy_url: Optional[str] = None
+    extension_route_key: Optional[str] = None
     image_enabled: bool = True
     video_enabled: bool = True
     image_concurrency: int = -1
@@ -762,6 +774,7 @@ async def get_tokens(token: str = Depends(verify_admin_token)):
         "current_project_id": row.get("current_project_id"),  # 🆕 项目ID
         "current_project_name": row.get("current_project_name"),  # 🆕 项目名称
         "captcha_proxy_url": row.get("captcha_proxy_url") or "",
+        "extension_route_key": row.get("extension_route_key") or "",
         "image_enabled": bool(row.get("image_enabled")),
         "video_enabled": bool(row.get("video_enabled")),
         "image_concurrency": row.get("image_concurrency"),
@@ -779,17 +792,24 @@ async def add_token(
 ):
     """Add a new token"""
     try:
-        new_token = await token_manager.add_token(
-            st=request.st,
-            project_id=request.project_id,  # 🆕 支持用户指定project_id
-            project_name=request.project_name,
-            remark=request.remark,
-            captcha_proxy_url=request.captcha_proxy_url.strip() if request.captcha_proxy_url is not None else None,
-            image_enabled=request.image_enabled,
-            video_enabled=request.video_enabled,
-            image_concurrency=request.image_concurrency,
-            video_concurrency=request.video_concurrency
-        )
+        add_kwargs: Dict[str, Any] = {
+            "st": request.st,
+            "project_id": request.project_id,  # 🆕 支持用户指定project_id
+            "project_name": request.project_name,
+            "remark": request.remark,
+            "captcha_proxy_url": request.captcha_proxy_url.strip() if request.captcha_proxy_url is not None else None,
+            "image_enabled": request.image_enabled,
+            "video_enabled": request.video_enabled,
+            "image_concurrency": request.image_concurrency,
+            "video_concurrency": request.video_concurrency,
+        }
+        if _supports_kwarg(token_manager.add_token, "extension_route_key"):
+            add_kwargs["extension_route_key"] = (
+                request.extension_route_key.strip()
+                if request.extension_route_key is not None
+                else None
+            )
+        new_token = await token_manager.add_token(**add_kwargs)
 
         # 热更新并发限制，避免必须重启服务
         if concurrency_manager:
@@ -839,20 +859,27 @@ async def update_token(
                 pass
 
         # 更新token (包含AT、ST、AT过期时间、project_id和project_name)
-        await token_manager.update_token(
-            token_id=token_id,
-            st=request.st,
-            at=at,
-            at_expires=at_expires,  # 🆕 更新AT过期时间
-            project_id=request.project_id,
-            project_name=request.project_name,
-            remark=request.remark,
-            captcha_proxy_url=request.captcha_proxy_url.strip() if request.captcha_proxy_url is not None else None,
-            image_enabled=request.image_enabled,
-            video_enabled=request.video_enabled,
-            image_concurrency=request.image_concurrency,
-            video_concurrency=request.video_concurrency
-        )
+        update_kwargs: Dict[str, Any] = {
+            "token_id": token_id,
+            "st": request.st,
+            "at": at,
+            "at_expires": at_expires,  # 🆕 更新AT过期时间
+            "project_id": request.project_id,
+            "project_name": request.project_name,
+            "remark": request.remark,
+            "captcha_proxy_url": request.captcha_proxy_url.strip() if request.captcha_proxy_url is not None else None,
+            "image_enabled": request.image_enabled,
+            "video_enabled": request.video_enabled,
+            "image_concurrency": request.image_concurrency,
+            "video_concurrency": request.video_concurrency,
+        }
+        if _supports_kwarg(token_manager.update_token, "extension_route_key"):
+            update_kwargs["extension_route_key"] = (
+                request.extension_route_key.strip()
+                if request.extension_route_key is not None
+                else None
+            )
+        await token_manager.update_token(**update_kwargs)
 
         # 热更新并发限制，确保管理台修改立即生效
         if concurrency_manager:
@@ -1127,17 +1154,24 @@ async def import_tokens(
 
                 if existing:
                     # 更新现有Token
-                    await token_manager.update_token(
-                        token_id=existing.id,
-                        st=st,
-                        at=at,
-                        at_expires=at_expires,
-                        captcha_proxy_url=item.captcha_proxy_url.strip() if item.captcha_proxy_url is not None else None,
-                        image_enabled=item.image_enabled,
-                        video_enabled=item.video_enabled,
-                        image_concurrency=item.image_concurrency,
-                        video_concurrency=item.video_concurrency
-                    )
+                    import_update_kwargs: Dict[str, Any] = {
+                        "token_id": existing.id,
+                        "st": st,
+                        "at": at,
+                        "at_expires": at_expires,
+                        "captcha_proxy_url": item.captcha_proxy_url.strip() if item.captcha_proxy_url is not None else None,
+                        "image_enabled": item.image_enabled,
+                        "video_enabled": item.video_enabled,
+                        "image_concurrency": item.image_concurrency,
+                        "video_concurrency": item.video_concurrency,
+                    }
+                    if _supports_kwarg(token_manager.update_token, "extension_route_key"):
+                        import_update_kwargs["extension_route_key"] = (
+                            item.extension_route_key.strip()
+                            if item.extension_route_key is not None
+                            else None
+                        )
+                    await token_manager.update_token(**import_update_kwargs)
                     # 如果过期则禁用
                     if is_expired:
                         await token_manager.disable_token(existing.id)
@@ -1146,6 +1180,8 @@ async def import_tokens(
                     existing.at = at
                     existing.at_expires = at_expires
                     existing.captcha_proxy_url = item.captcha_proxy_url
+                    if hasattr(existing, "extension_route_key"):
+                        existing.extension_route_key = item.extension_route_key
                     existing.image_enabled = item.image_enabled
                     existing.video_enabled = item.video_enabled
                     existing.image_concurrency = item.image_concurrency
@@ -1153,14 +1189,21 @@ async def import_tokens(
                     updated += 1
                 else:
                     # 添加新Token
-                    new_token = await token_manager.add_token(
-                        st=st,
-                        captcha_proxy_url=item.captcha_proxy_url.strip() if item.captcha_proxy_url is not None else None,
-                        image_enabled=item.image_enabled,
-                        video_enabled=item.video_enabled,
-                        image_concurrency=item.image_concurrency,
-                        video_concurrency=item.video_concurrency
-                    )
+                    import_add_kwargs: Dict[str, Any] = {
+                        "st": st,
+                        "captcha_proxy_url": item.captcha_proxy_url.strip() if item.captcha_proxy_url is not None else None,
+                        "image_enabled": item.image_enabled,
+                        "video_enabled": item.video_enabled,
+                        "image_concurrency": item.image_concurrency,
+                        "video_concurrency": item.video_concurrency,
+                    }
+                    if _supports_kwarg(token_manager.add_token, "extension_route_key"):
+                        import_add_kwargs["extension_route_key"] = (
+                            item.extension_route_key.strip()
+                            if item.extension_route_key is not None
+                            else None
+                        )
+                    new_token = await token_manager.add_token(**import_add_kwargs)
                     # 如果过期则禁用
                     if is_expired:
                         await token_manager.disable_token(new_token.id)

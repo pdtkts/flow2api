@@ -42,6 +42,8 @@ class Token(BaseModel):
 
     # 打码代理（token 级，可覆盖全局浏览器打码代理）
     captcha_proxy_url: Optional[str] = None
+    # 插件路由键（extension 模式用于将请求路由到指定浏览器插件连接）
+    extension_route_key: Optional[str] = None
 
     # 429禁用相关
     ban_reason: Optional[str] = None  # 禁用原因: "429_rate_limit" 或 None
