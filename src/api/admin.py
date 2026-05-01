@@ -1837,23 +1837,35 @@ async def list_managed_api_key_projects(
     offset = max(0, offset)
     total = await db.count_projects_by_api_key(key_id)
     projects = await db.list_projects_by_api_key(key_id, limit=limit, offset=offset)
+    projects_by_token: dict[int, list[Any]] = {}
+    for p in projects:
+        try:
+            token_id = int(getattr(p, "token_id", 0) or 0)
+        except Exception:
+            token_id = 0
+        if token_id <= 0:
+            continue
+        projects_by_token.setdefault(token_id, []).append(p)
 
     accounts_out = []
     active_by_token: dict[int, str] = {}
     for account_id in await db.get_api_key_account_ids(key_id):
         t = await token_manager.get_token(account_id)
         if t:
-            active_pid = t.current_project_id
+            token_scoped_projects = projects_by_token.get(int(t.id), [])
+            active_project = next((proj for proj in token_scoped_projects if bool(getattr(proj, "is_active", False))), None)
+            active_pid = str(active_project.project_id) if active_project and active_project.project_id else None
+            active_name = str(active_project.project_name) if active_project and active_project.project_name else None
             if active_pid:
-                active_by_token[int(t.id)] = str(active_pid)
+                active_by_token[int(t.id)] = active_pid
             accounts_out.append(
                 {
                     "token_id": t.id,
                     "email": t.email or None,
                     "active_project_id": active_pid,
-                    "active_project_name": t.current_project_name,
-                    "current_project_id": t.current_project_id,
-                    "current_project_name": t.current_project_name,
+                    "active_project_name": active_name,
+                    "current_project_id": active_pid,
+                    "current_project_name": active_name,
                 }
             )
         else:

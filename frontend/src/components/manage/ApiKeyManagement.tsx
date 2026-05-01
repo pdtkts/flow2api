@@ -751,7 +751,7 @@ export function ApiKeyManagement() {
                   </Button>
                 </div>
                 <p className="text-xs text-muted-foreground">
-                  Projects tagged with this key and each account&apos;s current Flow project cursor. Public API:{" "}
+                  Projects tagged with this key only. Account active status below is derived from this key&apos;s project rows (not global token cursor). Public API:{" "}
                   <code className="rounded bg-muted px-1 text-[10px]">POST /v1/projects</code> (requires{" "}
                   <code className="rounded bg-muted px-1 text-[10px]">projects:write</code> or <code className="rounded bg-muted px-1 text-[10px]">*</code>
                   ).
@@ -764,8 +764,8 @@ export function ApiKeyManagement() {
                         <TableRow>
                           <TableHead className="text-xs">Account</TableHead>
                           <TableHead className="text-xs">Email</TableHead>
-                          <TableHead className="text-xs">Active project ID</TableHead>
-                          <TableHead className="text-xs">Active project name</TableHead>
+                          <TableHead className="text-xs">Key-active project ID</TableHead>
+                          <TableHead className="text-xs">Key-active project name</TableHead>
                           <TableHead className="text-xs">Status</TableHead>
                         </TableRow>
                       </TableHeader>
