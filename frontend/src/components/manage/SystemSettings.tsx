@@ -1193,14 +1193,14 @@ export function SystemSettings({ active }: { active: boolean }) {
           <CardHeader>
             <CardTitle>Extension worker binding</CardTitle>
             <CardDescription>
-              Only for captcha Method &quot;Chrome extension&quot;. Maps extension <code className="text-xs">route_key</code>{" "}
-              to a managed API key for per-key isolation — unrelated to headed or remote browser captcha.
+              Only for captcha Method &quot;Chrome extension&quot;. Managed API key binding is primary.{" "}
+              <code className="text-xs">route_key</code> is optional legacy metadata and no longer required for key-based worker routing.
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
               <Input
-                placeholder="Route key (e.g. 9223)"
+                placeholder="Route key (optional, legacy)"
                 value={bindRouteKey}
                 onChange={(e) => setBindRouteKey(e.target.value)}
               />

@@ -54,6 +54,10 @@ class LoadBalancer:
             and int(diagnostics.get("allowed_token_ids_count") or 0) > 0
         )
         priority_summary = diagnostics.get("post_check_failure_summary") or diagnostics.get("filtered_reason_summary") or []
+        if project_pin_context and isinstance(priority_summary, list) and priority_summary:
+            non_pin = [item for item in priority_summary if "绑定项目账号" not in str(item.get("reason") or "")]
+            if non_pin:
+                priority_summary = non_pin
         if not isinstance(priority_summary, list) or not priority_summary:
             if project_pin_context:
                 return "当前请求已绑定到指定项目所属账号，其他账号不会参与本次调度"
@@ -165,8 +169,8 @@ class LoadBalancer:
             self._round_robin_state[scenario] = selected["token"].id
         return selected
 
-    async def _check_extension_route(self, token: Token) -> tuple[bool, str]:
-        """Ensure extension captcha requests are routed to the selected account."""
+    async def _check_extension_route(self, token: Token, managed_api_key_id: Optional[int] = None) -> tuple[bool, str]:
+        """Ensure extension captcha requests are routed to the selected managed API key."""
         if config.captcha_method != "extension":
             return True, ""
 
@@ -174,11 +178,23 @@ class LoadBalancer:
             from .browser_captcha_extension import ExtensionCaptchaService
 
             service = await ExtensionCaptchaService.get_instance(getattr(self.token_manager, "db", None))
-            has_connection, route_key = await service.has_connection_for_token(token.id)
+            has_connection = False
+            route_key = ""
+            if managed_api_key_id is not None and hasattr(service, "has_connection_for_managed_key"):
+                has_connection = await service.has_connection_for_managed_key(managed_api_key_id)
+                if has_connection:
+                    return True, ""
+
+            has_connection, route_key = await service.has_connection_for_token(
+                token.id,
+                managed_api_key_id=managed_api_key_id,
+            )
             if has_connection:
                 return True, ""
 
             available = service.describe_routes() or "none"
+            if managed_api_key_id is not None:
+                return False, f"Managed API Key {managed_api_key_id} 没有可用扩展工作器（可用路由: {available}）"
             if route_key:
                 return False, f"扩展路由 {route_key} 未连接（可用路由: {available}）"
             return False, f"扩展路由未配置或匿名插件未连接（可用路由: {available}）"
@@ -194,6 +210,7 @@ class LoadBalancer:
         enforce_concurrency_filter: bool = True,
         track_pending: bool = False,
         allowed_token_ids: Optional[Set[int]] = None,
+        managed_api_key_id: Optional[int] = None,
         allowlist_filter_reason_type: Optional[str] = None,
         diagnostics_sink: Optional[Dict[str, Any]] = None,
     ) -> Optional[Token]:
@@ -236,6 +253,7 @@ class LoadBalancer:
             "allowlist_filter_reason_type": (allowlist_filter_reason_type or "").strip() or (
                 "project_pin" if allowed_token_ids is not None and len(allowed_token_ids) == 1 else "api_key_assignment"
             ),
+            "managed_api_key_id": managed_api_key_id,
             "filtered_reasons": {},
             "filtered_reason_summary": [],
             "candidate_token_ids": [],
@@ -275,7 +293,7 @@ class LoadBalancer:
                     filtered_reasons[token.id] = "图片生成已禁用"
                     continue
 
-                route_ok, route_reason = await self._check_extension_route(token)
+                route_ok, route_reason = await self._check_extension_route(token, managed_api_key_id=managed_api_key_id)
                 if not route_ok:
                     filtered_reasons[token.id] = route_reason
                     continue
@@ -293,7 +311,7 @@ class LoadBalancer:
                     filtered_reasons[token.id] = "视频生成已禁用"
                     continue
 
-                route_ok, route_reason = await self._check_extension_route(token)
+                route_ok, route_reason = await self._check_extension_route(token, managed_api_key_id=managed_api_key_id)
                 if not route_ok:
                     filtered_reasons[token.id] = route_reason
                     continue

@@ -910,6 +910,7 @@ class GenerationHandler:
                 enforce_concurrency_filter=False,
                 track_pending=True,
                 allowed_token_ids=allowed_token_ids,
+                managed_api_key_id=api_key_id,
                 allowlist_filter_reason_type=allowlist_filter_reason_type,
                 diagnostics_sink=token_selection_diagnostics,
             )
@@ -921,6 +922,7 @@ class GenerationHandler:
                 enforce_concurrency_filter=False,
                 track_pending=True,
                 allowed_token_ids=allowed_token_ids,
+                managed_api_key_id=api_key_id,
                 allowlist_filter_reason_type=allowlist_filter_reason_type,
                 diagnostics_sink=token_selection_diagnostics,
             )

@@ -178,6 +178,16 @@ class ExtensionCaptchaService:
             candidate_connections = [
                 conn for conn in candidate_connections if conn.managed_api_key_id == managed_api_key_id
             ]
+            if not candidate_connections:
+                return None
+            # Key-first routing: if managed key is known, route_key is only a preference.
+            # Prefer exact route_key match when provided, otherwise use any connection
+            # under this managed key.
+            if normalized_key:
+                for conn in candidate_connections:
+                    if conn.route_key == normalized_key:
+                        return conn
+            return candidate_connections[0]
         else:
             # Legacy/global callers must never borrow managed-key scoped workers.
             candidate_connections = [
@@ -252,12 +262,28 @@ class ExtensionCaptchaService:
     def _has_connection_for_route_key(self, route_key: str, managed_api_key_id: Optional[int]) -> bool:
         return self._select_connection(route_key, managed_api_key_id) is not None
 
+    async def has_connection_for_managed_key(self, managed_api_key_id: Optional[int]) -> bool:
+        if managed_api_key_id is None:
+            return False
+        return any(conn.managed_api_key_id == int(managed_api_key_id) for conn in self.active_connections)
+
+    async def has_any_authenticated_connection_for_key(self, managed_api_key_id: Optional[int]) -> bool:
+        if managed_api_key_id is None:
+            return False
+        return any(
+            conn.managed_api_key_id == int(managed_api_key_id) and conn.binding_source in {"authenticated", "manual", "claimed"}
+            for conn in self.active_connections
+        )
+
     async def has_connection_for_token(
         self,
         token_id: Optional[int],
         managed_api_key_id: Optional[int] = None,
     ) -> tuple[bool, str]:
         route_key = await self._resolve_route_key(token_id)
+        if managed_api_key_id is not None:
+            has_connection = await self.has_connection_for_managed_key(managed_api_key_id)
+            return has_connection, route_key
         return self._has_connection_for_route_key(route_key, managed_api_key_id), route_key
 
     async def _wait_for_connection(
@@ -365,7 +391,9 @@ class ExtensionCaptchaService:
         token_id: Optional[int] = None,
         managed_api_key_id: Optional[int] = None,
     ) -> Optional[str]:
-        route_key = await self._resolve_route_key(token_id)
+        route_key = ""
+        if managed_api_key_id is None:
+            route_key = await self._resolve_route_key(token_id)
         queue_wait_timeout = 20
         if self.db and hasattr(self.db, "get_captcha_config"):
             try:
