@@ -653,6 +653,10 @@ class ExtensionWorkerUnbindRequest(BaseModel):
     route_key: str
 
 
+class ExtensionWorkerKillRequest(BaseModel):
+    worker_session_id: str
+
+
 class UpdateDebugConfigRequest(BaseModel):
     enabled: bool
 
@@ -1928,6 +1932,23 @@ async def unbind_extension_worker(
         "success": True,
         "message": "Worker binding removed. Requests for this route will fail until a matching worker binds again.",
     }
+
+
+@router.post("/api/admin/extension/workers/kill")
+async def kill_extension_worker(
+    request: ExtensionWorkerKillRequest,
+    token: str = Depends(verify_admin_token),
+):
+    from ..services.browser_captcha_extension import ExtensionCaptchaService
+
+    worker_session_id = (request.worker_session_id or "").strip()
+    if not worker_session_id:
+        raise HTTPException(status_code=400, detail="worker_session_id is required")
+    service = await ExtensionCaptchaService.get_instance(db=db)
+    killed = await service.kill_worker(worker_session_id)
+    if not killed:
+        return {"success": False, "message": "Worker not found"}
+    return {"success": True, "message": "Worker terminated", "worker_session_id": worker_session_id}
 
 
 @router.post("/api/admin/debug")

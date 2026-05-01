@@ -98,7 +98,7 @@ const defaultCaptcha: CaptchaForm = {
 }
 
 type ExtensionWorkerRow = {
-  connection_id: number
+  worker_session_id: string
   route_key: string
   client_label: string
   managed_api_key_id: number | null
@@ -623,6 +623,27 @@ export function SystemSettings({ active }: { active: boolean }) {
       const d = await r.json()
       if (d.success) {
         toast.success("Worker binding removed")
+        await refreshExtensionWorkers()
+      } else toast.error(d.message || "Failed")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const killExtensionWorker = async (workerSessionId: string) => {
+    if (!token) return
+    const sessionId = (workerSessionId || "").trim()
+    if (!sessionId) return toast.error("Worker session ID required")
+    setBusy(true)
+    try {
+      const r = await adminFetch("/api/admin/extension/workers/kill", token, {
+        method: "POST",
+        body: JSON.stringify({ worker_session_id: sessionId }),
+      })
+      if (!r) return
+      const d = await r.json()
+      if (d.success) {
+        toast.success("Worker terminated")
         await refreshExtensionWorkers()
       } else toast.error(d.message || "Failed")
     } finally {
@@ -1207,21 +1228,37 @@ export function SystemSettings({ active }: { active: boolean }) {
 
             <div className="space-y-2">
               <Label>Active workers</Label>
+              <p className="text-xs text-muted-foreground">
+                Worker ID is unique per connection session and changes on reconnect.
+              </p>
               <div className="rounded-md border">
-                <div className="grid grid-cols-5 gap-2 px-3 py-2 text-xs font-medium border-b">
+                <div className="grid grid-cols-7 gap-2 px-3 py-2 text-xs font-medium border-b">
+                  <span>Worker ID</span>
                   <span>Route key</span>
                   <span>Label</span>
                   <span>Managed key</span>
                   <span>Source</span>
                   <span>Connected at</span>
+                  <span>Action</span>
                 </div>
                 {(extensionWorkers.length ? extensionWorkers : []).map((w) => (
-                  <div key={`${w.connection_id}-${w.route_key}`} className="grid grid-cols-5 gap-2 px-3 py-2 text-xs border-b last:border-b-0">
+                  <div key={w.worker_session_id} className="grid grid-cols-7 gap-2 px-3 py-2 text-xs border-b last:border-b-0">
+                    <span className="font-mono">{w.worker_session_id || "-"}</span>
                     <span className="font-mono">{w.route_key || "(empty)"}</span>
                     <span>{w.client_label || "-"}</span>
                     <span>{w.managed_api_key_id ?? "-"}</span>
                     <span>{w.binding_source || "-"}</span>
                     <span>{w.connected_at ? new Date(w.connected_at * 1000).toLocaleTimeString() : "-"}</span>
+                    <span>
+                      <Button
+                        size="sm"
+                        variant="destructive"
+                        onClick={() => killExtensionWorker(w.worker_session_id)}
+                        disabled={busy}
+                      >
+                        Kill
+                      </Button>
+                    </span>
                   </div>
                 ))}
                 {extensionWorkers.length === 0 ? <div className="px-3 py-3 text-xs text-muted-foreground">No active workers</div> : null}

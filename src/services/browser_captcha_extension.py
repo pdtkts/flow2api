@@ -13,6 +13,7 @@ from ..core.logger import debug_logger
 @dataclass
 class ExtensionConnection:
     websocket: WebSocket
+    worker_session_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     route_key: str = ""
     client_label: str = ""
     managed_api_key_id: Optional[int] = None
@@ -127,6 +128,7 @@ class ExtensionCaptchaService:
         self.active_connections.append(conn)
         debug_logger.log_info(
             f"[Extension Captcha] Client connected. Total: {len(self.active_connections)}, "
+            f"worker_session_id={conn.worker_session_id}, "
             f"route_key={conn.route_key or '-'}, label={conn.client_label or '-'}, "
             f"managed_api_key_id={conn.managed_api_key_id}, source={conn.binding_source}"
         )
@@ -138,6 +140,7 @@ class ExtensionCaptchaService:
                 self.active_connections.remove(conn)
                 debug_logger.log_info(
                     f"[Extension Captcha] Client disconnected. Total: {len(self.active_connections)}, "
+                    f"worker_session_id={conn.worker_session_id}, "
                     f"route_key={conn.route_key or '-'}, label={conn.client_label or '-'}"
                 )
                 try:
@@ -418,10 +421,10 @@ class ExtensionCaptchaService:
 
     async def list_active_workers(self) -> list[Dict[str, Any]]:
         workers: list[Dict[str, Any]] = []
-        for idx, conn in enumerate(self.active_connections, start=1):
+        for conn in self.active_connections:
             workers.append(
                 {
-                    "connection_id": idx,
+                    "worker_session_id": conn.worker_session_id,
                     "route_key": conn.route_key,
                     "client_label": conn.client_label,
                     "managed_api_key_id": conn.managed_api_key_id,
@@ -430,6 +433,24 @@ class ExtensionCaptchaService:
                 }
             )
         return workers
+
+    async def kill_worker(self, worker_session_id: str) -> bool:
+        target_id = (worker_session_id or "").strip()
+        if not target_id:
+            return False
+        target: Optional[ExtensionConnection] = None
+        for conn in self.active_connections:
+            if conn.worker_session_id == target_id:
+                target = conn
+                break
+        if target is None:
+            return False
+        try:
+            await target.websocket.close(code=1000, reason="Worker terminated by admin")
+        except Exception:
+            pass
+        self.disconnect(target.websocket)
+        return True
 
     async def bind_route_key(self, route_key: str, managed_api_key_id: int) -> None:
         normalized_route = (route_key or "").strip()
