@@ -1958,8 +1958,8 @@ async def list_extension_workers(token: str = Depends(verify_admin_token)):
     queue_stats = service.get_queue_stats()
     return {
         "success": True,
-        "mode": "strict_managed_key_isolation",
-        "note": "Requests only use workers bound to the same managed API key/route (managed key resolved from worker API key) and fail after queue timeout when missing.",
+        "mode": "managed_key_primary_with_dedicated_fallback",
+        "note": "Requests prefer workers bound to the same managed API key; dedicated worker-mode connections can be used as token-bound fallback when managed-key binding is absent.",
         "workers": active_workers,
         "bindings": bindings,
         "queue_stats": queue_stats,

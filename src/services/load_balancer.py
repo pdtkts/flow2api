@@ -184,6 +184,16 @@ class LoadBalancer:
                 has_connection = await service.has_connection_for_managed_key(managed_api_key_id)
                 if has_connection:
                     return True, ""
+                # Central/dedicated worker mode fallback: token-bound worker is acceptable
+                # when managed-key binding is missing for the currently selected token.
+                if hasattr(service, "has_connection_for_dedicated_token"):
+                    has_dedicated = await service.has_connection_for_dedicated_token(token.id)
+                    if has_dedicated:
+                        debug_logger.log_info(
+                            "[LOAD_BALANCER] managed-key worker missing, using dedicated token worker fallback: "
+                            f"token_id={token.id}, managed_api_key_id={managed_api_key_id}"
+                        )
+                        return True, ""
 
             has_connection, route_key = await service.has_connection_for_token(
                 token.id,
@@ -194,7 +204,11 @@ class LoadBalancer:
 
             available = service.describe_routes() or "none"
             if managed_api_key_id is not None:
-                return False, f"Managed API Key {managed_api_key_id} 没有可用扩展工作器（可用路由: {available}）"
+                return (
+                    False,
+                    f"Managed API Key {managed_api_key_id} 没有可用扩展工作器，且 Token {token.id} 未连接专属工作器"
+                    f"（可用路由: {available}）",
+                )
             if route_key:
                 return False, f"扩展路由 {route_key} 未连接（可用路由: {available}）"
             return False, f"扩展路由未配置或匿名插件未连接（可用路由: {available}）"

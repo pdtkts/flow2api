@@ -290,6 +290,12 @@ class ExtensionCaptchaService:
             return False
         return any(conn.managed_api_key_id == int(managed_api_key_id) for conn in self.active_connections)
 
+    async def has_connection_for_dedicated_token(self, token_id: Optional[int]) -> bool:
+        if token_id is None:
+            return False
+        target_token_id = int(token_id)
+        return any(conn.dedicated_token_id == target_token_id for conn in self.active_connections)
+
     async def has_any_authenticated_connection_for_key(self, managed_api_key_id: Optional[int]) -> bool:
         if managed_api_key_id is None:
             return False
@@ -306,6 +312,9 @@ class ExtensionCaptchaService:
         route_key = await self._resolve_route_key(token_id)
         if managed_api_key_id is not None:
             has_connection = await self.has_connection_for_managed_key(managed_api_key_id)
+            if not has_connection:
+                # Dedicated worker mode can route by dedicated token binding even without managed key.
+                has_connection = await self.has_connection_for_dedicated_token(token_id)
             return has_connection, route_key
         return self._has_connection_for_route_key(route_key, managed_api_key_id), route_key
 

@@ -903,8 +903,8 @@ export function SystemSettings({ active }: { active: boolean }) {
             {m === "extension" ? (
               <p className="text-xs text-muted-foreground mt-1">
                 Uses your Chrome extension connected to <code className="rounded bg-muted px-1">/captcha_ws</code> instead
-                of headed Playwright/Chromium. Captcha method remains global, but workers are isolated per managed API
-                key via route-key bindings, and managed key identity is resolved from the extension API key.
+                of headed Playwright/Chromium. Managed API key binding is primary for end-user mode, while dedicated
+                worker mode can route by dedicated token even when managed-key binding is empty.
               </p>
             ) : null}
           </div>
@@ -1199,8 +1199,9 @@ export function SystemSettings({ active }: { active: boolean }) {
           <CardHeader>
             <CardTitle>Extension worker binding</CardTitle>
             <CardDescription>
-              Only for captcha Method &quot;Chrome extension&quot;. Managed API key binding is primary.{" "}
-              <code className="text-xs">route_key</code> is optional legacy metadata and no longer required for key-based worker routing.
+              Only for captcha Method &quot;Chrome extension&quot;. Managed API key binding is primary for end-user
+              workers; dedicated worker mode supports token-bound fallback.{" "}
+              <code className="text-xs">route_key</code> is optional legacy metadata.
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
