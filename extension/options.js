@@ -6,6 +6,7 @@ const DEFAULT_SETTINGS = {
 };
 
 const $ = (id) => document.getElementById(id);
+let reconnectInProgress = false;
 
 function normalizeSettings(values) {
   return {
@@ -90,17 +91,22 @@ function refreshRuntimeStatus() {
 }
 
 function reconnectNow() {
+  if (reconnectInProgress) return;
+  reconnectInProgress = true;
+  const reconnectBtn = $("reconnectBtn");
+  if (reconnectBtn) reconnectBtn.disabled = true;
+  setStatus("Reconnecting...", false);
   chrome.runtime.sendMessage({ type: "reconnect_now" }, (resp) => {
     if (chrome.runtime.lastError) {
       setStatus(`Reconnect failed: ${chrome.runtime.lastError.message}`, true);
-      return;
-    }
-    if (!resp || !resp.success) {
+    } else if (!resp || !resp.success) {
       setStatus(`Reconnect failed: ${(resp && resp.error) || "unknown"}`, true);
-      return;
+    } else {
+      setStatus("Reconnect triggered.");
+      setTimeout(refreshRuntimeStatus, 400);
     }
-    setStatus("Reconnect triggered.");
-    setTimeout(refreshRuntimeStatus, 400);
+    reconnectInProgress = false;
+    if (reconnectBtn) reconnectBtn.disabled = false;
   });
 }
 

@@ -14,6 +14,7 @@ from ..core.logger import debug_logger
 class ExtensionConnection:
     websocket: WebSocket
     worker_session_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    instance_id: str = ""
     route_key: str = ""
     client_label: str = ""
     managed_api_key_id: Optional[int] = None
@@ -108,9 +109,18 @@ class ExtensionCaptchaService:
         await websocket.accept()
         conn = ExtensionConnection(
             websocket=websocket,
+            instance_id=(websocket.query_params.get("instance_id") or "").strip(),
             route_key=(websocket.query_params.get("route_key") or "").strip(),
             client_label=(websocket.query_params.get("client_label") or "").strip(),
         )
+        if conn.instance_id:
+            for existing in list(self.active_connections):
+                if existing.instance_id and existing.instance_id == conn.instance_id:
+                    try:
+                        await existing.websocket.close(code=1000, reason="Replaced by reconnect")
+                    except Exception:
+                        pass
+                    self.disconnect(existing.websocket)
         if authenticated_managed_api_key_id is not None:
             conn.managed_api_key_id = int(authenticated_managed_api_key_id)
             conn.binding_source = "authenticated"
@@ -129,6 +139,7 @@ class ExtensionCaptchaService:
         debug_logger.log_info(
             f"[Extension Captcha] Client connected. Total: {len(self.active_connections)}, "
             f"worker_session_id={conn.worker_session_id}, "
+            f"instance_id={conn.instance_id or '-'}, "
             f"route_key={conn.route_key or '-'}, label={conn.client_label or '-'}, "
             f"managed_api_key_id={conn.managed_api_key_id}, source={conn.binding_source}"
         )
@@ -291,6 +302,7 @@ class ExtensionCaptchaService:
                 if conn:
                     conn.route_key = (payload.get("route_key") or conn.route_key or "").strip()
                     conn.client_label = (payload.get("client_label") or conn.client_label or "").strip()
+                    conn.instance_id = (payload.get("instance_id") or conn.instance_id or "").strip()
                     register_error = None
                     if conn.binding_source == "authenticated" and conn.managed_api_key_id is not None:
                         try:
@@ -321,6 +333,7 @@ class ExtensionCaptchaService:
                             "type": "register_ack",
                             "route_key": conn.route_key,
                             "client_label": conn.client_label,
+                            "instance_id": conn.instance_id,
                             "managed_api_key_id": conn.managed_api_key_id,
                             "binding_source": conn.binding_source,
                             "status": "error" if register_error else "ok",
@@ -425,6 +438,7 @@ class ExtensionCaptchaService:
             workers.append(
                 {
                     "worker_session_id": conn.worker_session_id,
+                    "instance_id": conn.instance_id,
                     "route_key": conn.route_key,
                     "client_label": conn.client_label,
                     "managed_api_key_id": conn.managed_api_key_id,

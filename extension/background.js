@@ -1,6 +1,7 @@
 let ws = null;
 let reconnectTimeout = null;
 let heartbeatInterval = null;
+let cachedInstanceId = null;
 
 const DEFAULT_SETTINGS = {
     serverUrl: "ws://127.0.0.1:8000/captcha_ws",
@@ -11,12 +12,37 @@ const DEFAULT_SETTINGS = {
 const runtimeState = {
     wsStatus: "idle",
     routeKey: "",
+    instanceId: "",
     managedApiKeyId: "",
     bindingSource: "",
     lastRegisterStatus: "never",
     lastRegisterError: "",
     lastError: ""
 };
+
+function generateInstanceId() {
+    const rand = Math.random().toString(36).slice(2, 10);
+    return `ext-${Date.now().toString(36)}-${rand}`;
+}
+
+function getInstanceId() {
+    if (cachedInstanceId) return Promise.resolve(cachedInstanceId);
+    return new Promise((resolve) => {
+        chrome.storage.local.get({ extensionInstanceId: "" }, (stored) => {
+            const existing = String(stored.extensionInstanceId || "").trim();
+            if (existing) {
+                cachedInstanceId = existing;
+                resolve(cachedInstanceId);
+                return;
+            }
+            const created = generateInstanceId();
+            chrome.storage.local.set({ extensionInstanceId: created }, () => {
+                cachedInstanceId = created;
+                resolve(cachedInstanceId);
+            });
+        });
+    });
+}
 
 function getSettings() {
     return new Promise((resolve) => {
@@ -84,7 +110,9 @@ async function connectWS() {
     if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
 
     const settings = await getSettings();
+    const instanceId = await getInstanceId();
     runtimeState.routeKey = settings.routeKey;
+    runtimeState.instanceId = instanceId;
     runtimeState.managedApiKeyId = "";
     runtimeState.bindingSource = "";
     runtimeState.wsStatus = "connecting";
@@ -101,27 +129,32 @@ async function connectWS() {
     if (settings.clientLabel) {
         url.searchParams.set("client_label", settings.clientLabel);
     }
-    ws = new WebSocket(url.toString());
+    url.searchParams.set("instance_id", instanceId);
+    const socket = new WebSocket(url.toString());
+    ws = socket;
 
-    ws.onopen = () => {
+    socket.onopen = () => {
+        if (socket !== ws) return;
         console.log("[Flow2API] Background connected to WebSocket", url.toString());
         runtimeState.wsStatus = "open";
-        ws.send(JSON.stringify({
+        socket.send(JSON.stringify({
             type: "register",
             route_key: settings.routeKey,
             client_label: settings.clientLabel,
+            instance_id: instanceId,
         }));
         if (heartbeatInterval) clearInterval(heartbeatInterval);
         heartbeatInterval = setInterval(() => {
-            if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({ type: "ping" }));
+            if (socket === ws && socket.readyState === WebSocket.OPEN) {
+                socket.send(JSON.stringify({ type: "ping" }));
             }
         }, 20000);
     };
 
     let tokenQueue = Promise.resolve();
 
-    ws.onmessage = async (event) => {
+    socket.onmessage = async (event) => {
+        if (socket !== ws) return;
         let data;
         try {
             data = JSON.parse(event.data);
@@ -162,7 +195,8 @@ async function connectWS() {
         }
     };
 
-    ws.onclose = () => {
+    socket.onclose = () => {
+        if (socket !== ws) return;
         console.log("[Flow2API] WebSocket Closed. Reconnecting in 2s...");
         runtimeState.wsStatus = "closed";
         ws = null;
@@ -171,7 +205,8 @@ async function connectWS() {
         reconnectTimeout = setTimeout(connectWS, 2000);
     };
 
-    ws.onerror = (e) => {
+    socket.onerror = (e) => {
+        if (socket !== ws) return;
         console.log("[Flow2API] WebSocket Error", e);
         runtimeState.wsStatus = "error";
         runtimeState.lastError = "websocket_error";
