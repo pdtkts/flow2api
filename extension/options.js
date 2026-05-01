@@ -177,12 +177,17 @@ function saveSettings() {
   });
 }
 
-function updateRuntimeStatus(state) {
-  const el = $("runtimeStatus");
-  if (!state) {
-    el.textContent = "Connection status: unknown";
-    return;
-  }
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/\"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+function renderStatusCards(state) {
+  const cardsEl = $("statusCards");
   const ws = state.wsStatus || "unknown";
   const mode = state.connectionMode || "-";
   const route = state.routeKey || "(empty)";
@@ -193,9 +198,74 @@ function updateRuntimeStatus(state) {
   const dedicatedToken = state.dedicatedTokenId || "-";
   const ack = state.lastRegisterStatus || "unknown";
   const source = state.bindingSource || "unknown";
-  const ackError = state.lastRegisterError ? `, register_error=${state.lastRegisterError}` : "";
-  const last = state.lastError ? `, error=${state.lastError}` : "";
-  el.textContent = `Connection status: ${ws}, mode=${mode}, route=${route}, managed_key=${managed}, dedicated_worker=${dedicatedWorker}, dedicated_token=${dedicatedToken}, binding=${source}, register=${ack}, instance_id=${instance}, worker_session=${workerSession}${ackError}${last}`;
+  const registerError = state.lastRegisterError || "-";
+  const lastError = state.lastError || "-";
+
+  const items = [
+    ["Connection", ws, false],
+    ["Mode", mode, false],
+    ["Register", ack, ack === "error"],
+    ["Binding", source, false],
+    ["Managed key", managed, false],
+    ["Dedicated worker", dedicatedWorker, false],
+    ["Dedicated token", dedicatedToken, false],
+    ["Route key", route, false],
+    ["Instance ID", instance, false],
+    ["Worker session", workerSession, false],
+    ["Register error", registerError, registerError !== "-"],
+    ["Last error", lastError, lastError !== "-"],
+  ];
+
+  cardsEl.innerHTML = items
+    .map(([label, value, isError]) => {
+      return `<div class="status-card">
+        <span class="status-label">${escapeHtml(label)}</span>
+        <span class="status-value${isError ? " error" : ""}">${escapeHtml(value)}</span>
+      </div>`;
+    })
+    .join("");
+}
+
+function formatEventTime(ts) {
+  if (!ts) return "-";
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return "-";
+  return d.toLocaleTimeString();
+}
+
+function renderEventLog(events) {
+  const logEl = $("eventLogList");
+  const list = Array.isArray(events) ? events.slice(-10).reverse() : [];
+  if (!list.length) {
+    logEl.innerHTML = `<li class="event-item">No recent events</li>`;
+    return;
+  }
+  logEl.innerHTML = list
+    .map((evt) => {
+      const level = ["info", "warn", "error"].includes(String(evt.level || ""))
+        ? String(evt.level)
+        : "info";
+      const msg = String(evt.message || evt.type || "-");
+      return `<li class="event-item">
+        <span class="event-time">${escapeHtml(formatEventTime(evt.ts))}</span>
+        <span class="event-level ${escapeHtml(level)}">${escapeHtml(level.toUpperCase())}</span>
+        <span>${escapeHtml(msg)}</span>
+      </li>`;
+    })
+    .join("");
+}
+
+function updateRuntimeStatus(state) {
+  const metaEl = $("statusMeta");
+  if (!state) {
+    $("statusCards").innerHTML = `<div class="status-card"><span class="status-label">Connection</span><span class="status-value">unknown</span></div>`;
+    metaEl.textContent = "Last update: no runtime state";
+    renderEventLog([]);
+    return;
+  }
+  renderStatusCards(state);
+  renderEventLog(state.events);
+  metaEl.textContent = `Last update: ${new Date().toLocaleTimeString()} • Status: ${state.wsStatus || "unknown"}`;
 }
 
 function refreshRuntimeStatus() {

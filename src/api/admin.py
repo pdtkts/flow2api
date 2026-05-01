@@ -1078,6 +1078,48 @@ async def refresh_at(
         raise HTTPException(status_code=500, detail=f"刷新AT失败: {str(e)}")
 
 
+@router.post("/api/tokens/{token_id}/refresh-profile")
+async def refresh_token_profile(
+    token_id: int,
+    request: ST2ATRequest,
+    token: str = Depends(verify_admin_token),
+):
+    """Refresh token email/name using ST -> AT user profile payload."""
+    try:
+        token_obj = await token_manager.get_token(token_id)
+        if not token_obj:
+            raise HTTPException(status_code=404, detail="Token not found")
+
+        st_value = (request.st or "").strip()
+        if not st_value:
+            raise HTTPException(status_code=400, detail="st is required")
+
+        result = await token_manager.flow_client.st_to_at(st_value)
+        user_info = result.get("user", {}) if isinstance(result, dict) else {}
+        email = str(user_info.get("email", "") or "").strip()
+        name = str(user_info.get("name", "") or "").strip()
+        if not email:
+            raise HTTPException(status_code=400, detail="Failed to resolve email from session token")
+        if not name:
+            name = email.split("@")[0] if "@" in email else email
+
+        await db.update_token(token_id, email=email, name=name)
+
+        return {
+            "success": True,
+            "message": "Token profile refreshed",
+            "token": {
+                "id": token_id,
+                "email": email,
+                "name": name,
+            },
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"刷新邮箱失败: {str(e)}")
+
+
 def _project_to_dict(project):
     to_iso = lambda value: value.isoformat() if hasattr(value, "isoformat") and value else None
     return {

@@ -23,7 +23,8 @@ const runtimeState = {
     bindingSource: "",
     lastRegisterStatus: "never",
     lastRegisterError: "",
-    lastError: ""
+    lastError: "",
+    events: []
 };
 
 function inferConnectionMode(stored) {
@@ -35,6 +36,21 @@ function inferConnectionMode(stored) {
     const ak = String(stored.apiKey || "").trim();
     if (wk && !ak) return "worker";
     return "endUser";
+}
+
+function pushEvent(type, message, level = "info") {
+    const evt = {
+        ts: Date.now(),
+        type: String(type || "event"),
+        message: String(message || ""),
+        level: level === "error" || level === "warn" ? level : "info",
+    };
+    const list = Array.isArray(runtimeState.events) ? runtimeState.events : [];
+    list.push(evt);
+    if (list.length > 50) {
+        list.splice(0, list.length - 50);
+    }
+    runtimeState.events = list;
 }
 
 /** Public hosts should use wss://; keep ws:// for localhost-style hosts. */
@@ -125,6 +141,7 @@ function resetRuntimeStatePartial() {
     runtimeState.lastRegisterStatus = "never";
     runtimeState.lastRegisterError = "";
     runtimeState.lastError = "";
+    runtimeState.events = [];
 }
 
 /** Clear saved settings, drop stable instance id, and reconnect (used by options Reset). */
@@ -144,6 +161,7 @@ function resetExtensionToDefaults(done) {
             },
             () => {
                 console.log("[Flow2API] Extension reset to defaults.");
+                pushEvent("reset", "Extension reset to defaults and reconnect started");
                 connectWS()
                     .then(() => {
                         if (typeof done === "function") done(null);
@@ -206,6 +224,7 @@ async function connectWS() {
     runtimeState.lastRegisterStatus = "pending";
     runtimeState.lastRegisterError = "";
     runtimeState.lastError = "";
+    pushEvent("connect_start", `Connecting to ${settings.serverUrl || DEFAULT_SETTINGS.serverUrl}`);
     const url = new URL(settings.serverUrl || DEFAULT_SETTINGS.serverUrl);
     if (mode === "worker") {
         if (settings.workerAuthKey) {
@@ -230,6 +249,7 @@ async function connectWS() {
         if (socket !== ws) return;
         console.log("[Flow2API] Background connected to WebSocket", url.toString());
         runtimeState.wsStatus = "open";
+        pushEvent("connect_open", "WebSocket connected");
         socket.send(JSON.stringify({
             type: "register",
             route_key: mode === "endUser" ? settings.routeKey : "",
@@ -269,10 +289,12 @@ async function connectWS() {
             if (ackStatus === "error") {
                 runtimeState.wsStatus = "open_register_error";
                 runtimeState.lastError = ackError || "register_failed";
+                pushEvent("register_ack", `Register failed: ${ackError || "unknown"}`, "error");
                 console.log("[Flow2API] Register ack error:", ackError || "unknown");
             } else {
                 runtimeState.wsStatus = "open";
                 runtimeState.lastError = "";
+                pushEvent("register_ack", "Register successful");
                 console.log(
                     "[Flow2API] Registered route key:",
                     data.route_key || "(empty)",
@@ -302,6 +324,7 @@ async function connectWS() {
         if (socket !== ws) return;
         console.log("[Flow2API] WebSocket Closed. Reconnecting in 2s...");
         runtimeState.wsStatus = "closed";
+        pushEvent("connect_close", "WebSocket closed, reconnect scheduled", "warn");
         ws = null;
         if (heartbeatInterval) clearInterval(heartbeatInterval);
         if (reconnectTimeout) clearTimeout(reconnectTimeout);
@@ -313,6 +336,7 @@ async function connectWS() {
         console.log("[Flow2API] WebSocket Error", e);
         runtimeState.wsStatus = "error";
         runtimeState.lastError = "websocket_error";
+        pushEvent("connect_error", "WebSocket transport error", "error");
     };
 }
 
@@ -465,6 +489,7 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
         changes.connectionMode
     ) {
         console.log("[Flow2API] Extension settings changed, reconnecting WebSocket...");
+        pushEvent("settings_changed", "Settings changed, reconnecting");
         closeSocket();
         connectWS();
     }
@@ -477,6 +502,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         return;
     }
     if (message.type === "reconnect_now") {
+        pushEvent("manual_reconnect", "Manual reconnect triggered");
         closeSocket();
         connectWS()
             .then(() => sendResponse({ success: true }))
@@ -486,6 +512,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message.type === "reset_extension") {
         resetExtensionToDefaults((err) => {
             if (err) {
+                pushEvent("reset", `Reset failed: ${err.message || "unknown"}`, "error");
                 sendResponse({ success: false, error: err.message || "reset_failed" });
             } else {
                 sendResponse({ success: true });
@@ -494,6 +521,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         return true;
     }
     if (message.type === "test_token") {
+        pushEvent("test_token", `Test token started (${message.action || "IMAGE_GENERATION"})`);
         generateTokenInFreshTab(message.action || "IMAGE_GENERATION")
             .then((result) => sendResponse(result))
             .catch((err) => sendResponse({ success: false, error: err.message || "test_failed" }));
@@ -501,4 +529,5 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     }
 });
 
+pushEvent("startup", "Background worker started");
 connectWS();

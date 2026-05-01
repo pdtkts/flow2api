@@ -104,6 +104,7 @@ export function TokenManagement() {
   const [editImgConc, setEditImgConc] = useState("")
   const [editVidConc, setEditVidConc] = useState("")
   const [editPreviewAt, setEditPreviewAt] = useState("")
+  const [editProfileSaving, setEditProfileSaving] = useState(false)
 
   const [importFile, setImportFile] = useState<File | null>(null)
 
@@ -317,6 +318,33 @@ export function TokenManagement() {
       } else toast.error(d.detail || d.message || "Update failed")
     } finally {
       setSaving(false)
+    }
+  }
+
+  const refreshEditEmail = async () => {
+    if (!token || editId == null) return
+    const st = editSt.trim()
+    if (!st) {
+      toast.error("Session Token is required")
+      return
+    }
+    setEditProfileSaving(true)
+    try {
+      const r = await adminFetch(`/api/tokens/${editId}/refresh-profile`, token, {
+        method: "POST",
+        body: JSON.stringify({ st }),
+      })
+      if (!r) return
+      const d = await r.json().catch(() => ({}))
+      if (d.success) {
+        const updatedEmail = d.token?.email || "updated"
+        toast.success(`Email updated: ${updatedEmail}`)
+        await loadTokens()
+      } else {
+        toast.error(d.detail || d.message || "Update email failed")
+      }
+    } finally {
+      setEditProfileSaving(false)
     }
   }
 
@@ -775,6 +803,9 @@ export function TokenManagement() {
             </div>
             <Button type="button" variant="secondary" size="sm" onClick={() => st2at(editSt, "edit")}>
               Convert ST→AT (preview)
+            </Button>
+            <Button type="button" variant="secondary" size="sm" onClick={refreshEditEmail} disabled={editProfileSaving}>
+              {editProfileSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : "Update Email"}
             </Button>
             {editPreviewAt ? (
               <div>
