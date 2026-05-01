@@ -4,6 +4,18 @@ set -eu
 DISPLAY_VALUE="${DISPLAY:-:99}"
 XVFB_SCREEN_VALUE="${XVFB_SCREEN:-1440x900x24}"
 export DISPLAY="${DISPLAY_VALUE}"
+XVFB_PID=""
+FLUXBOX_PID=""
+X11VNC_PID=""
+
+cleanup() {
+    # Best-effort shutdown for background GUI processes.
+    [ -n "${X11VNC_PID}" ] && kill "${X11VNC_PID}" 2>/dev/null || true
+    [ -n "${FLUXBOX_PID}" ] && kill "${FLUXBOX_PID}" 2>/dev/null || true
+    [ -n "${XVFB_PID}" ] && kill "${XVFB_PID}" 2>/dev/null || true
+}
+
+trap 'cleanup' EXIT INT TERM
 
 resolve_browser_path() {
 python - <<'PY'
@@ -22,6 +34,15 @@ if [ -z "${BROWSER_EXECUTABLE_PATH:-}" ] || [ ! -x "${BROWSER_EXECUTABLE_PATH:-}
 fi
 
 if [ "${ALLOW_DOCKER_HEADED_CAPTCHA:-true}" = "true" ] || [ "${ALLOW_DOCKER_HEADED_CAPTCHA:-1}" = "1" ]; then
+    if ! command -v Xvfb >/dev/null 2>&1; then
+        echo "[entrypoint] Xvfb not found in image" >&2
+        exit 1
+    fi
+    if ! command -v fluxbox >/dev/null 2>&1; then
+        echo "[entrypoint] fluxbox not found in image" >&2
+        exit 1
+    fi
+
     display_suffix="$(printf '%s' "${DISPLAY}" | sed 's/^://; s/\..*$//')"
     socket_path="/tmp/.X11-unix/X${display_suffix}"
 
@@ -30,9 +51,14 @@ if [ "${ALLOW_DOCKER_HEADED_CAPTCHA:-true}" = "true" ] || [ "${ALLOW_DOCKER_HEAD
 
     echo "[entrypoint] starting Xvfb on DISPLAY=${DISPLAY} (${XVFB_SCREEN_VALUE})"
     Xvfb "${DISPLAY}" -screen 0 "${XVFB_SCREEN_VALUE}" -ac +extension RANDR >/tmp/xvfb.log 2>&1 &
+    XVFB_PID="$!"
 
     waited=0
     while [ ! -S "${socket_path}" ] && [ "${waited}" -lt 100 ]; do
+        if ! kill -0 "${XVFB_PID}" 2>/dev/null; then
+            echo "[entrypoint] Xvfb exited during startup; check /tmp/xvfb.log" >&2
+            exit 1
+        fi
         sleep 0.1
         waited=$((waited + 1))
     done
@@ -44,6 +70,7 @@ if [ "${ALLOW_DOCKER_HEADED_CAPTCHA:-true}" = "true" ] || [ "${ALLOW_DOCKER_HEAD
 
     echo "[entrypoint] starting Fluxbox on DISPLAY=${DISPLAY}"
     fluxbox >/tmp/fluxbox.log 2>&1 &
+    FLUXBOX_PID="$!"
 
     # Optional VNC server so you can view :99 with RealVNC/TigerVNC (localhost:5900 by default).
     # Set ENABLE_HEADED_VNC=0 to disable. Set VNC_PASSWORD for auth; otherwise -nopw (dev only).
@@ -70,6 +97,7 @@ if [ "${ALLOW_DOCKER_HEADED_CAPTCHA:-true}" = "true" ] || [ "${ALLOW_DOCKER_HEAD
                 ${VNC_AUTH_OPTS} \
                 -listen 0.0.0.0 -rfbport "${VNC_PORT_VALUE}" \
                 >/tmp/x11vnc.log 2>&1 &
+            X11VNC_PID="$!"
             ;;
     esac
 fi
