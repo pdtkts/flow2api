@@ -1035,7 +1035,7 @@ async def refresh_at(
         success = await token_manager._refresh_at(token_id)
         st_refresh_reason = token_manager.consume_st_refresh_reason(token_id)
         captcha_mode = str(config.captcha_method or "").strip()
-        supports_st_refresh = captcha_mode in {"personal", "browser"} or bool(
+        supports_st_refresh = captcha_mode in {"personal", "browser", "extension"} or bool(
             getattr(config, "dedicated_extension_enabled", False)
         )
 

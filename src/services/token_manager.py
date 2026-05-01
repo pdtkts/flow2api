@@ -652,8 +652,10 @@ class TokenManager:
                 return candidate_st
 
             dedicated_extension_enabled = bool(getattr(config, "dedicated_extension_enabled", False))
+            extension_mode_active = captcha_mode == "extension"
+            dedicated_extension_effective = dedicated_extension_enabled or extension_mode_active
             extension_attempted = False
-            if dedicated_extension_enabled:
+            if dedicated_extension_effective:
                 try:
                     from .browser_captcha_extension import ExtensionCaptchaService
 
@@ -726,7 +728,7 @@ class TokenManager:
             )
             if extension_attempted:
                 self._set_st_refresh_reason(token_id, "extension_and_local_failed")
-            elif dedicated_extension_enabled:
+            elif dedicated_extension_effective:
                 self._set_st_refresh_reason(token_id, "extension_enabled_but_no_success")
             else:
                 self._set_st_refresh_reason(token_id, "local_failed")
