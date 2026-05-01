@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react"
+import { useState, useEffect, useCallback, useRef } from "react"
 import { useAuth } from "../../contexts/AuthContext"
 import { adminFetch, adminJson } from "../../lib/adminApi"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../ui/card"
@@ -6,7 +6,16 @@ import { Button } from "../ui/button"
 import { Input } from "../ui/input"
 import { Label } from "../ui/label"
 import { Switch } from "../ui/switch"
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select"
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectLabel,
+  SelectSeparator,
+  SelectTrigger,
+  SelectValue,
+} from "../ui/select"
 import { toast } from "sonner"
 import { Loader2 } from "lucide-react"
 
@@ -139,6 +148,8 @@ export function SystemSettings({ active }: { active: boolean }) {
   const [bindApiKeyId, setBindApiKeyId] = useState("")
 
   const [busy, setBusy] = useState(false)
+  /** Bumps when leaving extension mode so in-flight worker list fetches do not repopulate state. */
+  const extensionFetchGen = useRef(0)
 
   const loadAll = useCallback(async () => {
     if (!token || !active) return
@@ -250,9 +261,18 @@ export function SystemSettings({ active }: { active: boolean }) {
     if (keysResp.ok && keysResp.data?.success) {
       setManagedKeys(Array.isArray(keysResp.data.keys) ? keysResp.data.keys : [])
     }
+    const loadedCaptchaMethod =
+      cap.ok && cap.data && typeof cap.data === "object"
+        ? String((cap.data as Record<string, unknown>).captcha_method || "yescaptcha")
+        : ""
     if (workersResp.ok && workersResp.data?.success) {
-      setExtensionWorkers(Array.isArray(workersResp.data.workers) ? workersResp.data.workers : [])
-      setExtensionBindings(Array.isArray(workersResp.data.bindings) ? workersResp.data.bindings : [])
+      if (loadedCaptchaMethod === "extension") {
+        setExtensionWorkers(Array.isArray(workersResp.data.workers) ? workersResp.data.workers : [])
+        setExtensionBindings(Array.isArray(workersResp.data.bindings) ? workersResp.data.bindings : [])
+      } else {
+        setExtensionWorkers([])
+        setExtensionBindings([])
+      }
     }
   }, [token, active])
 
@@ -539,16 +559,33 @@ export function SystemSettings({ active }: { active: boolean }) {
     }
   }
 
-  const refreshExtensionWorkers = async () => {
+  const refreshExtensionWorkers = useCallback(async () => {
     if (!token) return
+    const gen = ++extensionFetchGen.current
     const r = await adminJson<{ success?: boolean; workers?: ExtensionWorkerRow[]; bindings?: ExtensionBindingRow[] }>(
       "/api/admin/extension/workers",
       token
     )
+    if (gen !== extensionFetchGen.current) return
     if (!r.ok || !r.data?.success) return
     setExtensionWorkers(Array.isArray(r.data.workers) ? r.data.workers : [])
     setExtensionBindings(Array.isArray(r.data.bindings) ? r.data.bindings : [])
-  }
+  }, [token])
+
+  useEffect(() => {
+    if (captcha.captcha_method !== "extension") {
+      extensionFetchGen.current++
+      void Promise.resolve().then(() => {
+        setExtensionWorkers([])
+        setExtensionBindings([])
+      })
+      return
+    }
+    if (!token || !active) return
+    void Promise.resolve().then(() => {
+      void refreshExtensionWorkers()
+    })
+  }, [captcha.captcha_method, token, active, refreshExtensionWorkers])
 
   const bindExtensionWorker = async () => {
     if (!token) return
@@ -815,34 +852,56 @@ export function SystemSettings({ active }: { active: boolean }) {
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="yescaptcha">YesCaptcha</SelectItem>
-                <SelectItem value="capmonster">CapMonster</SelectItem>
-                <SelectItem value="ezcaptcha">EzCaptcha</SelectItem>
-                <SelectItem value="capsolver">CapSolver</SelectItem>
-                <SelectItem value="browser">Headed browser</SelectItem>
-                <SelectItem value="personal">Built-in browser</SelectItem>
-                <SelectItem value="remote_browser">Remote headed</SelectItem>
+                <SelectGroup>
+                  <SelectLabel>Third-party solving APIs</SelectLabel>
+                  <SelectItem value="yescaptcha">YesCaptcha</SelectItem>
+                  <SelectItem value="capmonster">CapMonster</SelectItem>
+                  <SelectItem value="ezcaptcha">EzCaptcha</SelectItem>
+                  <SelectItem value="capsolver">CapSolver</SelectItem>
+                </SelectGroup>
+                <SelectSeparator />
+                <SelectGroup>
+                  <SelectLabel>Chrome extension worker</SelectLabel>
+                  <SelectItem value="extension">Chrome extension (WebSocket)</SelectItem>
+                </SelectGroup>
+                <SelectSeparator />
+                <SelectGroup>
+                  <SelectLabel>Server / browser automation</SelectLabel>
+                  <SelectItem value="browser">Headed browser</SelectItem>
+                  <SelectItem value="personal">Built-in browser</SelectItem>
+                  <SelectItem value="remote_browser">Remote browser gateway</SelectItem>
+                </SelectGroup>
               </SelectContent>
             </Select>
+            {m === "extension" ? (
+              <p className="text-xs text-muted-foreground mt-1">
+                Uses your Chrome extension connected to <code className="rounded bg-muted px-1">/captcha_ws</code> — not
+                headed Playwright/Chromium. Configure queue timeout and worker bindings in the sections that appear
+                only for this method.
+              </p>
+            ) : null}
           </div>
-          <div>
-            <Label>Extension queue wait timeout (s)</Label>
-            <Input
-              type="number"
-              min={1}
-              max={120}
-              value={captcha.extension_queue_wait_timeout_seconds}
-              onChange={(e) =>
-                setCaptcha((c) => ({
-                  ...c,
-                  extension_queue_wait_timeout_seconds: Math.max(1, Math.min(120, parseInt(e.target.value, 10) || 20)),
-                }))
-              }
-            />
-            <p className="text-xs text-muted-foreground mt-1">
-              Managed-key requests wait in their own queue up to this timeout before failing.
-            </p>
-          </div>
+          {m === "extension" ? (
+            <div>
+              <Label>Extension queue wait timeout (s)</Label>
+              <Input
+                type="number"
+                min={1}
+                max={120}
+                value={captcha.extension_queue_wait_timeout_seconds}
+                onChange={(e) =>
+                  setCaptcha((c) => ({
+                    ...c,
+                    extension_queue_wait_timeout_seconds: Math.max(1, Math.min(120, parseInt(e.target.value, 10) || 20)),
+                  }))
+                }
+              />
+              <p className="text-xs text-muted-foreground mt-1">
+                When Method is Chrome extension, managed-key requests wait in their own queue up to this timeout before
+                failing.
+              </p>
+            </div>
+          ) : null}
 
           {(m === "yescaptcha" || !m) && (
             <div className="space-y-2 border rounded-md p-3">
@@ -1066,91 +1125,94 @@ export function SystemSettings({ active }: { active: boolean }) {
         </CardContent>
       </Card>
 
-      <Card className="lg:col-span-2">
-        <CardHeader>
-          <CardTitle>Extension Worker Binding</CardTitle>
-          <CardDescription>
-            Bind extension `route_key` to a managed API key for per-key captcha isolation.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
-            <Input
-              placeholder="Route key (e.g. 9223)"
-              value={bindRouteKey}
-              onChange={(e) => setBindRouteKey(e.target.value)}
-            />
-            <Select value={bindApiKeyId} onValueChange={setBindApiKeyId}>
-              <SelectTrigger>
-                <SelectValue placeholder="Select managed API key" />
-              </SelectTrigger>
-              <SelectContent>
-                {managedKeys.map((k) => (
-                  <SelectItem key={k.id} value={String(k.id)}>
-                    #{k.id} {k.label || k.key_prefix || "managed-key"}
-                  </SelectItem>
+      {m === "extension" ? (
+        <Card className="lg:col-span-2">
+          <CardHeader>
+            <CardTitle>Extension worker binding</CardTitle>
+            <CardDescription>
+              Only for captcha Method &quot;Chrome extension&quot;. Maps extension <code className="text-xs">route_key</code>{" "}
+              to a managed API key for per-key isolation — unrelated to headed or remote browser captcha.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+              <Input
+                placeholder="Route key (e.g. 9223)"
+                value={bindRouteKey}
+                onChange={(e) => setBindRouteKey(e.target.value)}
+              />
+              <Select value={bindApiKeyId} onValueChange={setBindApiKeyId}>
+                <SelectTrigger>
+                  <SelectValue placeholder="Select managed API key" />
+                </SelectTrigger>
+                <SelectContent>
+                  {managedKeys.map((k) => (
+                    <SelectItem key={k.id} value={String(k.id)}>
+                      #{k.id} {k.label || k.key_prefix || "managed-key"}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <div className="flex gap-2">
+                <Button onClick={bindExtensionWorker} disabled={busy}>
+                  Bind
+                </Button>
+                <Button variant="outline" onClick={refreshExtensionWorkers} disabled={busy}>
+                  Refresh
+                </Button>
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <Label>Active workers</Label>
+              <div className="rounded-md border">
+                <div className="grid grid-cols-5 gap-2 px-3 py-2 text-xs font-medium border-b">
+                  <span>Route key</span>
+                  <span>Label</span>
+                  <span>Managed key</span>
+                  <span>Source</span>
+                  <span>Connected at</span>
+                </div>
+                {(extensionWorkers.length ? extensionWorkers : []).map((w) => (
+                  <div key={`${w.connection_id}-${w.route_key}`} className="grid grid-cols-5 gap-2 px-3 py-2 text-xs border-b last:border-b-0">
+                    <span className="font-mono">{w.route_key || "(empty)"}</span>
+                    <span>{w.client_label || "-"}</span>
+                    <span>{w.managed_api_key_id ?? "-"}</span>
+                    <span>{w.binding_source || "-"}</span>
+                    <span>{w.connected_at ? new Date(w.connected_at * 1000).toLocaleTimeString() : "-"}</span>
+                  </div>
                 ))}
-              </SelectContent>
-            </Select>
-            <div className="flex gap-2">
-              <Button onClick={bindExtensionWorker} disabled={busy}>
-                Bind
-              </Button>
-              <Button variant="outline" onClick={refreshExtensionWorkers} disabled={busy}>
-                Refresh
-              </Button>
-            </div>
-          </div>
-
-          <div className="space-y-2">
-            <Label>Active workers</Label>
-            <div className="rounded-md border">
-              <div className="grid grid-cols-5 gap-2 px-3 py-2 text-xs font-medium border-b">
-                <span>Route key</span>
-                <span>Label</span>
-                <span>Managed key</span>
-                <span>Source</span>
-                <span>Connected at</span>
+                {extensionWorkers.length === 0 ? <div className="px-3 py-3 text-xs text-muted-foreground">No active workers</div> : null}
               </div>
-              {(extensionWorkers.length ? extensionWorkers : []).map((w) => (
-                <div key={`${w.connection_id}-${w.route_key}`} className="grid grid-cols-5 gap-2 px-3 py-2 text-xs border-b last:border-b-0">
-                  <span className="font-mono">{w.route_key || "(empty)"}</span>
-                  <span>{w.client_label || "-"}</span>
-                  <span>{w.managed_api_key_id ?? "-"}</span>
-                  <span>{w.binding_source || "-"}</span>
-                  <span>{w.connected_at ? new Date(w.connected_at * 1000).toLocaleTimeString() : "-"}</span>
-                </div>
-              ))}
-              {extensionWorkers.length === 0 ? <div className="px-3 py-3 text-xs text-muted-foreground">No active workers</div> : null}
             </div>
-          </div>
 
-          <div className="space-y-2">
-            <Label>Persisted bindings</Label>
-            <div className="rounded-md border">
-              <div className="grid grid-cols-4 gap-2 px-3 py-2 text-xs font-medium border-b">
-                <span>Route key</span>
-                <span>Managed key</span>
-                <span>Label</span>
-                <span>Action</span>
-              </div>
-              {(extensionBindings.length ? extensionBindings : []).map((b) => (
-                <div key={`${b.id}-${b.route_key}`} className="grid grid-cols-4 gap-2 px-3 py-2 text-xs border-b last:border-b-0">
-                  <span className="font-mono">{b.route_key}</span>
-                  <span>{b.api_key_id}</span>
-                  <span>{b.api_key_label || "-"}</span>
-                  <span>
-                    <Button size="sm" variant="outline" onClick={() => unbindExtensionWorker(b.route_key)} disabled={busy}>
-                      Unbind
-                    </Button>
-                  </span>
+            <div className="space-y-2">
+              <Label>Persisted bindings</Label>
+              <div className="rounded-md border">
+                <div className="grid grid-cols-4 gap-2 px-3 py-2 text-xs font-medium border-b">
+                  <span>Route key</span>
+                  <span>Managed key</span>
+                  <span>Label</span>
+                  <span>Action</span>
                 </div>
-              ))}
-              {extensionBindings.length === 0 ? <div className="px-3 py-3 text-xs text-muted-foreground">No persisted bindings</div> : null}
+                {(extensionBindings.length ? extensionBindings : []).map((b) => (
+                  <div key={`${b.id}-${b.route_key}`} className="grid grid-cols-4 gap-2 px-3 py-2 text-xs border-b last:border-b-0">
+                    <span className="font-mono">{b.route_key}</span>
+                    <span>{b.api_key_id}</span>
+                    <span>{b.api_key_label || "-"}</span>
+                    <span>
+                      <Button size="sm" variant="outline" onClick={() => unbindExtensionWorker(b.route_key)} disabled={busy}>
+                        Unbind
+                      </Button>
+                    </span>
+                  </div>
+                ))}
+                {extensionBindings.length === 0 ? <div className="px-3 py-3 text-xs text-muted-foreground">No persisted bindings</div> : null}
+              </div>
             </div>
-          </div>
-        </CardContent>
-      </Card>
+          </CardContent>
+        </Card>
+      ) : null}
     </div>
   )
 }
