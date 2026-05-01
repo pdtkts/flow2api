@@ -31,6 +31,14 @@ class TokenManager:
         """Return and clear the latest ST refresh reason for a token."""
         return self._last_st_refresh_reason.pop(token_id, "")
 
+    def _is_timeout_st_refresh_reason(self, reason: str) -> bool:
+        normalized = str(reason or "").strip().lower()
+        return normalized in {
+            "extension_timeout",
+            "local_timeout",
+            "local_timeout_after_extension",
+        }
+
     async def _get_token_lock(
         self,
         lock_map: dict[int, asyncio.Lock],
@@ -471,10 +479,20 @@ class TokenManager:
                 )
                 new_st = await self._try_refresh_st(token_id, token)
                 if not new_st and config.session_refresh_fail_if_st_refresh_fails:
+                    st_reason = self._last_st_refresh_reason.get(token_id, "not_attempted")
                     debug_logger.log_error(
-                        f"[AT_REFRESH] Token {token_id}: browser ST refresh failed, aborting AT refresh per strict policy"
+                        f"[AT_REFRESH] Token {token_id}: browser ST refresh failed, aborting AT refresh per strict policy "
+                        f"(reason={st_reason})"
                     )
-                    await self.disable_token(token_id)
+                    if self._is_timeout_st_refresh_reason(st_reason):
+                        await self.disable_token(token_id)
+                        debug_logger.log_warning(
+                            f"[AT_REFRESH] Token {token_id}: token disabled due to timeout-class ST refresh failure"
+                        )
+                    else:
+                        debug_logger.log_warning(
+                            f"[AT_REFRESH] Token {token_id}: token kept active (non-timeout ST refresh failure)"
+                        )
                     if self._last_st_refresh_reason.get(token_id, "not_attempted") == "not_attempted":
                         self._set_st_refresh_reason(token_id, "failed_without_reason")
                     return False
@@ -492,8 +510,16 @@ class TokenManager:
             if result:
                 return True
 
-            debug_logger.log_error(f"[AT_REFRESH] Token {token_id}: all refresh attempts failed, disabling token")
-            await self.disable_token(token_id)
+            st_reason = self._last_st_refresh_reason.get(token_id, "not_attempted")
+            if self._is_timeout_st_refresh_reason(st_reason):
+                debug_logger.log_error(
+                    f"[AT_REFRESH] Token {token_id}: all refresh attempts failed; disabling token (reason={st_reason})"
+                )
+                await self.disable_token(token_id)
+            else:
+                debug_logger.log_warning(
+                    f"[AT_REFRESH] Token {token_id}: all refresh attempts failed; token kept active (reason={st_reason})"
+                )
             return False
 
     async def _refresh_at(self, token_id: int) -> bool:
