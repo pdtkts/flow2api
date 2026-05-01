@@ -40,6 +40,8 @@ const WORKER_REFRESH_MISSING_COOKIE_INTERVAL_MS = 15 * 60 * 1000;
 const WORKER_REFRESH_RETRY_BASE_MS = 45 * 1000;
 const WORKER_REFRESH_RETRY_MAX_MS = 5 * 60 * 1000;
 const WORKER_REFRESH_RECOVERY_DELAY_MS = 8 * 1000;
+const SESSION_REFRESH_WARMUP_URL = "https://labs.google/fx/tools/flow";
+const SESSION_REFRESH_WARMUP_WAIT_MS = 10000;
 
 function inferConnectionMode(stored) {
     const explicit = String(stored.connectionMode || "").trim();
@@ -196,6 +198,10 @@ async function performSessionRefresh({ reason = "server_request", reqId = null }
     runtimeState.sessionRefreshInFlight = true;
     runtimeState.sessionRefreshLastReason = refreshReason;
     try {
+        const warmupResult = await warmupLabsForSessionRefresh();
+        if (!warmupResult.success) {
+            pushEvent("session_refresh_warmup_warn", `Warmup failed (${refreshReason}): ${warmupResult.error}`, "warn");
+        }
         const result = await getSessionTokenFromCookie();
         if (result.success) {
             runtimeState.sessionRefreshLastSuccessAt = Date.now();
@@ -581,6 +587,30 @@ async function getSessionTokenFromCookie() {
             }
         );
     });
+}
+
+async function warmupLabsForSessionRefresh() {
+    let newTabId = null;
+    try {
+        const tab = await chrome.tabs.create({ url: SESSION_REFRESH_WARMUP_URL, active: false });
+        newTabId = tab && tab.id ? tab.id : null;
+        if (!newTabId) {
+            return { success: false, error: "warmup_tab_create_failed" };
+        }
+        await waitForTabReady(newTabId);
+        await sleep(SESSION_REFRESH_WARMUP_WAIT_MS);
+        return { success: true };
+    } catch (err) {
+        return { success: false, error: (err && err.message) ? err.message : "warmup_failed" };
+    } finally {
+        if (newTabId) {
+            try {
+                await chrome.tabs.remove(newTabId);
+            } catch (e) {
+                console.log("[Flow2API] Session warmup tab close error:", e);
+            }
+        }
+    }
 }
 
 async function handleRefreshSessionToken(data) {
