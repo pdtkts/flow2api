@@ -245,6 +245,9 @@ class Database:
             session_refresh_scheduler_batch_size = 10
             session_refresh_scheduler_only_expiring_within_minutes = 60
             extension_queue_wait_timeout_seconds = 20
+            dedicated_extension_enabled = False
+            dedicated_extension_captcha_timeout_seconds = 25
+            dedicated_extension_st_refresh_timeout_seconds = 45
 
             if config_dict:
                 captcha_config = config_dict.get("captcha", {})
@@ -285,6 +288,15 @@ class Database:
                     "extension_queue_wait_timeout_seconds",
                     20,
                 )
+                dedicated_extension_enabled = captcha_config.get("dedicated_extension_enabled", False)
+                dedicated_extension_captcha_timeout_seconds = captcha_config.get(
+                    "dedicated_extension_captcha_timeout_seconds",
+                    25,
+                )
+                dedicated_extension_st_refresh_timeout_seconds = captcha_config.get(
+                    "dedicated_extension_st_refresh_timeout_seconds",
+                    45,
+                )
             try:
                 remote_browser_timeout = max(5, int(remote_browser_timeout))
             except Exception:
@@ -319,9 +331,11 @@ class Database:
                     session_refresh_fail_if_st_refresh_fails, session_refresh_local_only,
                     session_refresh_scheduler_enabled, session_refresh_scheduler_interval_minutes,
                     session_refresh_scheduler_batch_size, session_refresh_scheduler_only_expiring_within_minutes,
-                    extension_queue_wait_timeout_seconds
+                    extension_queue_wait_timeout_seconds,
+                    dedicated_extension_enabled, dedicated_extension_captcha_timeout_seconds,
+                    dedicated_extension_st_refresh_timeout_seconds
                 )
-                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 captcha_method,
                 yescaptcha_api_key,
@@ -349,6 +363,9 @@ class Database:
                 max(1, int(session_refresh_scheduler_batch_size or 10)),
                 max(1, int(session_refresh_scheduler_only_expiring_within_minutes or 60)),
                 max(1, min(120, int(extension_queue_wait_timeout_seconds or 20))),
+                bool(dedicated_extension_enabled),
+                max(5, min(180, int(dedicated_extension_captcha_timeout_seconds or 25))),
+                max(10, min(300, int(dedicated_extension_st_refresh_timeout_seconds or 45))),
             ))
 
         # Ensure plugin_config has a row
@@ -438,6 +455,9 @@ class Database:
                         remote_browser_api_key TEXT DEFAULT '',
                         remote_browser_timeout INTEGER DEFAULT 60,
                         extension_queue_wait_timeout_seconds INTEGER DEFAULT 20,
+                        dedicated_extension_enabled BOOLEAN DEFAULT 0,
+                        dedicated_extension_captcha_timeout_seconds INTEGER DEFAULT 25,
+                        dedicated_extension_st_refresh_timeout_seconds INTEGER DEFAULT 45,
                         website_key TEXT DEFAULT '6LdsFiUsAAAAAIjVDZcuLhaHiDn5nnHVXVRQGeMV',
                         page_action TEXT DEFAULT 'IMAGE_GENERATION',
                         browser_proxy_enabled BOOLEAN DEFAULT 0,
@@ -470,6 +490,26 @@ class Database:
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         FOREIGN KEY (api_key_id) REFERENCES api_keys(id)
+                    )
+                """)
+
+            if not await self._table_exists(db, "dedicated_extension_workers"):
+                print("  ✓ Creating missing table: dedicated_extension_workers")
+                await db.execute("""
+                    CREATE TABLE dedicated_extension_workers (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        worker_key_prefix TEXT NOT NULL UNIQUE,
+                        worker_key_hash TEXT NOT NULL UNIQUE,
+                        label TEXT DEFAULT '',
+                        token_id INTEGER,
+                        route_key TEXT,
+                        last_instance_id TEXT,
+                        is_active BOOLEAN DEFAULT 1,
+                        last_seen_at TIMESTAMP,
+                        last_error TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (token_id) REFERENCES tokens(id)
                     )
                 """)
 
@@ -690,6 +730,9 @@ class Database:
                     ("session_refresh_scheduler_batch_size", "INTEGER DEFAULT 10"),
                     ("session_refresh_scheduler_only_expiring_within_minutes", "INTEGER DEFAULT 60"),
                     ("extension_queue_wait_timeout_seconds", "INTEGER DEFAULT 20"),
+                    ("dedicated_extension_enabled", "BOOLEAN DEFAULT 0"),
+                    ("dedicated_extension_captcha_timeout_seconds", "INTEGER DEFAULT 25"),
+                    ("dedicated_extension_st_refresh_timeout_seconds", "INTEGER DEFAULT 45"),
                 ]
 
                 for col_name, col_type in captcha_columns_to_add:
@@ -781,6 +824,7 @@ class Database:
             await db.execute("CREATE INDEX IF NOT EXISTS idx_cache_files_api_key_filename ON cache_files(api_key_id, filename)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_cache_files_api_key_project ON cache_files(api_key_id, flow_project_id)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_extension_worker_bindings_api_key_id ON extension_worker_bindings(api_key_id)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_dedicated_extension_workers_token_id ON dedicated_extension_workers(token_id)")
 
             await db.commit()
             print("Database migration check completed.")
@@ -1041,6 +1085,9 @@ class Database:
                     session_refresh_scheduler_interval_minutes INTEGER DEFAULT 30,
                     session_refresh_scheduler_batch_size INTEGER DEFAULT 10,
                     session_refresh_scheduler_only_expiring_within_minutes INTEGER DEFAULT 60,
+                    dedicated_extension_enabled BOOLEAN DEFAULT 0,
+                    dedicated_extension_captcha_timeout_seconds INTEGER DEFAULT 25,
+                    dedicated_extension_st_refresh_timeout_seconds INTEGER DEFAULT 45,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
@@ -1105,6 +1152,23 @@ class Database:
                 )
             """)
             await db.execute("""
+                CREATE TABLE IF NOT EXISTS dedicated_extension_workers (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    worker_key_prefix TEXT NOT NULL UNIQUE,
+                    worker_key_hash TEXT NOT NULL UNIQUE,
+                    label TEXT DEFAULT '',
+                    token_id INTEGER,
+                    route_key TEXT,
+                    last_instance_id TEXT,
+                    is_active BOOLEAN DEFAULT 1,
+                    last_seen_at TIMESTAMP,
+                    last_error TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (token_id) REFERENCES tokens(id)
+                )
+            """)
+            await db.execute("""
                 CREATE TABLE IF NOT EXISTS api_key_rate_limits (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     api_key_id INTEGER NOT NULL,
@@ -1148,6 +1212,7 @@ class Database:
             await db.execute("CREATE INDEX IF NOT EXISTS idx_api_key_accounts_key_id ON api_key_accounts(api_key_id)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_api_key_rl_key_endpoint ON api_key_rate_limits(api_key_id, endpoint)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_api_key_audit_created_at ON api_key_audit_logs(created_at DESC)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_dedicated_extension_workers_token_id ON dedicated_extension_workers(token_id)")
 
             # Migrate request_logs table if needed
             await self._migrate_request_logs(db)
@@ -2487,6 +2552,15 @@ class Database:
             config.set_session_refresh_scheduler_only_expiring_within_minutes(
                 int(getattr(captcha_config, "session_refresh_scheduler_only_expiring_within_minutes", 60) or 60)
             )
+            config.set_dedicated_extension_enabled(
+                bool(getattr(captcha_config, "dedicated_extension_enabled", False))
+            )
+            config.set_dedicated_extension_captcha_timeout_seconds(
+                int(getattr(captcha_config, "dedicated_extension_captcha_timeout_seconds", 25) or 25)
+            )
+            config.set_dedicated_extension_st_refresh_timeout_seconds(
+                int(getattr(captcha_config, "dedicated_extension_st_refresh_timeout_seconds", 45) or 45)
+            )
 
     # Cache config operations
     async def get_cache_config(self) -> CacheConfig:
@@ -2638,6 +2712,9 @@ class Database:
         session_refresh_scheduler_batch_size: int = None,
         session_refresh_scheduler_only_expiring_within_minutes: int = None,
         extension_queue_wait_timeout_seconds: int = None,
+        dedicated_extension_enabled: bool = None,
+        dedicated_extension_captcha_timeout_seconds: int = None,
+        dedicated_extension_st_refresh_timeout_seconds: int = None,
     ):
         """Update captcha configuration"""
         async with self._connect(write=True) as db:
@@ -2750,6 +2827,21 @@ class Database:
                     if extension_queue_wait_timeout_seconds is not None
                     else current.get("extension_queue_wait_timeout_seconds", 20)
                 )
+                new_dedicated_extension_enabled = (
+                    dedicated_extension_enabled
+                    if dedicated_extension_enabled is not None
+                    else current.get("dedicated_extension_enabled", False)
+                )
+                new_dedicated_extension_captcha_timeout = (
+                    dedicated_extension_captcha_timeout_seconds
+                    if dedicated_extension_captcha_timeout_seconds is not None
+                    else current.get("dedicated_extension_captcha_timeout_seconds", 25)
+                )
+                new_dedicated_extension_st_refresh_timeout = (
+                    dedicated_extension_st_refresh_timeout_seconds
+                    if dedicated_extension_st_refresh_timeout_seconds is not None
+                    else current.get("dedicated_extension_st_refresh_timeout_seconds", 45)
+                )
                 new_remote_timeout = max(5, int(new_remote_timeout)) if new_remote_timeout is not None else 60
                 new_personal_project_pool_size = max(1, min(50, int(new_personal_project_pool_size)))
                 new_personal_max_tabs = max(1, min(50, int(new_personal_max_tabs)))  # 限制1-50
@@ -2762,6 +2854,12 @@ class Database:
                     1, min(10080, int(new_session_refresh_scheduler_only_expiring_within_minutes))
                 )
                 new_extension_queue_wait_timeout = max(1, min(120, int(new_extension_queue_wait_timeout)))
+                new_dedicated_extension_captcha_timeout = max(
+                    5, min(180, int(new_dedicated_extension_captcha_timeout))
+                )
+                new_dedicated_extension_st_refresh_timeout = max(
+                    10, min(300, int(new_dedicated_extension_st_refresh_timeout))
+                )
                 new_session_refresh_warmup_urls = (
                     str(new_session_refresh_warmup_urls or "").strip()
                     or "https://labs.google/fx/tools/flow,https://labs.google/fx"
@@ -2787,6 +2885,9 @@ class Database:
                         session_refresh_scheduler_interval_minutes = ?, session_refresh_scheduler_batch_size = ?,
                         session_refresh_scheduler_only_expiring_within_minutes = ?,
                         extension_queue_wait_timeout_seconds = ?,
+                        dedicated_extension_enabled = ?,
+                        dedicated_extension_captcha_timeout_seconds = ?,
+                        dedicated_extension_st_refresh_timeout_seconds = ?,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = 1
                 """, (new_method, new_yes_key, new_yes_url, new_cap_key, new_cap_url,
@@ -2803,7 +2904,10 @@ class Database:
                       bool(new_session_refresh_local_only), bool(new_session_refresh_scheduler_enabled),
                       new_session_refresh_scheduler_interval_minutes, new_session_refresh_scheduler_batch_size,
                       new_session_refresh_scheduler_only_expiring_within_minutes,
-                      new_extension_queue_wait_timeout))
+                      new_extension_queue_wait_timeout,
+                      bool(new_dedicated_extension_enabled),
+                      new_dedicated_extension_captcha_timeout,
+                      new_dedicated_extension_st_refresh_timeout))
             else:
                 new_method = captcha_method if captcha_method is not None else "yescaptcha"
                 new_yes_key = yescaptcha_api_key if yescaptcha_api_key is not None else ""
@@ -2881,6 +2985,31 @@ class Database:
                         int(extension_queue_wait_timeout_seconds if extension_queue_wait_timeout_seconds is not None else 20),
                     ),
                 )
+                new_dedicated_extension_enabled = (
+                    bool(dedicated_extension_enabled) if dedicated_extension_enabled is not None else False
+                )
+                new_dedicated_extension_captcha_timeout = max(
+                    5,
+                    min(
+                        180,
+                        int(
+                            dedicated_extension_captcha_timeout_seconds
+                            if dedicated_extension_captcha_timeout_seconds is not None
+                            else 25
+                        ),
+                    ),
+                )
+                new_dedicated_extension_st_refresh_timeout = max(
+                    10,
+                    min(
+                        300,
+                        int(
+                            dedicated_extension_st_refresh_timeout_seconds
+                            if dedicated_extension_st_refresh_timeout_seconds is not None
+                            else 45
+                        ),
+                    ),
+                )
 
                 await db.execute("""
                     INSERT INTO captcha_config (id, captcha_method, yescaptcha_api_key, yescaptcha_base_url,
@@ -2899,8 +3028,10 @@ class Database:
                         session_refresh_local_only, session_refresh_scheduler_enabled,
                         session_refresh_scheduler_interval_minutes, session_refresh_scheduler_batch_size,
                         session_refresh_scheduler_only_expiring_within_minutes,
-                        extension_queue_wait_timeout_seconds)
-                    VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        extension_queue_wait_timeout_seconds,
+                        dedicated_extension_enabled, dedicated_extension_captcha_timeout_seconds,
+                        dedicated_extension_st_refresh_timeout_seconds)
+                    VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (new_method, new_yes_key, new_yes_url, new_cap_key, new_cap_url,
                       new_ez_key, new_ez_url, new_cs_key, new_cs_url,
                       (new_remote_base_url or "").strip(), (new_remote_api_key or "").strip(), new_remote_timeout,
@@ -2914,7 +3045,8 @@ class Database:
                       new_session_refresh_local_only, new_session_refresh_scheduler_enabled,
                       new_session_refresh_scheduler_interval_minutes, new_session_refresh_scheduler_batch_size,
                       new_session_refresh_scheduler_only_expiring_within_minutes,
-                      new_extension_queue_wait_timeout))
+                      new_extension_queue_wait_timeout, new_dedicated_extension_enabled,
+                      new_dedicated_extension_captcha_timeout, new_dedicated_extension_st_refresh_timeout))
 
             await db.commit()
 
@@ -3395,6 +3527,127 @@ class Database:
                 FROM extension_worker_bindings b
                 LEFT JOIN api_keys k ON k.id = b.api_key_id
                 ORDER BY b.updated_at DESC, b.route_key ASC
+                """
+            )
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    async def get_dedicated_extension_worker_by_key_hash(self, worker_key_hash: str) -> Optional[Dict[str, Any]]:
+        normalized = (worker_key_hash or "").strip()
+        if not normalized:
+            return None
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT *
+                FROM dedicated_extension_workers
+                WHERE worker_key_hash = ?
+                """,
+                (normalized,),
+            )
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+    async def get_dedicated_extension_worker(self, worker_id: int) -> Optional[Dict[str, Any]]:
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT * FROM dedicated_extension_workers WHERE id = ?",
+                (int(worker_id),),
+            )
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+    async def create_dedicated_extension_worker(
+        self,
+        *,
+        worker_key_prefix: str,
+        worker_key_hash: str,
+        label: str = "",
+        token_id: Optional[int] = None,
+        route_key: Optional[str] = None,
+    ) -> int:
+        async with self._connect(write=True) as db:
+            cursor = await db.execute(
+                """
+                INSERT INTO dedicated_extension_workers (
+                    worker_key_prefix, worker_key_hash, label, token_id, route_key
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    (worker_key_prefix or "").strip(),
+                    (worker_key_hash or "").strip(),
+                    (label or "").strip(),
+                    int(token_id) if token_id is not None else None,
+                    (route_key or "").strip() or None,
+                ),
+            )
+            await db.commit()
+            return int(cursor.lastrowid)
+
+    async def update_dedicated_extension_worker(
+        self,
+        worker_id: int,
+        *,
+        label: Optional[str] = None,
+        token_id: Optional[int] = None,
+        route_key: Optional[str] = None,
+        is_active: Optional[bool] = None,
+        last_instance_id: Optional[str] = None,
+        last_error: Optional[str] = None,
+        mark_seen: bool = False,
+        clear_token_binding: bool = False,
+    ) -> None:
+        updates: list[str] = ["updated_at = CURRENT_TIMESTAMP"]
+        values: list[Any] = []
+        if label is not None:
+            updates.append("label = ?")
+            values.append((label or "").strip())
+        if token_id is not None:
+            updates.append("token_id = ?")
+            values.append(int(token_id))
+        elif clear_token_binding:
+            updates.append("token_id = NULL")
+        if route_key is not None:
+            updates.append("route_key = ?")
+            values.append((route_key or "").strip() or None)
+        if is_active is not None:
+            updates.append("is_active = ?")
+            values.append(bool(is_active))
+        if last_instance_id is not None:
+            updates.append("last_instance_id = ?")
+            values.append((last_instance_id or "").strip() or None)
+        if last_error is not None:
+            updates.append("last_error = ?")
+            values.append((last_error or "").strip() or None)
+        if mark_seen:
+            updates.append("last_seen_at = CURRENT_TIMESTAMP")
+        values.append(int(worker_id))
+        async with self._connect(write=True) as db:
+            await db.execute(
+                f"UPDATE dedicated_extension_workers SET {', '.join(updates)} WHERE id = ?",
+                tuple(values),
+            )
+            await db.commit()
+
+    async def delete_dedicated_extension_worker(self, worker_id: int) -> None:
+        async with self._connect(write=True) as db:
+            await db.execute("DELETE FROM dedicated_extension_workers WHERE id = ?", (int(worker_id),))
+            await db.commit()
+
+    async def list_dedicated_extension_workers(self) -> List[Dict[str, Any]]:
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT
+                    w.*,
+                    t.email AS token_email,
+                    t.remark AS token_remark
+                FROM dedicated_extension_workers w
+                LEFT JOIN tokens t ON t.id = w.token_id
+                ORDER BY w.updated_at DESC, w.id DESC
                 """
             )
             rows = await cursor.fetchall()

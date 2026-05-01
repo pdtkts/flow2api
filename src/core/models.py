@@ -225,6 +225,9 @@ class CaptchaConfig(BaseModel):
     session_refresh_scheduler_batch_size: int = 10
     session_refresh_scheduler_only_expiring_within_minutes: int = 60
     extension_queue_wait_timeout_seconds: int = 20
+    dedicated_extension_enabled: bool = False
+    dedicated_extension_captcha_timeout_seconds: int = 25
+    dedicated_extension_st_refresh_timeout_seconds: int = 45
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
@@ -245,6 +248,23 @@ class ExtensionWorkerBinding(BaseModel):
     id: Optional[int] = None
     route_key: str
     api_key_id: int
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+
+class DedicatedExtensionWorker(BaseModel):
+    """Dedicated extension worker registration and token binding."""
+
+    id: Optional[int] = None
+    worker_key_prefix: str
+    worker_key_hash: str
+    label: str = ""
+    token_id: Optional[int] = None
+    route_key: Optional[str] = None
+    last_instance_id: Optional[str] = None
+    is_active: bool = True
+    last_seen_at: Optional[datetime] = None
+    last_error: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 

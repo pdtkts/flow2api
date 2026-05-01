@@ -4,6 +4,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Set, Tuple
 import base64
+import hashlib
 import json
 import mimetypes
 import random
@@ -2032,6 +2033,36 @@ async def stream_generate_content(
 
 @router.websocket("/captcha_ws")
 async def captcha_websocket_endpoint(websocket: WebSocket):
+    worker_key = (
+        websocket.query_params.get("worker_key")
+        or websocket.query_params.get("worker_auth_key")
+        or websocket.headers.get("x-flow2-worker-key")
+    )
+    if worker_key:
+        handler_db = generation_handler.db if generation_handler is not None else None
+        if handler_db is None or not hasattr(handler_db, "get_dedicated_extension_worker_by_key_hash"):
+            await websocket.accept()
+            await websocket.close(code=1011, reason="Dedicated worker auth unavailable")
+            return
+        worker_key_hash = hashlib.sha256(worker_key.encode("utf-8")).hexdigest()
+        worker = await handler_db.get_dedicated_extension_worker_by_key_hash(worker_key_hash)
+        if not worker or not bool(worker.get("is_active", True)):
+            await websocket.accept()
+            await websocket.close(code=1008, reason="Invalid worker registration key")
+            return
+        service = await ExtensionCaptchaService.get_instance(db=handler_db)
+        await service.connect(websocket, authenticated_worker=worker)
+        try:
+            while True:
+                data = await websocket.receive_text()
+                await service.handle_message(websocket, data)
+        except WebSocketDisconnect:
+            service.disconnect(websocket)
+        except Exception as exc:
+            debug_logger.log_error(f"WebSocket error: {exc}")
+            service.disconnect(websocket)
+        return
+
     api_key = (
         websocket.query_params.get("key")
         or websocket.query_params.get("api_key")

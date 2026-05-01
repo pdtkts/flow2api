@@ -3,6 +3,7 @@ import asyncio
 import inspect
 import json
 import mimetypes
+import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, Header, Request
@@ -44,6 +45,21 @@ _ADMIN_SESSION_TTL_REMEMBER = 30 * 24 * 3600  # 30 days when "remember me" is on
 _ADMIN_SESSION_TTL_BROWSER = 24 * 3600  # 24 hours when off
 
 SUPPORTED_API_CAPTCHA_METHODS = {"yescaptcha", "capmonster", "ezcaptcha", "capsolver"}
+
+
+def _generate_worker_registration_key() -> str:
+    return f"wk_{secrets.token_urlsafe(32)}"
+
+
+def _hash_worker_registration_key(raw_key: str) -> str:
+    return hashlib.sha256((raw_key or "").encode("utf-8")).hexdigest()
+
+
+def _worker_key_prefix(raw_key: str) -> str:
+    key = (raw_key or "").strip()
+    if len(key) <= 12:
+        return key
+    return f"{key[:8]}...{key[-4:]}"
 
 
 def _mask_token(token: Optional[str]) -> str:
@@ -655,6 +671,19 @@ class ExtensionWorkerUnbindRequest(BaseModel):
 
 class ExtensionWorkerKillRequest(BaseModel):
     worker_session_id: str
+
+
+class DedicatedWorkerCreateRequest(BaseModel):
+    label: str = ""
+    token_id: Optional[int] = None
+    route_key: Optional[str] = None
+
+
+class DedicatedWorkerUpdateRequest(BaseModel):
+    label: Optional[str] = None
+    token_id: Optional[int] = None
+    route_key: Optional[str] = None
+    is_active: Optional[bool] = None
 
 
 class UpdateDebugConfigRequest(BaseModel):
@@ -1951,6 +1980,83 @@ async def kill_extension_worker(
     return {"success": True, "message": "Worker terminated", "worker_session_id": worker_session_id}
 
 
+@router.get("/api/admin/dedicated-extension/workers")
+async def list_dedicated_extension_workers(token: str = Depends(verify_admin_token)):
+    workers = await db.list_dedicated_extension_workers()
+    return {"success": True, "workers": workers}
+
+
+@router.post("/api/admin/dedicated-extension/workers")
+async def create_dedicated_extension_worker(
+    request: DedicatedWorkerCreateRequest,
+    token: str = Depends(verify_admin_token),
+):
+    token_id = int(request.token_id) if request.token_id is not None else None
+    if token_id is not None:
+        existing_token = await db.get_token(token_id)
+        if not existing_token:
+            raise HTTPException(status_code=404, detail="Token not found")
+    worker_key = _generate_worker_registration_key()
+    worker_id = await db.create_dedicated_extension_worker(
+        worker_key_prefix=_worker_key_prefix(worker_key),
+        worker_key_hash=_hash_worker_registration_key(worker_key),
+        label=(request.label or "").strip(),
+        token_id=token_id,
+        route_key=(request.route_key or "").strip() or None,
+    )
+    worker = await db.get_dedicated_extension_worker(worker_id)
+    return {"success": True, "worker": worker, "worker_registration_key": worker_key}
+
+
+@router.patch("/api/admin/dedicated-extension/workers/{worker_id}")
+async def update_dedicated_extension_worker(
+    worker_id: int,
+    request: DedicatedWorkerUpdateRequest,
+    token: str = Depends(verify_admin_token),
+):
+    existing = await db.get_dedicated_extension_worker(worker_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Dedicated worker not found")
+    if request.token_id is not None:
+        token_obj = await db.get_token(int(request.token_id))
+        if not token_obj:
+            raise HTTPException(status_code=404, detail="Token not found")
+    await db.update_dedicated_extension_worker(
+        worker_id,
+        label=request.label,
+        token_id=request.token_id,
+        route_key=request.route_key,
+        is_active=request.is_active,
+    )
+    updated = await db.get_dedicated_extension_worker(worker_id)
+    return {"success": True, "worker": updated}
+
+
+@router.post("/api/admin/dedicated-extension/workers/{worker_id}/unbind")
+async def unbind_dedicated_extension_worker(
+    worker_id: int,
+    token: str = Depends(verify_admin_token),
+):
+    existing = await db.get_dedicated_extension_worker(worker_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Dedicated worker not found")
+    await db.update_dedicated_extension_worker(worker_id, clear_token_binding=True)
+    updated = await db.get_dedicated_extension_worker(worker_id)
+    return {"success": True, "worker": updated}
+
+
+@router.delete("/api/admin/dedicated-extension/workers/{worker_id}")
+async def delete_dedicated_extension_worker(
+    worker_id: int,
+    token: str = Depends(verify_admin_token),
+):
+    existing = await db.get_dedicated_extension_worker(worker_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Dedicated worker not found")
+    await db.delete_dedicated_extension_worker(worker_id)
+    return {"success": True, "worker_id": worker_id}
+
+
 @router.post("/api/admin/debug")
 async def update_debug_config(
     request: UpdateDebugConfigRequest,
@@ -2221,6 +2327,9 @@ async def update_captcha_config(
     session_refresh_scheduler_batch_size = request.get("session_refresh_scheduler_batch_size")
     session_refresh_scheduler_only_expiring_within_minutes = request.get("session_refresh_scheduler_only_expiring_within_minutes")
     extension_queue_wait_timeout_seconds = request.get("extension_queue_wait_timeout_seconds")
+    dedicated_extension_enabled = request.get("dedicated_extension_enabled")
+    dedicated_extension_captcha_timeout_seconds = request.get("dedicated_extension_captcha_timeout_seconds")
+    dedicated_extension_st_refresh_timeout_seconds = request.get("dedicated_extension_st_refresh_timeout_seconds")
 
     # 验证浏览器打码页面 URL
     if browser_captcha_page_url is not None:
@@ -2258,6 +2367,20 @@ async def update_captcha_config(
             return {"success": False, "message": "extension_queue_wait_timeout_seconds must be an integer"}
         if extension_queue_wait_timeout_seconds < 1 or extension_queue_wait_timeout_seconds > 120:
             return {"success": False, "message": "extension_queue_wait_timeout_seconds must be between 1 and 120"}
+    if dedicated_extension_captcha_timeout_seconds is not None:
+        try:
+            dedicated_extension_captcha_timeout_seconds = int(dedicated_extension_captcha_timeout_seconds)
+        except Exception:
+            return {"success": False, "message": "dedicated_extension_captcha_timeout_seconds must be an integer"}
+        if dedicated_extension_captcha_timeout_seconds < 5 or dedicated_extension_captcha_timeout_seconds > 180:
+            return {"success": False, "message": "dedicated_extension_captcha_timeout_seconds must be between 5 and 180"}
+    if dedicated_extension_st_refresh_timeout_seconds is not None:
+        try:
+            dedicated_extension_st_refresh_timeout_seconds = int(dedicated_extension_st_refresh_timeout_seconds)
+        except Exception:
+            return {"success": False, "message": "dedicated_extension_st_refresh_timeout_seconds must be an integer"}
+        if dedicated_extension_st_refresh_timeout_seconds < 10 or dedicated_extension_st_refresh_timeout_seconds > 300:
+            return {"success": False, "message": "dedicated_extension_st_refresh_timeout_seconds must be between 10 and 300"}
 
     if captcha_method == "remote_browser":
         if not (remote_browser_base_url or "").strip():
@@ -2304,6 +2427,9 @@ async def update_captcha_config(
         session_refresh_scheduler_batch_size=session_refresh_scheduler_batch_size,
         session_refresh_scheduler_only_expiring_within_minutes=session_refresh_scheduler_only_expiring_within_minutes,
         extension_queue_wait_timeout_seconds=extension_queue_wait_timeout_seconds,
+        dedicated_extension_enabled=dedicated_extension_enabled,
+        dedicated_extension_captcha_timeout_seconds=dedicated_extension_captcha_timeout_seconds,
+        dedicated_extension_st_refresh_timeout_seconds=dedicated_extension_st_refresh_timeout_seconds,
     )
 
     # 🔥 Hot reload: sync database config to memory
@@ -2399,6 +2525,13 @@ async def get_captcha_config(token: str = Depends(verify_admin_token)):
         ),
         "session_refresh_scheduler_only_expiring_within_minutes": int(
             getattr(captcha_config, "session_refresh_scheduler_only_expiring_within_minutes", 60) or 60
+        ),
+        "dedicated_extension_enabled": bool(getattr(captcha_config, "dedicated_extension_enabled", False)),
+        "dedicated_extension_captcha_timeout_seconds": int(
+            getattr(captcha_config, "dedicated_extension_captcha_timeout_seconds", 25) or 25
+        ),
+        "dedicated_extension_st_refresh_timeout_seconds": int(
+            getattr(captcha_config, "dedicated_extension_st_refresh_timeout_seconds", 45) or 45
         ),
         "extension_queue_wait_timeout_seconds": int(
             getattr(captcha_config, "extension_queue_wait_timeout_seconds", 20) or 20

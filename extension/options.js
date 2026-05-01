@@ -1,6 +1,17 @@
 const DEFAULT_SETTINGS = {
   serverUrl: "ws://127.0.0.1:8000/captcha_ws",
+  connectionMode: "endUser",
   apiKey: "",
+  workerAuthKey: "",
+  routeKey: "",
+  clientLabel: ""
+};
+
+const STORAGE_KEYS = {
+  serverUrl: DEFAULT_SETTINGS.serverUrl,
+  connectionMode: DEFAULT_SETTINGS.connectionMode,
+  apiKey: "",
+  workerAuthKey: "",
   routeKey: "",
   clientLabel: ""
 };
@@ -9,12 +20,26 @@ const $ = (id) => document.getElementById(id);
 let reconnectInProgress = false;
 
 function normalizeSettings(values) {
+  const mode = (values.connectionMode || "").trim() === "worker" ? "worker" : "endUser";
   return {
     serverUrl: (values.serverUrl || DEFAULT_SETTINGS.serverUrl).trim(),
+    connectionMode: mode,
     apiKey: (values.apiKey || "").trim(),
+    workerAuthKey: (values.workerAuthKey || "").trim(),
     routeKey: (values.routeKey || "").trim(),
     clientLabel: (values.clientLabel || "").trim()
   };
+}
+
+function inferConnectionMode(stored) {
+  const explicit = (stored.connectionMode || "").trim();
+  if (explicit === "worker" || explicit === "endUser") {
+    return explicit;
+  }
+  const wk = (stored.workerAuthKey || "").trim();
+  const ak = (stored.apiKey || "").trim();
+  if (wk && !ak) return "worker";
+  return "endUser";
 }
 
 function setStatus(message, isError = false) {
@@ -32,38 +57,87 @@ function isValidWsUrl(value) {
   }
 }
 
+function getActiveMode() {
+  const endTab = $("tabEndUser");
+  return endTab && endTab.getAttribute("aria-selected") === "true" ? "endUser" : "worker";
+}
+
+function setActiveMode(mode) {
+  const isEnd = mode === "endUser";
+  $("tabEndUser").setAttribute("aria-selected", isEnd ? "true" : "false");
+  $("tabWorker").setAttribute("aria-selected", isEnd ? "false" : "true");
+  $("panelEndUser").setAttribute("aria-hidden", isEnd ? "false" : "true");
+  $("panelWorker").setAttribute("aria-hidden", isEnd ? "true" : "false");
+}
+
 function loadSettings() {
-  chrome.storage.local.get(DEFAULT_SETTINGS, (stored) => {
-    const settings = normalizeSettings(stored);
+  chrome.storage.local.get(STORAGE_KEYS, (stored) => {
+    const inferred = inferConnectionMode(stored);
+    const settings = normalizeSettings({ ...stored, connectionMode: inferred });
     $("serverUrl").value = settings.serverUrl;
     $("apiKey").value = settings.apiKey;
+    $("workerAuthKey").value = settings.workerAuthKey;
     $("routeKey").value = settings.routeKey;
     $("clientLabel").value = settings.clientLabel;
+    setActiveMode(settings.connectionMode);
   });
 }
 
 function saveSettings() {
-  const settings = normalizeSettings({
-    serverUrl: $("serverUrl").value,
-    apiKey: $("apiKey").value,
-    routeKey: $("routeKey").value,
-    clientLabel: $("clientLabel").value
-  });
+  const mode = getActiveMode();
+  const serverUrl = ($("serverUrl").value || "").trim();
 
-  if (!isValidWsUrl(settings.serverUrl)) {
+  if (!isValidWsUrl(serverUrl)) {
     setStatus("WebSocket URL must start with ws:// or wss://.", true);
     return;
   }
-  if (!settings.apiKey) {
-    setStatus("API Key cannot be empty.", true);
+
+  if (mode === "endUser") {
+    const apiKey = ($("apiKey").value || "").trim();
+    if (!apiKey) {
+      setStatus("API Key is required for End user mode.", true);
+      return;
+    }
+    const payload = {
+      serverUrl,
+      connectionMode: "endUser",
+      apiKey,
+      workerAuthKey: "",
+      clientLabel: ($("clientLabel").value || "").trim(),
+      routeKey: ($("routeKey").value || "").trim()
+    };
+    chrome.storage.local.set(payload, () => {
+      if (chrome.runtime.lastError) {
+        setStatus(`Save failed: ${chrome.runtime.lastError.message}`, true);
+        return;
+      }
+      setStatus("Saved (End user). Worker key cleared. Background will reconnect.");
+    });
     return;
   }
-  chrome.storage.local.set(settings, () => {
+
+  const workerAuthKey = ($("workerAuthKey").value || "").trim();
+  if (!workerAuthKey) {
+    setStatus("Worker Registration Key is required for Worker mode.", true);
+    return;
+  }
+  const payload = {
+    serverUrl,
+    connectionMode: "worker",
+    workerAuthKey,
+    apiKey: "",
+    clientLabel: "",
+    routeKey: ""
+  };
+  chrome.storage.local.set(payload, () => {
     if (chrome.runtime.lastError) {
       setStatus(`Save failed: ${chrome.runtime.lastError.message}`, true);
       return;
     }
-    setStatus("Saved. Background connection will auto-reconnect.");
+    setStatus("Saved (Worker). API key and labels cleared. Background will reconnect.");
+    $("apiKey").value = "";
+    $("clientLabel").value = "";
+    $("routeKey").value = "";
   });
 }
 
@@ -74,15 +148,18 @@ function updateRuntimeStatus(state) {
     return;
   }
   const ws = state.wsStatus || "unknown";
+  const mode = state.connectionMode || "-";
   const route = state.routeKey || "(empty)";
   const instance = state.instanceId || "-";
   const workerSession = state.workerSessionId || "-";
   const managed = state.managedApiKeyId || "-";
+  const dedicatedWorker = state.dedicatedWorkerId || "-";
+  const dedicatedToken = state.dedicatedTokenId || "-";
   const ack = state.lastRegisterStatus || "unknown";
   const source = state.bindingSource || "unknown";
   const ackError = state.lastRegisterError ? `, register_error=${state.lastRegisterError}` : "";
   const last = state.lastError ? `, error=${state.lastError}` : "";
-  el.textContent = `Connection status: ${ws}, route=${route}, managed_key=${managed}, binding=${source}, register=${ack}, instance_id=${instance}, worker_session=${workerSession}${ackError}${last}`;
+  el.textContent = `Connection status: ${ws}, mode=${mode}, route=${route}, managed_key=${managed}, dedicated_worker=${dedicatedWorker}, dedicated_token=${dedicatedToken}, binding=${source}, register=${ack}, instance_id=${instance}, worker_session=${workerSession}${ackError}${last}`;
 }
 
 function refreshRuntimeStatus() {
@@ -128,7 +205,13 @@ function runTokenTest() {
   });
 }
 
+function wireTabs() {
+  $("tabEndUser").addEventListener("click", () => setActiveMode("endUser"));
+  $("tabWorker").addEventListener("click", () => setActiveMode("worker"));
+}
+
 document.addEventListener("DOMContentLoaded", () => {
+  wireTabs();
   loadSettings();
   $("saveBtn").addEventListener("click", saveSettings);
   $("reconnectBtn").addEventListener("click", reconnectNow);

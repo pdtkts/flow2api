@@ -5,21 +5,37 @@ let cachedInstanceId = null;
 
 const DEFAULT_SETTINGS = {
     serverUrl: "ws://127.0.0.1:8000/captcha_ws",
+    connectionMode: "endUser",
     apiKey: "",
+    workerAuthKey: "",
     routeKey: "",
     clientLabel: ""
 };
 const runtimeState = {
     wsStatus: "idle",
+    connectionMode: "",
     routeKey: "",
     instanceId: "",
     workerSessionId: "",
     managedApiKeyId: "",
+    dedicatedWorkerId: "",
+    dedicatedTokenId: "",
     bindingSource: "",
     lastRegisterStatus: "never",
     lastRegisterError: "",
     lastError: ""
 };
+
+function inferConnectionMode(stored) {
+    const explicit = String(stored.connectionMode || "").trim();
+    if (explicit === "worker" || explicit === "endUser") {
+        return explicit;
+    }
+    const wk = String(stored.workerAuthKey || "").trim();
+    const ak = String(stored.apiKey || "").trim();
+    if (wk && !ak) return "worker";
+    return "endUser";
+}
 
 function generateInstanceId() {
     const rand = Math.random().toString(36).slice(2, 10);
@@ -48,9 +64,12 @@ function getInstanceId() {
 function getSettings() {
     return new Promise((resolve) => {
         chrome.storage.local.get(DEFAULT_SETTINGS, (stored) => {
+            const connectionMode = inferConnectionMode(stored);
             resolve({
                 serverUrl: (stored.serverUrl || DEFAULT_SETTINGS.serverUrl).trim(),
+                connectionMode,
                 apiKey: (stored.apiKey || "").trim(),
+                workerAuthKey: (stored.workerAuthKey || "").trim(),
                 routeKey: (stored.routeKey || "").trim(),
                 clientLabel: (stored.clientLabel || "").trim(),
             });
@@ -112,7 +131,9 @@ async function connectWS() {
 
     const settings = await getSettings();
     const instanceId = await getInstanceId();
-    runtimeState.routeKey = settings.routeKey;
+    const mode = settings.connectionMode === "worker" ? "worker" : "endUser";
+    runtimeState.connectionMode = mode;
+    runtimeState.routeKey = mode === "endUser" ? settings.routeKey : "";
     runtimeState.instanceId = instanceId;
     runtimeState.workerSessionId = "";
     runtimeState.managedApiKeyId = "";
@@ -122,14 +143,20 @@ async function connectWS() {
     runtimeState.lastRegisterError = "";
     runtimeState.lastError = "";
     const url = new URL(settings.serverUrl || DEFAULT_SETTINGS.serverUrl);
-    if (settings.apiKey) {
-        url.searchParams.set("key", settings.apiKey);
-    }
-    if (settings.routeKey) {
-        url.searchParams.set("route_key", settings.routeKey);
-    }
-    if (settings.clientLabel) {
-        url.searchParams.set("client_label", settings.clientLabel);
+    if (mode === "worker") {
+        if (settings.workerAuthKey) {
+            url.searchParams.set("worker_key", settings.workerAuthKey);
+        }
+    } else {
+        if (settings.apiKey) {
+            url.searchParams.set("key", settings.apiKey);
+        }
+        if (settings.routeKey) {
+            url.searchParams.set("route_key", settings.routeKey);
+        }
+        if (settings.clientLabel) {
+            url.searchParams.set("client_label", settings.clientLabel);
+        }
     }
     url.searchParams.set("instance_id", instanceId);
     const socket = new WebSocket(url.toString());
@@ -141,8 +168,8 @@ async function connectWS() {
         runtimeState.wsStatus = "open";
         socket.send(JSON.stringify({
             type: "register",
-            route_key: settings.routeKey,
-            client_label: settings.clientLabel,
+            route_key: mode === "endUser" ? settings.routeKey : "",
+            client_label: mode === "endUser" ? settings.clientLabel : "",
             instance_id: instanceId,
         }));
         if (heartbeatInterval) clearInterval(heartbeatInterval);
@@ -173,6 +200,8 @@ async function connectWS() {
             runtimeState.instanceId = String(data.instance_id || runtimeState.instanceId || "");
             runtimeState.workerSessionId = String(data.worker_session_id || "");
             runtimeState.managedApiKeyId = String(data.managed_api_key_id || "");
+            runtimeState.dedicatedWorkerId = String(data.dedicated_worker_id || "");
+            runtimeState.dedicatedTokenId = String(data.dedicated_token_id || "");
             if (ackStatus === "error") {
                 runtimeState.wsStatus = "open_register_error";
                 runtimeState.lastError = ackError || "register_failed";
@@ -195,6 +224,12 @@ async function connectWS() {
         if (data.type === "get_token") {
             tokenQueue = tokenQueue.then(() => handleGetToken(data)).catch(err => {
                 console.error("[Flow2API] Queue Error:", err);
+            });
+            return;
+        }
+        if (data.type === "refresh_st") {
+            tokenQueue = tokenQueue.then(() => handleRefreshSessionToken(data)).catch(err => {
+                console.error("[Flow2API] refresh_st queue error:", err);
             });
         }
     };
@@ -317,9 +352,54 @@ async function handleGetToken(data) {
     }
 }
 
+async function getSessionTokenFromCookie() {
+    return new Promise((resolve) => {
+        chrome.cookies.get(
+            { url: "https://labs.google/", name: "__Secure-next-auth.session-token" },
+            (cookie) => {
+                if (chrome.runtime.lastError) {
+                    resolve({ success: false, error: chrome.runtime.lastError.message || "cookie_read_failed" });
+                    return;
+                }
+                const value = cookie && cookie.value ? String(cookie.value).trim() : "";
+                if (!value) {
+                    resolve({ success: false, error: "session_cookie_missing" });
+                    return;
+                }
+                resolve({ success: true, sessionToken: value });
+            }
+        );
+    });
+}
+
+async function handleRefreshSessionToken(data) {
+    const result = await getSessionTokenFromCookie();
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    if (result.success) {
+        ws.send(JSON.stringify({
+            req_id: data.req_id,
+            status: "success",
+            session_token: result.sessionToken
+        }));
+    } else {
+        ws.send(JSON.stringify({
+            req_id: data.req_id,
+            status: "error",
+            error: result.error || "session_refresh_failed"
+        }));
+    }
+}
+
 chrome.storage.onChanged.addListener((changes, areaName) => {
     if (areaName !== "local") return;
-    if (changes.routeKey || changes.serverUrl || changes.clientLabel || changes.apiKey) {
+    if (
+        changes.routeKey ||
+        changes.serverUrl ||
+        changes.clientLabel ||
+        changes.apiKey ||
+        changes.workerAuthKey ||
+        changes.connectionMode
+    ) {
         console.log("[Flow2API] Extension settings changed, reconnecting WebSocket...");
         closeSocket();
         connectWS();

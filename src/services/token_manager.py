@@ -631,6 +631,33 @@ class TokenManager:
                 record_token_refresh("st", "success")
                 return candidate_st
 
+            if bool(getattr(config, "dedicated_extension_enabled", False)):
+                try:
+                    from .browser_captcha_extension import ExtensionCaptchaService
+
+                    extension_timeout = float(
+                        getattr(config, "dedicated_extension_st_refresh_timeout_seconds", 45) or 45
+                    )
+                    extension_service = await ExtensionCaptchaService.get_instance(self.db)
+                    extension_st = await asyncio.wait_for(
+                        extension_service.refresh_session_token(
+                            token_id=token_id,
+                            timeout=max(10, int(extension_timeout)),
+                        ),
+                        timeout=max(10.0, extension_timeout + 5.0),
+                    )
+                    persisted_extension = await _persist_if_new(extension_st, "dedicated_extension")
+                    if persisted_extension:
+                        return persisted_extension
+                except asyncio.TimeoutError:
+                    debug_logger.log_warning(
+                        f"[ST_REFRESH] Token {token_id}: dedicated extension ST refresh timeout"
+                    )
+                except Exception as ext_err:
+                    debug_logger.log_warning(
+                        f"[ST_REFRESH] Token {token_id}: dedicated extension ST refresh failed: {ext_err}"
+                    )
+
             # 1) Always try local headed-browser refresh first.
             from .browser_captcha import BrowserCaptchaService
             service = await BrowserCaptchaService.get_instance(self.db)

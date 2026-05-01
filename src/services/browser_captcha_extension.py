@@ -19,6 +19,8 @@ class ExtensionConnection:
     client_label: str = ""
     managed_api_key_id: Optional[int] = None
     binding_source: str = "none"
+    dedicated_worker_id: Optional[int] = None
+    dedicated_token_id: Optional[int] = None
     connected_at: float = field(default_factory=time.time)
 
 
@@ -105,6 +107,7 @@ class ExtensionCaptchaService:
         websocket: WebSocket,
         *,
         authenticated_managed_api_key_id: Optional[int] = None,
+        authenticated_worker: Optional[Dict[str, Any]] = None,
     ):
         await websocket.accept()
         conn = ExtensionConnection(
@@ -135,6 +138,21 @@ class ExtensionCaptchaService:
                 )
             except Exception as exc:
                 debug_logger.log_warning(f"[Extension Captcha] Ignoring invalid managed key claim on connect: {exc}")
+        if authenticated_worker:
+            conn.dedicated_worker_id = int(authenticated_worker.get("id"))
+            token_id = authenticated_worker.get("token_id")
+            conn.dedicated_token_id = int(token_id) if token_id is not None else None
+            try:
+                if self.db and hasattr(self.db, "update_dedicated_extension_worker"):
+                    await self.db.update_dedicated_extension_worker(
+                        conn.dedicated_worker_id,
+                        route_key=(conn.route_key or authenticated_worker.get("route_key") or None),
+                        last_instance_id=conn.instance_id or None,
+                        mark_seen=True,
+                        last_error="",
+                    )
+            except Exception as exc:
+                debug_logger.log_warning(f"[Extension Captcha] Failed to persist dedicated worker route: {exc}")
         self.active_connections.append(conn)
         debug_logger.log_info(
             f"[Extension Captcha] Client connected. Total: {len(self.active_connections)}, "
@@ -171,7 +189,12 @@ class ExtensionCaptchaService:
         self,
         route_key: str,
         managed_api_key_id: Optional[int],
+        preferred_token_id: Optional[int] = None,
     ) -> Optional[ExtensionConnection]:
+        if preferred_token_id is not None:
+            for conn in self.active_connections:
+                if conn.dedicated_token_id == int(preferred_token_id):
+                    return conn
         normalized_key = (route_key or "").strip()
         candidate_connections = self.active_connections
         if managed_api_key_id is not None:
@@ -291,6 +314,7 @@ class ExtensionCaptchaService:
         *,
         route_key: str,
         managed_api_key_id: Optional[int],
+        preferred_token_id: Optional[int] = None,
         timeout: float,
     ) -> Optional[ExtensionConnection]:
         deadline = time.time() + max(0.0, float(timeout))
@@ -299,7 +323,7 @@ class ExtensionCaptchaService:
             self._queue_waiters[queue_key] = self._queue_waiters.get(queue_key, 0) + 1
         try:
             while True:
-                conn = self._select_connection(route_key, managed_api_key_id)
+                conn = self._select_connection(route_key, managed_api_key_id, preferred_token_id=preferred_token_id)
                 if conn is not None:
                     return conn
                 remaining = deadline - time.time()
@@ -329,6 +353,19 @@ class ExtensionCaptchaService:
                     conn.route_key = (payload.get("route_key") or conn.route_key or "").strip()
                     conn.client_label = (payload.get("client_label") or conn.client_label or "").strip()
                     conn.instance_id = (payload.get("instance_id") or conn.instance_id or "").strip()
+                    if conn.dedicated_worker_id and self.db and hasattr(self.db, "update_dedicated_extension_worker"):
+                        try:
+                            await self.db.update_dedicated_extension_worker(
+                                conn.dedicated_worker_id,
+                                route_key=conn.route_key or None,
+                                last_instance_id=conn.instance_id or None,
+                                mark_seen=True,
+                                last_error="",
+                            )
+                        except Exception as exc:
+                            debug_logger.log_warning(
+                                f"[Extension Captcha] Failed to update dedicated worker heartbeat: {exc}"
+                            )
                     register_error = None
                     if conn.binding_source == "authenticated" and conn.managed_api_key_id is not None:
                         try:
@@ -363,6 +400,8 @@ class ExtensionCaptchaService:
                             "instance_id": conn.instance_id,
                             "managed_api_key_id": conn.managed_api_key_id,
                             "binding_source": conn.binding_source,
+                            "dedicated_worker_id": conn.dedicated_worker_id,
+                            "dedicated_token_id": conn.dedicated_token_id,
                             "status": "error" if register_error else "ok",
                             "error": register_error,
                         },
@@ -405,6 +444,7 @@ class ExtensionCaptchaService:
         conn = await self._wait_for_connection(
             route_key=route_key,
             managed_api_key_id=managed_api_key_id,
+            preferred_token_id=token_id if token_id is not None else None,
             timeout=queue_wait_timeout,
         )
         if conn is None:
@@ -457,6 +497,40 @@ class ExtensionCaptchaService:
         finally:
             self.pending_requests.pop(req_id, None)
 
+    async def refresh_session_token(
+        self,
+        *,
+        token_id: int,
+        timeout: int = 45,
+    ) -> Optional[str]:
+        if token_id is None:
+            return None
+        conn = self._select_connection(route_key="", managed_api_key_id=None, preferred_token_id=token_id)
+        if conn is None:
+            return None
+        req_id = f"req_{uuid.uuid4().hex}"
+        future = asyncio.get_running_loop().create_future()
+        self.pending_requests[req_id] = (future, conn.websocket)
+        try:
+            await conn.websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "refresh_st",
+                        "req_id": req_id,
+                        "token_id": int(token_id),
+                    }
+                )
+            )
+            result = await asyncio.wait_for(future, timeout=timeout)
+            if result.get("status") == "success":
+                return str(result.get("session_token") or "").strip() or None
+            return None
+        except Exception as exc:
+            debug_logger.log_warning(f"[Extension Captcha] refresh_st failed for token_id={token_id}: {exc}")
+            return None
+        finally:
+            self.pending_requests.pop(req_id, None)
+
     async def report_flow_error(self, project_id: str, error_reason: str, error_message: str = ""):
         _ = project_id, error_message
         debug_logger.log_warning(f"[Extension Captcha] Flow error reported (ignoring): {error_reason}")
@@ -472,6 +546,8 @@ class ExtensionCaptchaService:
                     "client_label": conn.client_label,
                     "managed_api_key_id": conn.managed_api_key_id,
                     "binding_source": conn.binding_source,
+                    "dedicated_worker_id": conn.dedicated_worker_id,
+                    "dedicated_token_id": conn.dedicated_token_id,
                     "connected_at": conn.connected_at,
                 }
             )

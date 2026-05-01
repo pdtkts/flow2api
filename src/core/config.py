@@ -761,6 +761,41 @@ class Config:
             self._config["captcha"] = {}
         self._config["captcha"]["session_refresh_scheduler_only_expiring_within_minutes"] = max(1, min(10080, int(minutes)))
 
+    @property
+    def dedicated_extension_enabled(self) -> bool:
+        return bool(self._config.get("captcha", {}).get("dedicated_extension_enabled", False))
+
+    def set_dedicated_extension_enabled(self, enabled: bool):
+        if "captcha" not in self._config:
+            self._config["captcha"] = {}
+        self._config["captcha"]["dedicated_extension_enabled"] = bool(enabled)
+
+    @property
+    def dedicated_extension_captcha_timeout_seconds(self) -> int:
+        value = self._config.get("captcha", {}).get("dedicated_extension_captcha_timeout_seconds", 25)
+        try:
+            return max(5, min(180, int(value)))
+        except Exception:
+            return 25
+
+    def set_dedicated_extension_captcha_timeout_seconds(self, seconds: int):
+        if "captcha" not in self._config:
+            self._config["captcha"] = {}
+        self._config["captcha"]["dedicated_extension_captcha_timeout_seconds"] = max(5, min(180, int(seconds)))
+
+    @property
+    def dedicated_extension_st_refresh_timeout_seconds(self) -> int:
+        value = self._config.get("captcha", {}).get("dedicated_extension_st_refresh_timeout_seconds", 45)
+        try:
+            return max(10, min(300, int(value)))
+        except Exception:
+            return 45
+
+    def set_dedicated_extension_st_refresh_timeout_seconds(self, seconds: int):
+        if "captcha" not in self._config:
+            self._config["captcha"] = {}
+        self._config["captcha"]["dedicated_extension_st_refresh_timeout_seconds"] = max(10, min(300, int(seconds)))
+
 
 # Global config instance
 config = Config()
