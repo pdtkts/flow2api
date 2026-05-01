@@ -54,39 +54,39 @@ function saveSettings() {
   });
 
   if (!isValidWsUrl(settings.serverUrl)) {
-    setStatus("WebSocket URL 必须以 ws:// 或 wss:// 开头。", true);
+    setStatus("WebSocket URL must start with ws:// or wss://.", true);
     return;
   }
   if (!settings.apiKey) {
-    setStatus("API Key 不能为空。", true);
+    setStatus("API Key cannot be empty.", true);
     return;
   }
   if (settings.managedApiKeyId && !/^\d+$/.test(settings.managedApiKeyId)) {
-    setStatus("Managed API Key ID 必须为数字。", true);
+    setStatus("Managed API Key ID must be numeric.", true);
     return;
   }
 
   chrome.storage.local.set(settings, () => {
     if (chrome.runtime.lastError) {
-      setStatus(`保存失败：${chrome.runtime.lastError.message}`, true);
+      setStatus(`Save failed: ${chrome.runtime.lastError.message}`, true);
       return;
     }
-    setStatus("已保存，后台连接会自动重连。");
+    setStatus("Saved. Background connection will auto-reconnect.");
   });
 }
 
 function updateRuntimeStatus(state) {
   const el = $("runtimeStatus");
   if (!state) {
-    el.textContent = "连接状态：未知";
+    el.textContent = "Connection status: unknown";
     return;
   }
   const ws = state.wsStatus || "unknown";
   const route = state.routeKey || "(empty)";
   const managed = state.managedApiKeyId || "-";
   const ack = state.lastRegisterStatus || "unknown";
-  const last = state.lastError ? `，错误：${state.lastError}` : "";
-  el.textContent = `连接状态：${ws}，route=${route}，managed_key=${managed}，register=${ack}${last}`;
+  const last = state.lastError ? `, error: ${state.lastError}` : "";
+  el.textContent = `Connection status: ${ws}, route=${route}, managed_key=${managed}, register=${ack}${last}`;
 }
 
 function refreshRuntimeStatus() {
@@ -99,29 +99,29 @@ function refreshRuntimeStatus() {
 function reconnectNow() {
   chrome.runtime.sendMessage({ type: "reconnect_now" }, (resp) => {
     if (chrome.runtime.lastError) {
-      setStatus(`重连失败：${chrome.runtime.lastError.message}`, true);
+      setStatus(`Reconnect failed: ${chrome.runtime.lastError.message}`, true);
       return;
     }
     if (!resp || !resp.success) {
-      setStatus(`重连失败：${(resp && resp.error) || "unknown"}`, true);
+      setStatus(`Reconnect failed: ${(resp && resp.error) || "unknown"}`, true);
       return;
     }
-    setStatus("已触发重连。");
+    setStatus("Reconnect triggered.");
     setTimeout(refreshRuntimeStatus, 400);
   });
 }
 
 function runTokenTest() {
-  setStatus("测试中，请稍候...");
+  setStatus("Running token test, please wait...");
   chrome.runtime.sendMessage({ type: "test_token", action: "IMAGE_GENERATION" }, (resp) => {
     if (chrome.runtime.lastError) {
-      setStatus(`测试失败：${chrome.runtime.lastError.message}`, true);
+      setStatus(`Test failed: ${chrome.runtime.lastError.message}`, true);
       return;
     }
     if (resp && resp.success) {
-      setStatus("测试成功：已获取 token。");
+      setStatus("Test passed: token acquired.");
     } else {
-      setStatus(`测试失败：${(resp && resp.error) || "unknown error"}`, true);
+      setStatus(`Test failed: ${(resp && resp.error) || "unknown error"}`, true);
     }
     refreshRuntimeStatus();
   });

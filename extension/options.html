@@ -76,29 +76,29 @@
   <div class="wrap">
     <div class="panel">
       <h1>Flow2API Captcha Worker</h1>
-      <p>给当前浏览器实例设置一个独立的路由键，Flow2API 后端就能把对应账号的验证码请求固定发到这个实例。</p>
+      <p>Assign a dedicated route key to this browser instance so Flow2API can send captcha requests for the matching account to this exact worker.</p>
 
       <label for="routeKey">Route Key</label>
-      <input id="routeKey" type="text" placeholder="例如 9223">
+      <input id="routeKey" type="text" placeholder="e.g. 9223">
 
       <label for="clientLabel">Client Label</label>
-      <input id="clientLabel" type="text" placeholder="例如 browser-9223">
+      <input id="clientLabel" type="text" placeholder="e.g. browser-9223">
 
       <label for="serverUrl">WebSocket URL</label>
       <input id="serverUrl" type="text" placeholder="ws://127.0.0.1:8000/captcha_ws">
 
       <label for="apiKey">API Key</label>
-      <input id="apiKey" type="password" placeholder="在这里粘贴后端 API Key">
+      <input id="apiKey" type="password" placeholder="Paste backend API Key here">
 
       <label for="managedApiKeyId">Managed API Key ID (optional)</label>
-      <input id="managedApiKeyId" type="text" placeholder="例如 12（用于按 managed key 隔离）">
+      <input id="managedApiKeyId" type="text" placeholder="e.g. 12 (for managed-key isolation)">
 
-      <button id="saveBtn" type="button">保存</button>
-      <button id="reconnectBtn" type="button" style="margin-left:8px;background:#1f2937;">立即重连</button>
-      <button id="testBtn" type="button" style="margin-left:8px;background:#374151;">测试打码</button>
+      <button id="saveBtn" type="button">Save</button>
+      <button id="reconnectBtn" type="button" style="margin-left:8px;background:#1f2937;">Reconnect Now</button>
+      <button id="testBtn" type="button" style="margin-left:8px;background:#374151;">Test Token</button>
       <div class="status" id="status"></div>
-      <div class="hint" id="runtimeStatus">连接状态：未知</div>
-      <div class="hint">先配置 API Key，再在管理台 token 里填写同样的 <code>Route Key</code>（例如 9223 对 9223）。</div>
+      <div class="hint" id="runtimeStatus">Connection status: unknown</div>
+      <div class="hint">Set the API Key first, then use the same <code>Route Key</code> in the admin token settings (e.g. 9223 to 9223).</div>
     </div>
   </div>
   <script src="options.js"></script>
