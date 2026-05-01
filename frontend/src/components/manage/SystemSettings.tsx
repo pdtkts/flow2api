@@ -1242,12 +1242,12 @@ export function SystemSettings({ active }: { active: boolean }) {
                   <span>Action</span>
                 </div>
                 {(extensionWorkers.length ? extensionWorkers : []).map((w) => (
-                  <div key={w.worker_session_id} className="grid grid-cols-7 gap-2 px-3 py-2 text-xs border-b last:border-b-0">
-                    <span className="font-mono">{w.worker_session_id || "-"}</span>
-                    <span className="font-mono">{w.route_key || "(empty)"}</span>
-                    <span>{w.client_label || "-"}</span>
+                  <div key={w.worker_session_id} className="grid grid-cols-7 gap-2 px-3 py-2 text-xs border-b last:border-b-0 items-start">
+                    <span className="font-mono min-w-0 break-all whitespace-normal">{w.worker_session_id || "-"}</span>
+                    <span className="font-mono min-w-0 break-all whitespace-normal">{w.route_key || "(empty)"}</span>
+                    <span className="min-w-0 break-words whitespace-normal">{w.client_label || "-"}</span>
                     <span>{w.managed_api_key_id ?? "-"}</span>
-                    <span>{w.binding_source || "-"}</span>
+                    <span className="min-w-0 break-words whitespace-normal">{w.binding_source || "-"}</span>
                     <span>{w.connected_at ? new Date(w.connected_at * 1000).toLocaleTimeString() : "-"}</span>
                     <span>
                       <Button
@@ -1275,10 +1275,10 @@ export function SystemSettings({ active }: { active: boolean }) {
                   <span>Action</span>
                 </div>
                 {(extensionBindings.length ? extensionBindings : []).map((b) => (
-                  <div key={`${b.id}-${b.route_key}`} className="grid grid-cols-4 gap-2 px-3 py-2 text-xs border-b last:border-b-0">
-                    <span className="font-mono">{b.route_key}</span>
+                  <div key={`${b.id}-${b.route_key}`} className="grid grid-cols-4 gap-2 px-3 py-2 text-xs border-b last:border-b-0 items-start">
+                    <span className="font-mono min-w-0 break-all whitespace-normal">{b.route_key}</span>
                     <span>{b.api_key_id}</span>
-                    <span>{b.api_key_label || "-"}</span>
+                    <span className="min-w-0 break-words whitespace-normal">{b.api_key_label || "-"}</span>
                     <span>
                       <Button size="sm" variant="outline" onClick={() => unbindExtensionWorker(b.route_key)} disabled={busy}>
                         Unbind
