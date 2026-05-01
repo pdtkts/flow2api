@@ -231,6 +231,7 @@
         <input id="serverUrl" type="text" placeholder="wss://example.com/captcha_ws">
         <p class="hint" style="margin-top:8px;margin-bottom:0;">
           Use <code>wss://</code> for HTTPS APIs (e.g. <code>flow-api.prismacreative.online</code>). Plain <code>ws://</code> on a public host is auto-upgraded to <code>wss://</code>; localhost stays <code>ws://</code>.
+          Remote hosts require host access in the extension manifest; if you see <strong>WebSocket transport error</strong> after changing only the URL, reload the extension on <code>chrome://extensions</code> (Refresh) so updated permissions apply.
         </p>
       </div>
 
