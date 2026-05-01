@@ -49,19 +49,27 @@ class LoadBalancer:
         if not diagnostics:
             return None
         allowlist_filter_reason_type = str(diagnostics.get("allowlist_filter_reason_type") or "").strip()
-        if allowlist_filter_reason_type == "project_pin":
-            allowed_count = int(diagnostics.get("allowed_token_ids_count") or 0)
-            if allowed_count > 0:
-                return "当前请求已绑定到指定项目所属账号，其他账号不会参与本次调度"
+        project_pin_context = (
+            allowlist_filter_reason_type == "project_pin"
+            and int(diagnostics.get("allowed_token_ids_count") or 0) > 0
+        )
         priority_summary = diagnostics.get("post_check_failure_summary") or diagnostics.get("filtered_reason_summary") or []
         if not isinstance(priority_summary, list) or not priority_summary:
+            if project_pin_context:
+                return "当前请求已绑定到指定项目所属账号，其他账号不会参与本次调度"
             return None
         top_reason = priority_summary[0]
         reason = str(top_reason.get("reason") or "").strip()
         count = int(top_reason.get("count") or 0)
         total_active = int(diagnostics.get("total_active_tokens") or 0)
         if not reason:
+            if project_pin_context:
+                return "当前请求已绑定到指定项目所属账号，其他账号不会参与本次调度"
             return None
+        if project_pin_context and "绑定项目账号" in reason:
+            return "当前请求已绑定到指定项目所属账号，其他账号不会参与本次调度"
+        if project_pin_context:
+            reason = f"{reason}（当前请求已绑定项目账号）"
         if count > 0 and total_active > 0:
             return f"没有可用Token：{reason}（{count}/{total_active}）"
         return f"没有可用Token：{reason}"

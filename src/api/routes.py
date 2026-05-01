@@ -758,6 +758,41 @@ def _new_async_job_id() -> str:
     return f"gen-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
 
 
+def _looks_like_mojibake(text: str) -> bool:
+    sample = (text or "").strip()
+    if not sample:
+        return False
+    suspicious_chars = {"σ", "Γ", "╜", "╗", "╝", "╣", "╦", "Φ", "τ", "µ"}
+    hit_count = sum(1 for ch in sample if ch in suspicious_chars)
+    if hit_count >= 3:
+        return True
+    replacement_count = sample.count("\ufffd")
+    if replacement_count >= 2:
+        return True
+    non_ascii = sum(1 for ch in sample if ord(ch) > 127)
+    return non_ascii > 0 and (hit_count + replacement_count) >= max(2, non_ascii // 3)
+
+
+def _sanitize_async_error_message(
+    raw_error: Any,
+    *,
+    selection_context: Optional[Dict[str, Any]] = None,
+) -> str:
+    text = str(raw_error or "").strip()
+    if not text:
+        text = "生成失败，请稍后重试"
+    if _looks_like_mojibake(text):
+        text = "生成失败：上游返回了不可读错误，请稍后重试"
+
+    if isinstance(selection_context, dict):
+        reason_type = str(selection_context.get("allowlist_filter_reason_type") or "").strip()
+        if reason_type == "project_pin":
+            suffix = "（当前请求已绑定项目账号）"
+            if suffix not in text:
+                text = f"{text}{suffix}"
+    return text
+
+
 def _extract_async_delivery_fields(
     payload: Dict[str, Any], model: str
 ) -> Dict[str, Any]:
@@ -851,7 +886,10 @@ async def _run_async_generation_task(
         )
         payload = _enrich_payload_with_direct_url(_parse_handler_result(raw_result))
         if "error" in payload:
-            error_msg = payload.get("error", {}).get("message", "Upstream generation error")
+            error_msg = _sanitize_async_error_message(
+                payload.get("error", {}).get("message", "Upstream generation error"),
+                selection_context=selection_context,
+            )
             await handler.db.update_task(
                 task_id,
                 status="failed",
@@ -880,7 +918,7 @@ async def _run_async_generation_task(
         await handler.db.update_task(
             task_id,
             status="failed",
-            error_message=str(exc),
+            error_message=_sanitize_async_error_message(exc, selection_context=selection_context),
             upscale_status="failed" if _infer_requested_resolution(normalized.model) else "not_requested",
             completed_at=datetime.utcnow(),
         )
