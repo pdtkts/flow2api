@@ -896,6 +896,7 @@ class GenerationHandler:
         # 2. 选择Token
         debug_logger.log_info(f"[GENERATION] 正在选择可用Token...")
         token_select_started_at = time.time()
+        token_selection_diagnostics: Dict[str, Any] = {}
 
         if generation_type == "image":
             token = await self.load_balancer.select_token(
@@ -905,6 +906,7 @@ class GenerationHandler:
                 enforce_concurrency_filter=False,
                 track_pending=True,
                 allowed_token_ids=allowed_token_ids,
+                diagnostics_sink=token_selection_diagnostics,
             )
         else:
             token = await self.load_balancer.select_token(
@@ -914,17 +916,30 @@ class GenerationHandler:
                 enforce_concurrency_filter=False,
                 track_pending=True,
                 allowed_token_ids=allowed_token_ids,
+                diagnostics_sink=token_selection_diagnostics,
             )
         perf_trace["token_select_ms"] = int((time.time() - token_select_started_at) * 1000)
+        if token_selection_diagnostics:
+            perf_trace["token_selection_diagnostics"] = token_selection_diagnostics
 
         if not token:
             error_msg = None
+            detailed_no_token_reason = None
+            if self.load_balancer and hasattr(self.load_balancer, "build_diagnostics_reason"):
+                detailed_no_token_reason = self.load_balancer.build_diagnostics_reason(token_selection_diagnostics)
+            if detailed_no_token_reason:
+                error_msg = detailed_no_token_reason
             if self.load_balancer and hasattr(self.load_balancer, "get_unavailable_reason"):
-                error_msg = await self.load_balancer.get_unavailable_reason(
+                unavailable_reason = await self.load_balancer.get_unavailable_reason(
                     for_image_generation=(generation_type == "image"),
                     for_video_generation=(generation_type == "video"),
                     model=model,
                 )
+                if unavailable_reason:
+                    if error_msg:
+                        error_msg = f"{error_msg}；{unavailable_reason}"
+                    else:
+                        error_msg = unavailable_reason
             if not error_msg:
                 error_msg = self._get_no_token_error_message(generation_type)
             debug_logger.log_error(f"[GENERATION] {error_msg}")

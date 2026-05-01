@@ -1,7 +1,7 @@
 """Load balancing module for Flow2API"""
 import asyncio
 import random
-from typing import Optional, Dict, Set
+from typing import Optional, Dict, Set, Any
 from ..core.models import Token
 from ..core.config import config
 from ..core.account_tiers import (
@@ -25,6 +25,41 @@ class LoadBalancer:
         self._pending_lock = asyncio.Lock()
         self._round_robin_state: Dict[str, Optional[int]] = {"image": None, "video": None, "default": None}
         self._rr_lock = asyncio.Lock()
+        self._last_selection_diagnostics: Dict[str, Any] = {}
+
+    def _summarize_reasons(self, reasons: Dict[int, str]) -> list[Dict[str, Any]]:
+        summary_counts: Dict[str, int] = {}
+        for reason in reasons.values():
+            summary_counts[reason] = summary_counts.get(reason, 0) + 1
+        return [
+            {"reason": reason, "count": count}
+            for reason, count in sorted(summary_counts.items(), key=lambda item: (-item[1], item[0]))
+        ]
+
+    def _store_selection_diagnostics(self, diagnostics: Dict[str, Any], sink: Optional[Dict[str, Any]] = None) -> None:
+        self._last_selection_diagnostics = dict(diagnostics)
+        if sink is not None:
+            sink.clear()
+            sink.update(diagnostics)
+
+    def get_last_selection_diagnostics(self) -> Dict[str, Any]:
+        return dict(self._last_selection_diagnostics)
+
+    def build_diagnostics_reason(self, diagnostics: Optional[Dict[str, Any]]) -> Optional[str]:
+        if not diagnostics:
+            return None
+        priority_summary = diagnostics.get("post_check_failure_summary") or diagnostics.get("filtered_reason_summary") or []
+        if not isinstance(priority_summary, list) or not priority_summary:
+            return None
+        top_reason = priority_summary[0]
+        reason = str(top_reason.get("reason") or "").strip()
+        count = int(top_reason.get("count") or 0)
+        total_active = int(diagnostics.get("total_active_tokens") or 0)
+        if not reason:
+            return None
+        if count > 0 and total_active > 0:
+            return f"没有可用Token：{reason}（{count}/{total_active}）"
+        return f"没有可用Token：{reason}"
 
     async def _get_pending_count(self, token_id: int, for_image_generation: bool, for_video_generation: bool) -> int:
         async with self._pending_lock:
@@ -146,6 +181,7 @@ class LoadBalancer:
         enforce_concurrency_filter: bool = True,
         track_pending: bool = False,
         allowed_token_ids: Optional[Set[int]] = None,
+        diagnostics_sink: Optional[Dict[str, Any]] = None,
     ) -> Optional[Token]:
         """
         Select a token using load-aware balancing
@@ -173,9 +209,25 @@ class LoadBalancer:
 
         active_tokens = await self.token_manager.get_active_tokens()
         debug_logger.log_info(f"[LOAD_BALANCER] 获取到 {len(active_tokens)} 个活跃Token")
+        diagnostics: Dict[str, Any] = {
+            "model": model,
+            "for_image_generation": bool(for_image_generation),
+            "for_video_generation": bool(for_video_generation),
+            "reserve": bool(reserve),
+            "enforce_concurrency_filter": bool(enforce_concurrency_filter),
+            "track_pending": bool(track_pending),
+            "total_active_tokens": len(active_tokens),
+            "filtered_reasons": {},
+            "filtered_reason_summary": [],
+            "candidate_token_ids": [],
+            "post_check_failures": {},
+            "post_check_failure_summary": [],
+            "selected_token_id": None,
+        }
 
         if not active_tokens:
             debug_logger.log_info(f"[LOAD_BALANCER] ❌ 没有活跃的Token")
+            self._store_selection_diagnostics(diagnostics, diagnostics_sink)
             return None
 
         available_tokens = []
@@ -243,9 +295,13 @@ class LoadBalancer:
             debug_logger.log_info(f"[LOAD_BALANCER] 已过滤Token:")
             for token_id, reason in filtered_reasons.items():
                 debug_logger.log_info(f"[LOAD_BALANCER]   - Token {token_id}: {reason}")
+        diagnostics["filtered_reasons"] = {str(token_id): reason for token_id, reason in filtered_reasons.items()}
+        diagnostics["filtered_reason_summary"] = self._summarize_reasons(filtered_reasons)
+        diagnostics["candidate_token_ids"] = [int(item["token"].id or 0) for item in available_tokens]
 
         if not available_tokens:
             debug_logger.log_info(f"[LOAD_BALANCER] ❌ 没有可用的Token (图片生成={for_image_generation}, 视频生成={for_video_generation})")
+            self._store_selection_diagnostics(diagnostics, diagnostics_sink)
             return None
 
         # 最低 in-flight 优先；有并发上限时，剩余槽位更多的 token 优先；最后随机打散
@@ -293,6 +349,7 @@ class LoadBalancer:
             )
 
         # 只为候选列表中真正尝试到的 token 做 AT 校验，避免每次请求把所有 token 全扫一遍
+        post_check_failures: Dict[int, str] = {}
         for item in available_tokens:
             token = item["token"]
             token_id = token.id
@@ -300,10 +357,12 @@ class LoadBalancer:
             token = await self.token_manager.ensure_valid_token(token)
             if not token:
                 debug_logger.log_info(f"[LOAD_BALANCER] 跳过 Token {token_id}: AT无效或已过期")
+                post_check_failures[token_id] = "AT无效或已过期"
                 continue
 
             if reserve and not await self._reserve_slot(token.id, for_image_generation, for_video_generation):
                 debug_logger.log_info(f"[LOAD_BALANCER] 跳过 Token {token.id}: 预占槽位失败")
+                post_check_failures[token.id] = "预占槽位失败"
                 continue
 
             if track_pending:
@@ -313,9 +372,16 @@ class LoadBalancer:
                 f"[LOAD_BALANCER] ✅ 已选择Token {token.id} ({token.email}) - "
                 f"余额: {token.credits}, inflight={item['inflight']}"
             )
+            diagnostics["post_check_failures"] = {str(tid): reason for tid, reason in post_check_failures.items()}
+            diagnostics["post_check_failure_summary"] = self._summarize_reasons(post_check_failures)
+            diagnostics["selected_token_id"] = int(token.id or 0)
+            self._store_selection_diagnostics(diagnostics, diagnostics_sink)
             return token
 
         debug_logger.log_info(f"[LOAD_BALANCER] ❌ 候选Token均不可用 (图片生成={for_image_generation}, 视频生成={for_video_generation})")
+        diagnostics["post_check_failures"] = {str(tid): reason for tid, reason in post_check_failures.items()}
+        diagnostics["post_check_failure_summary"] = self._summarize_reasons(post_check_failures)
+        self._store_selection_diagnostics(diagnostics, diagnostics_sink)
         return None
 
     async def get_unavailable_reason(
