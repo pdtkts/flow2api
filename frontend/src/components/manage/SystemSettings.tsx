@@ -674,6 +674,7 @@ export function SystemSettings({ active }: { active: boolean }) {
   if (!active) return null
 
   const m = captcha.captcha_method
+  const supportsAtRefreshMode = ["extension", "browser", "personal", "remote_browser"].includes(m)
   const endUserWorkers = extensionWorkers.filter((w) => w.managed_api_key_id !== null)
   const dedicatedWorkers = extensionWorkers.filter(
     (w) => w.managed_api_key_id === null && (w.dedicated_worker_id != null || w.dedicated_token_id != null)
@@ -754,6 +755,7 @@ export function SystemSettings({ active }: { active: boolean }) {
         </CardContent>
       </Card>
 
+      {supportsAtRefreshMode ? (
       <Card className="lg:col-span-2">
         <CardHeader>
           <CardTitle>Proxy</CardTitle>
@@ -790,6 +792,7 @@ export function SystemSettings({ active }: { active: boolean }) {
           </p>
         </CardContent>
       </Card>
+      ) : null}
 
       <Card>
         <CardHeader>
@@ -1137,62 +1140,83 @@ export function SystemSettings({ active }: { active: boolean }) {
                 />
               </div>
             </div>
-            <div className="flex items-center gap-2">
-              <Switch
-                checked={captcha.session_refresh_scheduler_enabled}
-                onCheckedChange={(v) => setCaptcha((c) => ({ ...c, session_refresh_scheduler_enabled: v }))}
-              />
-              <Label>Enable scheduled auto refresh</Label>
-            </div>
-            {captcha.session_refresh_scheduler_enabled ? (
-              <div className="grid grid-cols-3 gap-2">
-                <div>
-                  <Label>Interval (min)</Label>
-                  <Input
-                    type="number"
-                    min={1}
-                    value={captcha.session_refresh_scheduler_interval_minutes}
-                    onChange={(e) =>
-                      setCaptcha((c) => ({
-                        ...c,
-                        session_refresh_scheduler_interval_minutes: parseInt(e.target.value, 10) || 30,
-                      }))
-                    }
-                  />
-                </div>
-                <div>
-                  <Label>Batch size</Label>
-                  <Input
-                    type="number"
-                    min={1}
-                    value={captcha.session_refresh_scheduler_batch_size}
-                    onChange={(e) =>
-                      setCaptcha((c) => ({
-                        ...c,
-                        session_refresh_scheduler_batch_size: parseInt(e.target.value, 10) || 10,
-                      }))
-                    }
-                  />
-                </div>
-                <div>
-                  <Label>Expiring window (min)</Label>
-                  <Input
-                    type="number"
-                    min={1}
-                    value={captcha.session_refresh_scheduler_only_expiring_within_minutes}
-                    onChange={(e) =>
-                      setCaptcha((c) => ({
-                        ...c,
-                        session_refresh_scheduler_only_expiring_within_minutes: parseInt(e.target.value, 10) || 60,
-                      }))
-                    }
-                  />
-                </div>
-              </div>
-            ) : null}
           </CardContent>
         </Card>
       ) : null}
+
+      <Card className="lg:col-span-2">
+        <CardHeader>
+          <CardTitle>AT auto refresh scheduler</CardTitle>
+          <CardDescription>
+            Background server loop that refreshes near-expiry tokens automatically. Works for extension mode and other
+            captcha modes using the same AT refresh path.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <div className="flex items-center gap-2">
+            <Switch
+              checked={captcha.session_refresh_scheduler_enabled}
+              onCheckedChange={(v) => setCaptcha((c) => ({ ...c, session_refresh_scheduler_enabled: v }))}
+            />
+            <Label>Enable scheduled auto refresh</Label>
+          </div>
+          {captcha.session_refresh_scheduler_enabled ? (
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+              <div>
+                <Label>Interval (min)</Label>
+                <Input
+                  type="number"
+                  min={1}
+                  value={captcha.session_refresh_scheduler_interval_minutes}
+                  onChange={(e) =>
+                    setCaptcha((c) => ({
+                      ...c,
+                      session_refresh_scheduler_interval_minutes: parseInt(e.target.value, 10) || 30,
+                    }))
+                  }
+                />
+              </div>
+              <div>
+                <Label>Batch size</Label>
+                <Input
+                  type="number"
+                  min={1}
+                  value={captcha.session_refresh_scheduler_batch_size}
+                  onChange={(e) =>
+                    setCaptcha((c) => ({
+                      ...c,
+                      session_refresh_scheduler_batch_size: parseInt(e.target.value, 10) || 10,
+                    }))
+                  }
+                />
+              </div>
+              <div>
+                <Label>Expiring window (min)</Label>
+                <Input
+                  type="number"
+                  min={1}
+                  value={captcha.session_refresh_scheduler_only_expiring_within_minutes}
+                  onChange={(e) =>
+                    setCaptcha((c) => ({
+                      ...c,
+                      session_refresh_scheduler_only_expiring_within_minutes: parseInt(e.target.value, 10) || 60,
+                    }))
+                  }
+                />
+              </div>
+            </div>
+          ) : (
+            <p className="text-xs text-muted-foreground">
+              Scheduler is disabled. Enable it to run periodic automatic AT refresh checks in the server background.
+            </p>
+          )}
+          <div>
+            <Button onClick={saveCaptcha} disabled={busy}>
+              Save refresh scheduler settings
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
 
       {m === "extension" ? (
         <Card className="lg:col-span-2">
