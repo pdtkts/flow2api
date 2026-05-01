@@ -17,7 +17,8 @@ from pathlib import Path
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
-from ..core.auth import AuthManager, verify_api_key_flexible
+from ..core import auth as auth_core
+from ..core.auth import verify_api_key_flexible
 from ..core.api_key_manager import AuthContext
 from ..core.logger import debug_logger
 from ..core.account_tiers import normalize_user_paygate_tier, supports_model_for_tier
@@ -1945,15 +1946,40 @@ async def captcha_websocket_endpoint(websocket: WebSocket):
         auth_header = websocket.headers.get("authorization", "")
         if auth_header.lower().startswith("bearer "):
             api_key = auth_header[7:].strip()
-    if not api_key or not AuthManager.verify_api_key(api_key):
+    if not api_key:
         await websocket.accept()
-        await websocket.close(code=1008, reason="Invalid API key")
+        await websocket.close(code=1008, reason="Missing API key")
+        return
+
+    if auth_core.api_key_manager is None:
+        await websocket.accept()
+        await websocket.close(code=1011, reason="API key manager unavailable")
+        return
+
+    try:
+        auth_ctx = await auth_core.api_key_manager.authenticate(
+            api_key,
+            endpoint="/captcha_ws",
+            require_assignment=False,
+        )
+    except PermissionError as exc:
+        await websocket.accept()
+        await websocket.close(code=1008, reason=str(exc) or "Invalid API key")
+        return
+    except RuntimeError as exc:
+        await websocket.accept()
+        await websocket.close(code=1013, reason=str(exc) or "Rate limited")
+        return
+
+    if auth_ctx.is_legacy or auth_ctx.key_id is None:
+        await websocket.accept()
+        await websocket.close(code=1008, reason="Managed API key required")
         return
 
     service = await ExtensionCaptchaService.get_instance(
         db=(generation_handler.db if generation_handler is not None else None)
     )
-    await service.connect(websocket)
+    await service.connect(websocket, authenticated_managed_api_key_id=int(auth_ctx.key_id))
     try:
         while True:
             data = await websocket.receive_text()

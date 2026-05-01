@@ -2,8 +2,7 @@ const DEFAULT_SETTINGS = {
   serverUrl: "ws://127.0.0.1:8000/captcha_ws",
   apiKey: "",
   routeKey: "",
-  clientLabel: "",
-  managedApiKeyId: ""
+  clientLabel: ""
 };
 
 const $ = (id) => document.getElementById(id);
@@ -13,8 +12,7 @@ function normalizeSettings(values) {
     serverUrl: (values.serverUrl || DEFAULT_SETTINGS.serverUrl).trim(),
     apiKey: (values.apiKey || "").trim(),
     routeKey: (values.routeKey || "").trim(),
-    clientLabel: (values.clientLabel || "").trim(),
-    managedApiKeyId: (values.managedApiKeyId || "").trim()
+    clientLabel: (values.clientLabel || "").trim()
   };
 }
 
@@ -40,7 +38,6 @@ function loadSettings() {
     $("apiKey").value = settings.apiKey;
     $("routeKey").value = settings.routeKey;
     $("clientLabel").value = settings.clientLabel;
-    $("managedApiKeyId").value = settings.managedApiKeyId;
   });
 }
 
@@ -49,8 +46,7 @@ function saveSettings() {
     serverUrl: $("serverUrl").value,
     apiKey: $("apiKey").value,
     routeKey: $("routeKey").value,
-    clientLabel: $("clientLabel").value,
-    managedApiKeyId: $("managedApiKeyId").value
+    clientLabel: $("clientLabel").value
   });
 
   if (!isValidWsUrl(settings.serverUrl)) {
@@ -61,19 +57,6 @@ function saveSettings() {
     setStatus("API Key cannot be empty.", true);
     return;
   }
-  if (!settings.managedApiKeyId) {
-    setStatus("Managed API Key ID is required for per-key isolation.", true);
-    return;
-  }
-  if (!/^\d+$/.test(settings.managedApiKeyId)) {
-    setStatus("Managed API Key ID must be numeric.", true);
-    return;
-  }
-  if (parseInt(settings.managedApiKeyId, 10) <= 0) {
-    setStatus("Managed API Key ID must be a positive integer.", true);
-    return;
-  }
-
   chrome.storage.local.set(settings, () => {
     if (chrome.runtime.lastError) {
       setStatus(`Save failed: ${chrome.runtime.lastError.message}`, true);
@@ -91,13 +74,12 @@ function updateRuntimeStatus(state) {
   }
   const ws = state.wsStatus || "unknown";
   const route = state.routeKey || "(empty)";
-  const claimedManaged = state.claimedManagedApiKeyId || "-";
   const managed = state.managedApiKeyId || "-";
   const ack = state.lastRegisterStatus || "unknown";
   const source = state.bindingSource || "unknown";
   const ackError = state.lastRegisterError ? `, register_error=${state.lastRegisterError}` : "";
   const last = state.lastError ? `, error=${state.lastError}` : "";
-  el.textContent = `Connection status: ${ws}, route=${route}, claimed_key=${claimedManaged}, resolved_key=${managed}, binding=${source}, register=${ack}${ackError}${last}`;
+  el.textContent = `Connection status: ${ws}, route=${route}, managed_key=${managed}, binding=${source}, register=${ack}${ackError}${last}`;
 }
 
 function refreshRuntimeStatus() {

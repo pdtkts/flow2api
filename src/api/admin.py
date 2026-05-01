@@ -1884,7 +1884,7 @@ async def list_extension_workers(token: str = Depends(verify_admin_token)):
     return {
         "success": True,
         "mode": "strict_managed_key_isolation",
-        "note": "Requests only use workers bound to the same managed API key/route and fail after queue timeout when missing.",
+        "note": "Requests only use workers bound to the same managed API key/route (managed key resolved from worker API key) and fail after queue timeout when missing.",
         "workers": active_workers,
         "bindings": bindings,
         "queue_stats": queue_stats,

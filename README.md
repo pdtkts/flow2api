@@ -50,9 +50,8 @@ When using captcha method `extension`, Flow2API keeps one global captcha mode bu
 2. Set the token/account `extension_route_key` to a unique value (for example `9223`).
 3. In Chrome extension options, set:
    - backend API key
-   - managed API key ID (required)
    - same route key as the token/account
-4. Confirm in admin extension workers page (`/api/admin/extension/workers`) that route and managed key binding match.
+4. Confirm in admin extension workers page (`/api/admin/extension/workers`) that route and managed key binding match. The server resolves managed key ID from the API key on connect.
 
 If a managed key has no matching extension worker online, requests wait up to `extension_queue_wait_timeout_seconds` and then fail (no gateway fallback).
 

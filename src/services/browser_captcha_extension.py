@@ -98,21 +98,32 @@ class ExtensionCaptchaService:
         conn.managed_api_key_id = persisted_key
         conn.binding_source = source if source != "none" else ("claimed" if claimed else "none")
 
-    async def connect(self, websocket: WebSocket):
+    async def connect(
+        self,
+        websocket: WebSocket,
+        *,
+        authenticated_managed_api_key_id: Optional[int] = None,
+    ):
         await websocket.accept()
         conn = ExtensionConnection(
             websocket=websocket,
             route_key=(websocket.query_params.get("route_key") or "").strip(),
             client_label=(websocket.query_params.get("client_label") or "").strip(),
         )
-        claimed_managed_key = websocket.query_params.get("managed_api_key_id")
-        try:
-            await self._apply_route_binding_to_connection(
-                conn,
-                claimed_managed_api_key_id=claimed_managed_key,
-            )
-        except Exception as exc:
-            debug_logger.log_warning(f"[Extension Captcha] Ignoring invalid managed key claim on connect: {exc}")
+        if authenticated_managed_api_key_id is not None:
+            conn.managed_api_key_id = int(authenticated_managed_api_key_id)
+            conn.binding_source = "authenticated"
+            if conn.route_key and self.db and hasattr(self.db, "upsert_extension_worker_binding"):
+                await self.db.upsert_extension_worker_binding(conn.route_key, conn.managed_api_key_id)
+        else:
+            claimed_managed_key = websocket.query_params.get("managed_api_key_id")
+            try:
+                await self._apply_route_binding_to_connection(
+                    conn,
+                    claimed_managed_api_key_id=claimed_managed_key,
+                )
+            except Exception as exc:
+                debug_logger.log_warning(f"[Extension Captcha] Ignoring invalid managed key claim on connect: {exc}")
         self.active_connections.append(conn)
         debug_logger.log_info(
             f"[Extension Captcha] Client connected. Total: {len(self.active_connections)}, "
@@ -278,14 +289,24 @@ class ExtensionCaptchaService:
                     conn.route_key = (payload.get("route_key") or conn.route_key or "").strip()
                     conn.client_label = (payload.get("client_label") or conn.client_label or "").strip()
                     register_error = None
-                    try:
-                        await self._apply_route_binding_to_connection(
-                            conn,
-                            claimed_managed_api_key_id=payload.get("managed_api_key_id"),
-                        )
-                    except Exception as exc:
-                        register_error = str(exc)
-                        debug_logger.log_warning(f"[Extension Captcha] Invalid managed key claim: {register_error}")
+                    if conn.binding_source == "authenticated" and conn.managed_api_key_id is not None:
+                        try:
+                            if conn.route_key and self.db and hasattr(self.db, "upsert_extension_worker_binding"):
+                                await self.db.upsert_extension_worker_binding(conn.route_key, conn.managed_api_key_id)
+                        except Exception as exc:
+                            register_error = str(exc)
+                            debug_logger.log_warning(
+                                f"[Extension Captcha] Failed to persist authenticated route binding: {register_error}"
+                            )
+                    else:
+                        try:
+                            await self._apply_route_binding_to_connection(
+                                conn,
+                                claimed_managed_api_key_id=payload.get("managed_api_key_id"),
+                            )
+                        except Exception as exc:
+                            register_error = str(exc)
+                            debug_logger.log_warning(f"[Extension Captcha] Invalid managed key claim: {register_error}")
                     debug_logger.log_info(
                         f"[Extension Captcha] Client registered route_key={conn.route_key or '-'}, "
                         f"label={conn.client_label or '-'}, "

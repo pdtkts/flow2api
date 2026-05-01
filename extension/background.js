@@ -6,25 +6,17 @@ const DEFAULT_SETTINGS = {
     serverUrl: "ws://127.0.0.1:8000/captcha_ws",
     apiKey: "",
     routeKey: "",
-    clientLabel: "",
-    managedApiKeyId: ""
+    clientLabel: ""
 };
 const runtimeState = {
     wsStatus: "idle",
     routeKey: "",
-    claimedManagedApiKeyId: "",
     managedApiKeyId: "",
     bindingSource: "",
     lastRegisterStatus: "never",
     lastRegisterError: "",
     lastError: ""
 };
-
-function normalizeManagedApiKeyId(value) {
-    const text = String(value || "").trim();
-    if (!text) return "";
-    return /^\d+$/.test(text) ? text : "";
-}
 
 function getSettings() {
     return new Promise((resolve) => {
@@ -34,7 +26,6 @@ function getSettings() {
                 apiKey: (stored.apiKey || "").trim(),
                 routeKey: (stored.routeKey || "").trim(),
                 clientLabel: (stored.clientLabel || "").trim(),
-                managedApiKeyId: normalizeManagedApiKeyId(stored.managedApiKeyId || "")
             });
         });
     });
@@ -94,8 +85,7 @@ async function connectWS() {
 
     const settings = await getSettings();
     runtimeState.routeKey = settings.routeKey;
-    runtimeState.claimedManagedApiKeyId = settings.managedApiKeyId;
-    runtimeState.managedApiKeyId = settings.managedApiKeyId;
+    runtimeState.managedApiKeyId = "";
     runtimeState.bindingSource = "";
     runtimeState.wsStatus = "connecting";
     runtimeState.lastRegisterStatus = "pending";
@@ -111,10 +101,6 @@ async function connectWS() {
     if (settings.clientLabel) {
         url.searchParams.set("client_label", settings.clientLabel);
     }
-    if (settings.managedApiKeyId) {
-        url.searchParams.set("managed_api_key_id", settings.managedApiKeyId);
-    }
-
     ws = new WebSocket(url.toString());
 
     ws.onopen = () => {
@@ -124,7 +110,6 @@ async function connectWS() {
             type: "register",
             route_key: settings.routeKey,
             client_label: settings.clientLabel,
-            managed_api_key_id: settings.managedApiKeyId || undefined
         }));
         if (heartbeatInterval) clearInterval(heartbeatInterval);
         heartbeatInterval = setInterval(() => {
@@ -150,7 +135,7 @@ async function connectWS() {
             runtimeState.lastRegisterStatus = ackStatus;
             runtimeState.lastRegisterError = ackError;
             runtimeState.bindingSource = String(data.binding_source || "");
-            runtimeState.managedApiKeyId = String(data.managed_api_key_id || settings.managedApiKeyId || "");
+            runtimeState.managedApiKeyId = String(data.managed_api_key_id || "");
             if (ackStatus === "error") {
                 runtimeState.wsStatus = "open_register_error";
                 runtimeState.lastError = ackError || "register_failed";
@@ -295,7 +280,7 @@ async function handleGetToken(data) {
 
 chrome.storage.onChanged.addListener((changes, areaName) => {
     if (areaName !== "local") return;
-    if (changes.routeKey || changes.serverUrl || changes.clientLabel || changes.apiKey || changes.managedApiKeyId) {
+    if (changes.routeKey || changes.serverUrl || changes.clientLabel || changes.apiKey) {
         console.log("[Flow2API] Extension settings changed, reconnecting WebSocket...");
         closeSocket();
         connectWS();

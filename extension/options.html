@@ -77,12 +77,9 @@
     <div class="panel">
       <h1>Flow2API Captcha Worker</h1>
       <p>
-        This worker is isolated per managed API key. Use the same managed key ID and route key from the admin panel
-        so only that API user can use this browser for captcha solving.
+        This worker is isolated per managed API key. Paste the managed API key and use the same route key from the
+        admin panel so only that API user can use this browser for captcha solving.
       </p>
-
-      <label for="managedApiKeyId">Managed API Key ID</label>
-      <input id="managedApiKeyId" type="text" placeholder="Required, e.g. 12">
 
       <label for="routeKey">Route Key</label>
       <input id="routeKey" type="text" placeholder="e.g. 9223">
@@ -102,8 +99,9 @@
       <div class="status" id="status"></div>
       <div class="hint" id="runtimeStatus">Connection status: unknown</div>
       <div class="hint">
-        Save checklist: set API Key, set managed key ID, and use the same <code>Route Key</code> as the token/account.
-        If this worker is offline, requests for that key fail after queue timeout (no gateway fallback).
+        Save checklist: set API Key and use the same <code>Route Key</code> as the token/account. The server resolves
+        managed key ID from your API key. If this worker is offline, requests for that key fail after queue timeout
+        (no gateway fallback).
       </div>
     </div>
   </div>

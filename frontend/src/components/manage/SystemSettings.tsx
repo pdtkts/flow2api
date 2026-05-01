@@ -877,7 +877,7 @@ export function SystemSettings({ active }: { active: boolean }) {
               <p className="text-xs text-muted-foreground mt-1">
                 Uses your Chrome extension connected to <code className="rounded bg-muted px-1">/captcha_ws</code> instead
                 of headed Playwright/Chromium. Captcha method remains global, but workers are isolated per managed API
-                key via route-key bindings.
+                key via route-key bindings, and managed key identity is resolved from the extension API key.
               </p>
             ) : null}
           </div>
