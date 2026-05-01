@@ -1032,7 +1032,7 @@ export function SystemSettings({ active }: { active: boolean }) {
         </CardContent>
       </Card>
 
-      {m === "browser" || m === "remote_browser" || m === "extension" ? (
+      {m === "browser" || m === "remote_browser" ? (
         <Card className="lg:col-span-2">
           <CardHeader>
             <CardTitle>Session refresh (ST warmup)</CardTitle>
