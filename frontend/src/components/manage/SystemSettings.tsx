@@ -104,6 +104,8 @@ type ExtensionWorkerRow = {
   managed_api_key_id: number | null
   binding_source: string
   connected_at: number
+  dedicated_worker_id?: number | null
+  dedicated_token_id?: number | null
 }
 
 type ExtensionBindingRow = {
@@ -672,6 +674,10 @@ export function SystemSettings({ active }: { active: boolean }) {
   if (!active) return null
 
   const m = captcha.captcha_method
+  const endUserWorkers = extensionWorkers.filter((w) => w.managed_api_key_id !== null)
+  const dedicatedWorkers = extensionWorkers.filter(
+    (w) => w.managed_api_key_id === null && (w.dedicated_worker_id != null || w.dedicated_token_id != null)
+  )
 
   return (
     <div className="grid gap-6 lg:grid-cols-2">
@@ -1231,37 +1237,79 @@ export function SystemSettings({ active }: { active: boolean }) {
               <p className="text-xs text-muted-foreground">
                 Worker ID is unique per connection session and changes on reconnect.
               </p>
-              <div className="rounded-md border">
-                <div className="grid grid-cols-7 gap-2 px-3 py-2 text-xs font-medium border-b">
-                  <span>Worker ID</span>
-                  <span>Route key</span>
-                  <span>Label</span>
-                  <span>Managed key</span>
-                  <span>Source</span>
-                  <span>Connected at</span>
-                  <span>Action</span>
-                </div>
-                {(extensionWorkers.length ? extensionWorkers : []).map((w) => (
-                  <div key={w.worker_session_id} className="grid grid-cols-7 gap-2 px-3 py-2 text-xs border-b last:border-b-0 items-start">
-                    <span className="font-mono min-w-0 break-all whitespace-normal">{w.worker_session_id || "-"}</span>
-                    <span className="font-mono min-w-0 break-all whitespace-normal">{w.route_key || "(empty)"}</span>
-                    <span className="min-w-0 break-words whitespace-normal">{w.client_label || "-"}</span>
-                    <span>{w.managed_api_key_id ?? "-"}</span>
-                    <span className="min-w-0 break-words whitespace-normal">{w.binding_source || "-"}</span>
-                    <span>{w.connected_at ? new Date(w.connected_at * 1000).toLocaleTimeString() : "-"}</span>
-                    <span>
-                      <Button
-                        size="sm"
-                        variant="destructive"
-                        onClick={() => killExtensionWorker(w.worker_session_id)}
-                        disabled={busy}
-                      >
-                        Kill
-                      </Button>
-                    </span>
+              <div className="space-y-3">
+                <div className="rounded-md border">
+                  <div className="px-3 py-2 text-xs font-medium border-b bg-muted/30">End user workers (managed API key)</div>
+                  <div className="grid grid-cols-7 gap-2 px-3 py-2 text-xs font-medium border-b">
+                    <span>Worker ID</span>
+                    <span>Route key</span>
+                    <span>Label</span>
+                    <span>Managed key</span>
+                    <span>Source</span>
+                    <span>Connected at</span>
+                    <span>Action</span>
                   </div>
-                ))}
-                {extensionWorkers.length === 0 ? <div className="px-3 py-3 text-xs text-muted-foreground">No active workers</div> : null}
+                  {endUserWorkers.map((w) => (
+                    <div key={w.worker_session_id} className="grid grid-cols-7 gap-2 px-3 py-2 text-xs border-b last:border-b-0 items-start">
+                      <span className="font-mono min-w-0 break-all whitespace-normal">{w.worker_session_id || "-"}</span>
+                      <span className="font-mono min-w-0 break-all whitespace-normal">{w.route_key || "(empty)"}</span>
+                      <span className="min-w-0 break-words whitespace-normal">{w.client_label || "-"}</span>
+                      <span>{w.managed_api_key_id ?? "-"}</span>
+                      <span className="min-w-0 break-words whitespace-normal">{w.binding_source || "-"}</span>
+                      <span>{w.connected_at ? new Date(w.connected_at * 1000).toLocaleTimeString() : "-"}</span>
+                      <span>
+                        <Button
+                          size="sm"
+                          variant="destructive"
+                          onClick={() => killExtensionWorker(w.worker_session_id)}
+                          disabled={busy}
+                        >
+                          Kill
+                        </Button>
+                      </span>
+                    </div>
+                  ))}
+                  {endUserWorkers.length === 0 ? (
+                    <div className="px-3 py-3 text-xs text-muted-foreground">No end user workers</div>
+                  ) : null}
+                </div>
+                <div className="rounded-md border">
+                  <div className="px-3 py-2 text-xs font-medium border-b bg-muted/30">Worker mode (dedicated registration key)</div>
+                  <div className="grid grid-cols-8 gap-2 px-3 py-2 text-xs font-medium border-b">
+                    <span>Worker ID</span>
+                    <span>Dedicated worker</span>
+                    <span>Dedicated token</span>
+                    <span>Route key</span>
+                    <span>Label</span>
+                    <span>Source</span>
+                    <span>Connected at</span>
+                    <span>Action</span>
+                  </div>
+                  {dedicatedWorkers.map((w) => (
+                    <div key={w.worker_session_id} className="grid grid-cols-8 gap-2 px-3 py-2 text-xs border-b last:border-b-0 items-start">
+                      <span className="font-mono min-w-0 break-all whitespace-normal">{w.worker_session_id || "-"}</span>
+                      <span>{w.dedicated_worker_id ?? "-"}</span>
+                      <span>{w.dedicated_token_id ?? "-"}</span>
+                      <span className="font-mono min-w-0 break-all whitespace-normal">{w.route_key || "(empty)"}</span>
+                      <span className="min-w-0 break-words whitespace-normal">{w.client_label || "-"}</span>
+                      <span className="min-w-0 break-words whitespace-normal">{w.binding_source || "-"}</span>
+                      <span>{w.connected_at ? new Date(w.connected_at * 1000).toLocaleTimeString() : "-"}</span>
+                      <span>
+                        <Button
+                          size="sm"
+                          variant="destructive"
+                          onClick={() => killExtensionWorker(w.worker_session_id)}
+                          disabled={busy}
+                        >
+                          Kill
+                        </Button>
+                      </span>
+                    </div>
+                  ))}
+                  {dedicatedWorkers.length === 0 ? (
+                    <div className="px-3 py-3 text-xs text-muted-foreground">No worker-mode connections</div>
+                  ) : null}
+                </div>
               </div>
             </div>
 
