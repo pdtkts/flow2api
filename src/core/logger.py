@@ -1,6 +1,7 @@
 """Debug logger module for detailed API request/response logging"""
 import json
 import logging
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Any, Optional
@@ -30,15 +31,21 @@ class DebugLogger:
         )
         file_handler.setLevel(logging.DEBUG)
 
+        # Create stdout handler (for docker logs / console)
+        stream_handler = logging.StreamHandler(sys.stdout)
+        stream_handler.setLevel(logging.DEBUG)
+
         # Create formatter
         formatter = logging.Formatter(
             '%(message)s',
             datefmt='%Y-%m-%d %H:%M:%S'
         )
         file_handler.setFormatter(formatter)
+        stream_handler.setFormatter(formatter)
 
         # Add handler
         self.logger.addHandler(file_handler)
+        self.logger.addHandler(stream_handler)
 
         # Prevent propagation to root logger
         self.logger.propagate = False
