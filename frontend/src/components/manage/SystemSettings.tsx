@@ -951,9 +951,6 @@ export function SystemSettings({ active }: { active: boolean }) {
                 />
                 <Label>Fallback to gateway on browser failure</Label>
               </div>
-              <p className="text-xs text-muted-foreground">
-                Uses remote gateway config (`remote_browser_base_url` and `remote_browser_api_key`) when local headed solve fails.
-              </p>
               <div className="flex items-center gap-2">
                 <Switch
                   checked={captcha.browser_proxy_enabled}
