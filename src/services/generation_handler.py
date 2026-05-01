@@ -821,6 +821,7 @@ class GenerationHandler:
         stream: bool = False,
         base_url_override: Optional[str] = None,
         allowed_token_ids: Optional[set[int]] = None,
+        selection_context: Optional[Dict[str, Any]] = None,
         api_key_id: Optional[int] = None,
         requested_project_id: Optional[str] = None,
         video_media_id: Optional[str] = None,
@@ -897,6 +898,9 @@ class GenerationHandler:
         debug_logger.log_info(f"[GENERATION] 正在选择可用Token...")
         token_select_started_at = time.time()
         token_selection_diagnostics: Dict[str, Any] = {}
+        allowlist_filter_reason_type = None
+        if isinstance(selection_context, dict):
+            allowlist_filter_reason_type = selection_context.get("allowlist_filter_reason_type")
 
         if generation_type == "image":
             token = await self.load_balancer.select_token(
@@ -906,6 +910,7 @@ class GenerationHandler:
                 enforce_concurrency_filter=False,
                 track_pending=True,
                 allowed_token_ids=allowed_token_ids,
+                allowlist_filter_reason_type=allowlist_filter_reason_type,
                 diagnostics_sink=token_selection_diagnostics,
             )
         else:
@@ -916,11 +921,14 @@ class GenerationHandler:
                 enforce_concurrency_filter=False,
                 track_pending=True,
                 allowed_token_ids=allowed_token_ids,
+                allowlist_filter_reason_type=allowlist_filter_reason_type,
                 diagnostics_sink=token_selection_diagnostics,
             )
         perf_trace["token_select_ms"] = int((time.time() - token_select_started_at) * 1000)
         if token_selection_diagnostics:
             perf_trace["token_selection_diagnostics"] = token_selection_diagnostics
+        if isinstance(selection_context, dict) and selection_context:
+            perf_trace["selection_context"] = dict(selection_context)
 
         if not token:
             error_msg = None

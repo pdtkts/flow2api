@@ -622,6 +622,7 @@ async def _collect_non_stream_result(
     normalized: NormalizedGenerationRequest,
     base_url_override: Optional[str] = None,
     allowed_token_ids: Optional[set[int]] = None,
+    selection_context: Optional[Dict[str, Any]] = None,
     api_key_id: Optional[int] = None,
 ) -> str:
     handler = _ensure_generation_handler()
@@ -633,6 +634,7 @@ async def _collect_non_stream_result(
         stream=False,
         base_url_override=base_url_override,
         allowed_token_ids=allowed_token_ids,
+        selection_context=selection_context,
         api_key_id=api_key_id,
         requested_project_id=normalized.project_id,
         video_media_id=normalized.video_media_id,
@@ -835,6 +837,7 @@ async def _run_async_generation_task(
     normalized: NormalizedGenerationRequest,
     base_url_override: Optional[str],
     allowed_token_ids: Optional[set[int]],
+    selection_context: Optional[Dict[str, Any]],
     api_key_id: Optional[int],
 ) -> None:
     handler = _ensure_generation_handler()
@@ -843,6 +846,7 @@ async def _run_async_generation_task(
             normalized,
             base_url_override,
             allowed_token_ids,
+            selection_context,
             api_key_id,
         )
         payload = _enrich_payload_with_direct_url(_parse_handler_result(raw_result))
@@ -1064,6 +1068,7 @@ async def _iterate_openai_stream(
     normalized: NormalizedGenerationRequest,
     base_url_override: Optional[str] = None,
     allowed_token_ids: Optional[set[int]] = None,
+    selection_context: Optional[Dict[str, Any]] = None,
     api_key_id: Optional[int] = None,
     project_id: Optional[str] = None,
 ):
@@ -1075,6 +1080,7 @@ async def _iterate_openai_stream(
         stream=True,
         base_url_override=base_url_override,
         allowed_token_ids=allowed_token_ids,
+        selection_context=selection_context,
         api_key_id=api_key_id,
         requested_project_id=normalized.project_id,
         video_media_id=normalized.video_media_id,
@@ -1095,6 +1101,7 @@ async def _iterate_gemini_stream(
     response_model: str,
     base_url_override: Optional[str] = None,
     allowed_token_ids: Optional[set[int]] = None,
+    selection_context: Optional[Dict[str, Any]] = None,
     api_key_id: Optional[int] = None,
     project_id: Optional[str] = None,
 ):
@@ -1106,6 +1113,7 @@ async def _iterate_gemini_stream(
         stream=True,
         base_url_override=base_url_override,
         allowed_token_ids=allowed_token_ids,
+        selection_context=selection_context,
         api_key_id=api_key_id,
         requested_project_id=normalized.project_id,
         video_media_id=normalized.video_media_id,
@@ -1154,6 +1162,24 @@ def _resolve_allowed_token_ids(auth_ctx: AuthContext) -> Optional[set[int]]:
     if not auth_ctx.is_legacy and auth_ctx.allowed_accounts:
         return {int(x) for x in auth_ctx.allowed_accounts}
     return None
+
+
+def _build_selection_context(
+    auth_ctx: AuthContext,
+    allowed_token_ids: Optional[Set[int]],
+    selected_project_id: Optional[str],
+) -> Dict[str, Any]:
+    key_allowed_accounts = sorted(int(x) for x in (auth_ctx.allowed_accounts or set()))
+    effective_allowed = sorted(int(x) for x in (allowed_token_ids or set()))
+    reason_type = "api_key_assignment"
+    if effective_allowed and len(effective_allowed) < len(key_allowed_accounts):
+        reason_type = "project_pin"
+    return {
+        "allowlist_filter_reason_type": reason_type,
+        "key_allowed_account_ids": key_allowed_accounts,
+        "effective_allowed_token_ids": effective_allowed,
+        "selected_project_id": (selected_project_id or "").strip() or None,
+    }
 
 
 async def _resolve_project_pin(
@@ -1673,6 +1699,7 @@ async def create_chat_completion(
             normalized.model,
         )
         normalized = replace(normalized, project_id=selected_project_id)
+        selection_context = _build_selection_context(auth_ctx, allowed_token_ids, selected_project_id)
 
         if request.stream:
             return StreamingResponse(
@@ -1680,6 +1707,7 @@ async def create_chat_completion(
                     normalized,
                     request_base_url,
                     allowed_token_ids,
+                    selection_context,
                     api_key_id=auth_ctx.key_id,
                     project_id=selected_project_id,
                 ),
@@ -1697,6 +1725,7 @@ async def create_chat_completion(
                     normalized,
                     request_base_url,
                     allowed_token_ids,
+                    selection_context,
                     api_key_id=auth_ctx.key_id,
                 )
             )
@@ -1737,6 +1766,7 @@ async def create_chat_completion_async(
             normalized.model,
         )
         normalized = replace(normalized, project_id=selected_project_id)
+        selection_context = _build_selection_context(auth_ctx, allowed_token_ids, selected_project_id)
 
         handler = _ensure_generation_handler()
         selected_token_id = min(allowed_token_ids) if allowed_token_ids else 0
@@ -1762,6 +1792,7 @@ async def create_chat_completion_async(
             normalized=normalized,
             base_url_override=request_base_url,
             allowed_token_ids=allowed_token_ids,
+            selection_context=selection_context,
             api_key_id=auth_ctx.key_id,
         )
         return JSONResponse(
@@ -1840,6 +1871,7 @@ async def generate_content(
             normalized.model,
         )
         normalized = replace(normalized, project_id=selected_project_id)
+        selection_context = _build_selection_context(auth_ctx, allowed_token_ids, selected_project_id)
 
         payload = _enrich_payload_with_direct_url(
             _parse_handler_result(
@@ -1847,6 +1879,7 @@ async def generate_content(
                     normalized,
                     request_base_url,
                     allowed_token_ids,
+                    selection_context,
                     api_key_id=auth_ctx.key_id,
                 )
             )
@@ -1906,6 +1939,7 @@ async def stream_generate_content(
             normalized.model,
         )
         normalized = replace(normalized, project_id=selected_project_id)
+        selection_context = _build_selection_context(auth_ctx, allowed_token_ids, selected_project_id)
 
         return StreamingResponse(
             _iterate_gemini_stream(
@@ -1913,6 +1947,7 @@ async def stream_generate_content(
                 normalized.model,
                 request_base_url,
                 allowed_token_ids,
+                selection_context,
                 api_key_id=auth_ctx.key_id,
                 project_id=selected_project_id,
             ),

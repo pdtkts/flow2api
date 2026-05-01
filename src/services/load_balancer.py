@@ -48,6 +48,11 @@ class LoadBalancer:
     def build_diagnostics_reason(self, diagnostics: Optional[Dict[str, Any]]) -> Optional[str]:
         if not diagnostics:
             return None
+        allowlist_filter_reason_type = str(diagnostics.get("allowlist_filter_reason_type") or "").strip()
+        if allowlist_filter_reason_type == "project_pin":
+            allowed_count = int(diagnostics.get("allowed_token_ids_count") or 0)
+            if allowed_count > 0:
+                return "当前请求已绑定到指定项目所属账号，其他账号不会参与本次调度"
         priority_summary = diagnostics.get("post_check_failure_summary") or diagnostics.get("filtered_reason_summary") or []
         if not isinstance(priority_summary, list) or not priority_summary:
             return None
@@ -181,6 +186,7 @@ class LoadBalancer:
         enforce_concurrency_filter: bool = True,
         track_pending: bool = False,
         allowed_token_ids: Optional[Set[int]] = None,
+        allowlist_filter_reason_type: Optional[str] = None,
         diagnostics_sink: Optional[Dict[str, Any]] = None,
     ) -> Optional[Token]:
         """
@@ -217,6 +223,11 @@ class LoadBalancer:
             "enforce_concurrency_filter": bool(enforce_concurrency_filter),
             "track_pending": bool(track_pending),
             "total_active_tokens": len(active_tokens),
+            "allowed_token_ids_count": len(allowed_token_ids) if allowed_token_ids is not None else 0,
+            "effective_allowed_token_ids": sorted(int(token_id) for token_id in (allowed_token_ids or set())),
+            "allowlist_filter_reason_type": (allowlist_filter_reason_type or "").strip() or (
+                "project_pin" if allowed_token_ids is not None and len(allowed_token_ids) == 1 else "api_key_assignment"
+            ),
             "filtered_reasons": {},
             "filtered_reason_summary": [],
             "candidate_token_ids": [],
@@ -236,7 +247,10 @@ class LoadBalancer:
 
         for token in active_tokens:
             if allowed_token_ids is not None and token.id not in allowed_token_ids:
-                filtered_reasons[token.id] = "不在 API Key 允许账号列表"
+                if diagnostics["allowlist_filter_reason_type"] == "project_pin":
+                    filtered_reasons[token.id] = "当前请求已绑定项目账号，本账号不参与本次调度"
+                else:
+                    filtered_reasons[token.id] = "不在 API Key 允许账号列表"
                 continue
             normalized_tier = normalize_user_paygate_tier(token.user_paygate_tier)
             if model and not supports_model_for_tier(model, normalized_tier):
