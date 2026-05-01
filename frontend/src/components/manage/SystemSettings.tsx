@@ -1074,13 +1074,6 @@ export function SystemSettings({ active }: { active: boolean }) {
               />
               <Label>Fail AT refresh if ST refresh fails (strict)</Label>
             </div>
-            <div className="flex items-center gap-2">
-              <Switch
-                checked={captcha.session_refresh_local_only}
-                onCheckedChange={(v) => setCaptcha((c) => ({ ...c, session_refresh_local_only: v }))}
-              />
-              <Label>Local-only ST refresh</Label>
-            </div>
             <Label>Warmup URLs (comma separated)</Label>
             <Input
               value={captcha.session_refresh_warmup_urls}
