@@ -972,101 +972,142 @@ export function SystemSettings({ active }: { active: boolean }) {
                 value={captcha.browser_count}
                 onChange={(e) => setCaptcha((c) => ({ ...c, browser_count: parseInt(e.target.value, 10) || 1 }))}
               />
-              <div className="mt-4 border-t pt-3 space-y-2">
-                <Label>Session refresh strategy</Label>
-                <div className="flex items-center gap-2">
-                  <Switch
-                    checked={captcha.session_refresh_enabled}
-                    onCheckedChange={(v) => setCaptcha((c) => ({ ...c, session_refresh_enabled: v }))}
-                  />
-                  <Label>Enable browser session refresh</Label>
-                </div>
-                <div className="flex items-center gap-2">
-                  <Switch
-                    checked={captcha.session_refresh_inject_st_cookie}
-                    onCheckedChange={(v) => setCaptcha((c) => ({ ...c, session_refresh_inject_st_cookie: v }))}
-                  />
-                  <Label>Inject current ST cookie before warmup</Label>
-                </div>
-                <Label>Warmup URLs (comma separated)</Label>
-                <Input
-                  value={captcha.session_refresh_warmup_urls}
-                  onChange={(e) => setCaptcha((c) => ({ ...c, session_refresh_warmup_urls: e.target.value }))}
-                />
-                <div className="grid grid-cols-2 gap-2">
-                  <div>
-                    <Label>Wait per URL (s)</Label>
-                    <Input
-                      type="number"
-                      min={0}
-                      value={captcha.session_refresh_wait_seconds_per_url}
-                      onChange={(e) =>
-                        setCaptcha((c) => ({ ...c, session_refresh_wait_seconds_per_url: parseInt(e.target.value, 10) || 0 }))
-                      }
-                    />
-                  </div>
-                  <div>
-                    <Label>Overall timeout (s)</Label>
-                    <Input
-                      type="number"
-                      min={10}
-                      value={captcha.session_refresh_overall_timeout_seconds}
-                      onChange={(e) =>
-                        setCaptcha((c) => ({ ...c, session_refresh_overall_timeout_seconds: parseInt(e.target.value, 10) || 180 }))
-                      }
-                    />
-                  </div>
-                </div>
-                <div className="flex items-center gap-2">
-                  <Switch
-                    checked={captcha.session_refresh_scheduler_enabled}
-                    onCheckedChange={(v) => setCaptcha((c) => ({ ...c, session_refresh_scheduler_enabled: v }))}
-                  />
-                  <Label>Enable scheduled auto refresh</Label>
-                </div>
-                {captcha.session_refresh_scheduler_enabled ? (
-                  <div className="grid grid-cols-3 gap-2">
-                    <div>
-                      <Label>Interval (min)</Label>
-                      <Input
-                        type="number"
-                        min={1}
-                        value={captcha.session_refresh_scheduler_interval_minutes}
-                        onChange={(e) =>
-                          setCaptcha((c) => ({ ...c, session_refresh_scheduler_interval_minutes: parseInt(e.target.value, 10) || 30 }))
-                        }
-                      />
-                    </div>
-                    <div>
-                      <Label>Batch size</Label>
-                      <Input
-                        type="number"
-                        min={1}
-                        value={captcha.session_refresh_scheduler_batch_size}
-                        onChange={(e) =>
-                          setCaptcha((c) => ({ ...c, session_refresh_scheduler_batch_size: parseInt(e.target.value, 10) || 10 }))
-                        }
-                      />
-                    </div>
-                    <div>
-                      <Label>Expiring window (min)</Label>
-                      <Input
-                        type="number"
-                        min={1}
-                        value={captcha.session_refresh_scheduler_only_expiring_within_minutes}
-                        onChange={(e) =>
-                          setCaptcha((c) => ({
-                            ...c,
-                            session_refresh_scheduler_only_expiring_within_minutes: parseInt(e.target.value, 10) || 60,
-                          }))
-                        }
-                      />
-                    </div>
-                  </div>
-                ) : null}
-              </div>
             </div>
           )}
+          <div className="space-y-2 border rounded-md p-3 border-dashed">
+            <p className="text-sm font-medium">Session refresh (ST warmup)</p>
+            <p className="text-xs text-muted-foreground">
+              Configures local headed Playwright warmup used when refreshing the session token before AT refresh. Applies
+              regardless of which captcha <em>method</em> you use for reCAPTCHA (extension, APIs, etc.).
+            </p>
+            <div className="flex items-center gap-2">
+              <Switch
+                checked={captcha.session_refresh_enabled}
+                onCheckedChange={(v) => setCaptcha((c) => ({ ...c, session_refresh_enabled: v }))}
+              />
+              <Label>Enable session refresh (ST warmup path)</Label>
+            </div>
+            <div className="flex items-center gap-2">
+              <Switch
+                checked={captcha.session_refresh_browser_first}
+                onCheckedChange={(v) => setCaptcha((c) => ({ ...c, session_refresh_browser_first: v }))}
+              />
+              <Label>Browser-first before AT refresh</Label>
+            </div>
+            <div className="flex items-center gap-2">
+              <Switch
+                checked={captcha.session_refresh_inject_st_cookie}
+                onCheckedChange={(v) => setCaptcha((c) => ({ ...c, session_refresh_inject_st_cookie: v }))}
+              />
+              <Label>Inject current ST cookie before warmup</Label>
+            </div>
+            <div className="flex items-center gap-2">
+              <Switch
+                checked={captcha.session_refresh_update_st_from_cookie}
+                onCheckedChange={(v) => setCaptcha((c) => ({ ...c, session_refresh_update_st_from_cookie: v }))}
+              />
+              <Label>Update ST from cookie after warmup</Label>
+            </div>
+            <div className="flex items-center gap-2">
+              <Switch
+                checked={captcha.session_refresh_fail_if_st_refresh_fails}
+                onCheckedChange={(v) => setCaptcha((c) => ({ ...c, session_refresh_fail_if_st_refresh_fails: v }))}
+              />
+              <Label>Fail AT refresh if ST refresh fails (strict)</Label>
+            </div>
+            <div className="flex items-center gap-2">
+              <Switch
+                checked={captcha.session_refresh_local_only}
+                onCheckedChange={(v) => setCaptcha((c) => ({ ...c, session_refresh_local_only: v }))}
+              />
+              <Label>Local-only ST refresh</Label>
+            </div>
+            <Label>Warmup URLs (comma separated)</Label>
+            <Input
+              value={captcha.session_refresh_warmup_urls}
+              onChange={(e) => setCaptcha((c) => ({ ...c, session_refresh_warmup_urls: e.target.value }))}
+            />
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <Label>Wait per URL (s)</Label>
+                <Input
+                  type="number"
+                  min={0}
+                  value={captcha.session_refresh_wait_seconds_per_url}
+                  onChange={(e) =>
+                    setCaptcha((c) => ({ ...c, session_refresh_wait_seconds_per_url: parseInt(e.target.value, 10) || 0 }))
+                  }
+                />
+              </div>
+              <div>
+                <Label>Overall timeout (s)</Label>
+                <Input
+                  type="number"
+                  min={10}
+                  value={captcha.session_refresh_overall_timeout_seconds}
+                  onChange={(e) =>
+                    setCaptcha((c) => ({
+                      ...c,
+                      session_refresh_overall_timeout_seconds: parseInt(e.target.value, 10) || 180,
+                    }))
+                  }
+                />
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <Switch
+                checked={captcha.session_refresh_scheduler_enabled}
+                onCheckedChange={(v) => setCaptcha((c) => ({ ...c, session_refresh_scheduler_enabled: v }))}
+              />
+              <Label>Enable scheduled auto refresh</Label>
+            </div>
+            {captcha.session_refresh_scheduler_enabled ? (
+              <div className="grid grid-cols-3 gap-2">
+                <div>
+                  <Label>Interval (min)</Label>
+                  <Input
+                    type="number"
+                    min={1}
+                    value={captcha.session_refresh_scheduler_interval_minutes}
+                    onChange={(e) =>
+                      setCaptcha((c) => ({
+                        ...c,
+                        session_refresh_scheduler_interval_minutes: parseInt(e.target.value, 10) || 30,
+                      }))
+                    }
+                  />
+                </div>
+                <div>
+                  <Label>Batch size</Label>
+                  <Input
+                    type="number"
+                    min={1}
+                    value={captcha.session_refresh_scheduler_batch_size}
+                    onChange={(e) =>
+                      setCaptcha((c) => ({
+                        ...c,
+                        session_refresh_scheduler_batch_size: parseInt(e.target.value, 10) || 10,
+                      }))
+                    }
+                  />
+                </div>
+                <div>
+                  <Label>Expiring window (min)</Label>
+                  <Input
+                    type="number"
+                    min={1}
+                    value={captcha.session_refresh_scheduler_only_expiring_within_minutes}
+                    onChange={(e) =>
+                      setCaptcha((c) => ({
+                        ...c,
+                        session_refresh_scheduler_only_expiring_within_minutes: parseInt(e.target.value, 10) || 60,
+                      }))
+                    }
+                  />
+                </div>
+              </div>
+            ) : null}
+          </div>
           {m === "personal" && (
             <div className="space-y-2 border rounded-md p-3">
               <div className="grid grid-cols-2 gap-2">
