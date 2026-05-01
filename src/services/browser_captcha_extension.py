@@ -35,6 +35,9 @@ class ExtensionCaptchaService:
         self._state_lock = asyncio.Lock()
         self._connection_changed = asyncio.Condition()
         self._queue_waiters: dict[str, int] = {}
+        # Round-robin cursor per managed API key (see _queue_key). Lock-free counter:
+        # concurrent picks may occasionally duplicate; modulo on read keeps indices valid.
+        self._rr_cursor: dict[str, int] = {}
 
     @classmethod
     async def get_instance(cls, db=None) -> "ExtensionCaptchaService":
@@ -172,6 +175,14 @@ class ExtensionCaptchaService:
                     f"worker_session_id={conn.worker_session_id}, "
                     f"route_key={conn.route_key or '-'}, label={conn.client_label or '-'}"
                 )
+                mid = conn.managed_api_key_id
+                if mid is not None:
+                    qk = self._queue_key(int(mid))
+                    if not any(
+                        c.managed_api_key_id is not None and int(c.managed_api_key_id) == int(mid)
+                        for c in self.active_connections
+                    ):
+                        self._rr_cursor.pop(qk, None)
                 try:
                     loop = asyncio.get_running_loop()
                     loop.create_task(self._notify_connection_change())
@@ -202,6 +213,43 @@ class ExtensionCaptchaService:
                 out.append(conn)
         return out
 
+    def _finalize_managed_rr_cursor_after_pick(
+        self,
+        conn: ExtensionConnection,
+        *,
+        route_key: str,
+        managed_api_key_id: Optional[int],
+        preferred_token_id: Optional[int],
+        exclude_dedicated_token_id: Optional[int],
+    ) -> None:
+        """Advance RR cursor after dispatch picks a connection (not while polling in wait loop)."""
+        if managed_api_key_id is None:
+            return
+        if preferred_token_id is not None and conn.dedicated_token_id is not None:
+            if int(conn.dedicated_token_id) == int(preferred_token_id):
+                return
+        pool = self._connection_pool(exclude_dedicated_token_id=exclude_dedicated_token_id)
+        normalized_key = (route_key or "").strip()
+        candidate_connections = [
+            c for c in pool if c.managed_api_key_id == managed_api_key_id
+        ]
+        if not candidate_connections:
+            return
+        sorted_candidates = sorted(candidate_connections, key=lambda c: c.worker_session_id)
+        if normalized_key:
+            for c in sorted_candidates:
+                if c.route_key == normalized_key:
+                    if c.websocket is conn.websocket:
+                        return
+                    break
+        try:
+            idx = sorted_candidates.index(conn)
+        except ValueError:
+            return
+        queue_key = self._queue_key(managed_api_key_id)
+        n = len(sorted_candidates)
+        self._rr_cursor[queue_key] = (idx + 1) % n
+
     def _select_connection(
         self,
         route_key: str,
@@ -209,6 +257,7 @@ class ExtensionCaptchaService:
         preferred_token_id: Optional[int] = None,
         *,
         exclude_dedicated_token_id: Optional[int] = None,
+        selection_meta_out: Optional[Dict[str, Any]] = None,
     ) -> Optional[ExtensionConnection]:
         pool = self._connection_pool(exclude_dedicated_token_id=exclude_dedicated_token_id)
         if preferred_token_id is not None:
@@ -223,14 +272,22 @@ class ExtensionCaptchaService:
             ]
             if not candidate_connections:
                 return None
+            sorted_candidates = sorted(candidate_connections, key=lambda c: c.worker_session_id)
             # Key-first routing: if managed key is known, route_key is only a preference.
-            # Prefer exact route_key match when provided, otherwise use any connection
-            # under this managed key.
+            # Prefer exact route_key match when provided (no RR advance); otherwise round-robin.
             if normalized_key:
-                for conn in candidate_connections:
+                for conn in sorted_candidates:
                     if conn.route_key == normalized_key:
                         return conn
-            return candidate_connections[0]
+            queue_key = self._queue_key(managed_api_key_id)
+            n = len(sorted_candidates)
+            idx = self._rr_cursor.get(queue_key, 0) % n
+            chosen = sorted_candidates[idx]
+            if selection_meta_out is not None:
+                selection_meta_out.clear()
+                selection_meta_out["pool_size"] = n
+                selection_meta_out["rr_idx"] = idx
+            return chosen
         else:
             # Legacy/global callers must never borrow managed-key scoped workers.
             candidate_connections = [
@@ -346,6 +403,7 @@ class ExtensionCaptchaService:
         preferred_token_id: Optional[int] = None,
         timeout: float,
         exclude_dedicated_token_id: Optional[int] = None,
+        selection_meta_out: Optional[Dict[str, Any]] = None,
     ) -> Optional[ExtensionConnection]:
         deadline = time.time() + max(0.0, float(timeout))
         queue_key = self._queue_key(managed_api_key_id)
@@ -358,8 +416,16 @@ class ExtensionCaptchaService:
                     managed_api_key_id,
                     preferred_token_id=preferred_token_id,
                     exclude_dedicated_token_id=exclude_dedicated_token_id,
+                    selection_meta_out=selection_meta_out,
                 )
                 if conn is not None:
+                    self._finalize_managed_rr_cursor_after_pick(
+                        conn,
+                        route_key=route_key,
+                        managed_api_key_id=managed_api_key_id,
+                        preferred_token_id=preferred_token_id,
+                        exclude_dedicated_token_id=exclude_dedicated_token_id,
+                    )
                     return conn
                 remaining = deadline - time.time()
                 if remaining <= 0:
@@ -466,6 +532,7 @@ class ExtensionCaptchaService:
         route_key: str,
         managed_api_key_id: Optional[int],
         timeout: int,
+        selection_meta: Optional[Dict[str, Any]] = None,
     ) -> Optional[str]:
         req_id = f"req_{uuid.uuid4().hex}"
         future = asyncio.get_running_loop().create_future()
@@ -479,10 +546,22 @@ class ExtensionCaptchaService:
             "managed_api_key_id": managed_api_key_id,
         }
         try:
+            dispatch_parts = [
+                f"route_key={route_key or '-'}",
+                f"label={conn.client_label or '-'}",
+                f"worker_session_id={conn.worker_session_id}",
+                f"project_id={project_id}",
+                f"action={action}",
+                f"managed_api_key_id={managed_api_key_id}",
+            ]
+            if selection_meta:
+                if "pool_size" in selection_meta:
+                    dispatch_parts.append(f"pool_size={selection_meta['pool_size']}")
+                if "rr_idx" in selection_meta:
+                    dispatch_parts.append(f"rr_idx={selection_meta['rr_idx']}")
             debug_logger.log_info(
-                f"[Extension Captcha] Dispatching token request via route_key={route_key or '-'}, "
-                f"label={conn.client_label or '-'}, project_id={project_id}, action={action}, "
-                f"managed_api_key_id={managed_api_key_id}"
+                "[Extension Captcha] Dispatching token request via "
+                + ", ".join(dispatch_parts)
             )
             await conn.websocket.send_text(json.dumps(request_data))
             result = await asyncio.wait_for(future, timeout=timeout)
@@ -523,12 +602,14 @@ class ExtensionCaptchaService:
             except Exception as exc:
                 debug_logger.log_warning(f"[Extension Captcha] Failed to load queue timeout: {exc}")
         queue_wait_timeout = max(1, min(120, queue_wait_timeout))
+        sel_meta: Dict[str, Any] = {}
         conn = await self._wait_for_connection(
             route_key=route_key,
             managed_api_key_id=managed_api_key_id,
             preferred_token_id=token_id if token_id is not None else None,
             timeout=queue_wait_timeout,
             exclude_dedicated_token_id=None,
+            selection_meta_out=sel_meta,
         )
         if conn is None:
             available = self._describe_routes() or "none"
@@ -549,6 +630,7 @@ class ExtensionCaptchaService:
             route_key=route_key,
             managed_api_key_id=managed_api_key_id,
             timeout=timeout,
+            selection_meta=sel_meta if sel_meta else None,
         )
         if token:
             return token
@@ -563,12 +645,14 @@ class ExtensionCaptchaService:
         if not use_fallback:
             return None
 
+        sel_meta2: Dict[str, Any] = {}
         conn2 = await self._wait_for_connection(
             route_key=route_key,
             managed_api_key_id=managed_api_key_id,
             preferred_token_id=None,
             timeout=queue_wait_timeout,
             exclude_dedicated_token_id=int(token_id),
+            selection_meta_out=sel_meta2,
         )
         if conn2 is None or conn2.websocket is conn.websocket:
             return None
@@ -583,6 +667,7 @@ class ExtensionCaptchaService:
             route_key=route_key,
             managed_api_key_id=managed_api_key_id,
             timeout=timeout,
+            selection_meta=sel_meta2 if sel_meta2 else None,
         )
 
     async def _extension_refresh_st_once(
