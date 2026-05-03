@@ -522,14 +522,17 @@ function waitForTabReady(tabId, timeoutMs = 12000) {
     });
 }
 
-function tabUrlMatchesWorker(tabUrl, workerUrl) {
-    if (!tabUrl) return false;
+/** True if the tab is already on Google Labs Flow (SPA may change path/query; do not force-reload). */
+function isLabsFlowWorkerSurface(tabUrl) {
+    const t = String(tabUrl || "").trim();
+    if (!t || t.startsWith("chrome://")) return false;
     try {
-        const a = new URL(tabUrl);
-        const b = new URL(workerUrl);
-        const pathA = `${a.origin}${a.pathname}${a.search}`;
-        const pathB = `${b.origin}${b.pathname}${b.search}`;
-        return pathA === pathB;
+        const u = new URL(t);
+        if (u.hostname.toLowerCase() !== "labs.google") {
+            return false;
+        }
+        const p = u.pathname || "";
+        return p === "/" || p.startsWith("/fx");
     } catch {
         return false;
     }
@@ -716,7 +719,9 @@ async function ensurePersistentWorkerTab(settings) {
             persistWorkerTabId(null);
         } else {
             const currentUrl = tab.url || tab.pendingUrl || "";
-            if (!tabUrlMatchesWorker(currentUrl, pageUrl)) {
+            // Only navigate away from a wrong site. Do not reset the tab on every captcha job when
+            // Labs/Flow has already moved the SPA to another /fx/... URL (that looked like a refresh).
+            if (!isLabsFlowWorkerSurface(currentUrl)) {
                 await new Promise((resolve) => {
                     chrome.tabs.update(tabId, { url: pageUrl }, () => resolve());
                 });
