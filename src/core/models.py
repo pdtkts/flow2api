@@ -99,10 +99,13 @@ class Task(BaseModel):
     delivery_urls: Optional[List[str]] = None
     requested_resolution: Optional[str] = None
     output_resolution: Optional[str] = None
-    upscale_status: Optional[str] = None  # not_requested, processing, completed, failed
+    upscale_status: Optional[str] = None  # not_requested, pending, processing, completed, failed
     upscale_error_message: Optional[str] = None
     error_message: Optional[str] = None
     scene_id: Optional[str] = None  # Flow API的sceneId
+    job_phase: Optional[str] = None  # queued, generation_*, upscale_*, finalizing, completed, failed
+    captcha_status: Optional[str] = None  # not_applicable, idle, pending, token_acquired, token_failed, upstream_rejected, unknown
+    captcha_detail: Optional[str] = None
     created_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
 

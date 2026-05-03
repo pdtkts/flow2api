@@ -7,17 +7,35 @@ const DEFAULT_SETTINGS = {
   clientLabel: ""
 };
 
+const DEFAULT_WORKER_PAGE_URL = "https://labs.google/fx/tools/flow";
+
 const STORAGE_KEYS = {
   serverUrl: DEFAULT_SETTINGS.serverUrl,
   connectionMode: DEFAULT_SETTINGS.connectionMode,
   apiKey: "",
   workerAuthKey: "",
   routeKey: "",
-  clientLabel: ""
+  clientLabel: "",
+  workerPageUrl: DEFAULT_WORKER_PAGE_URL,
+  usePersistentWorkerTab: false,
+  autoRecycleWorkerTabOnCaptchaFailure: true
 };
 
 const $ = (id) => document.getElementById(id);
 let reconnectInProgress = false;
+let eventLogFilter = "all";
+
+function normalizeWorkerPageUrl(raw) {
+  const t = (raw || "").trim();
+  if (!t) return DEFAULT_WORKER_PAGE_URL;
+  try {
+    const u = new URL(t);
+    if (u.protocol !== "https:" && u.protocol !== "http:") return DEFAULT_WORKER_PAGE_URL;
+    return u.toString();
+  } catch {
+    return DEFAULT_WORKER_PAGE_URL;
+  }
+}
 
 function normalizeSettings(values) {
   const mode = (values.connectionMode || "").trim() === "worker" ? "worker" : "endUser";
@@ -27,7 +45,10 @@ function normalizeSettings(values) {
     apiKey: (values.apiKey || "").trim(),
     workerAuthKey: (values.workerAuthKey || "").trim(),
     routeKey: (values.routeKey || "").trim(),
-    clientLabel: (values.clientLabel || "").trim()
+    clientLabel: (values.clientLabel || "").trim(),
+    workerPageUrl: normalizeWorkerPageUrl(values.workerPageUrl),
+    usePersistentWorkerTab: !!values.usePersistentWorkerTab,
+    autoRecycleWorkerTabOnCaptchaFailure: values.autoRecycleWorkerTabOnCaptchaFailure !== false
   };
 }
 
@@ -57,7 +78,6 @@ function isValidWsUrl(value) {
   }
 }
 
-/** Use wss:// on the public internet; keep ws:// for localhost / LAN-style hosts. */
 function normalizeWebSocketUrl(raw) {
   const trimmed = (raw || "").trim();
   if (!trimmed) return trimmed;
@@ -115,7 +135,11 @@ function applyLoadedSettings(stored, inferredMode) {
   $("workerAuthKey").value = settings.workerAuthKey;
   $("routeKey").value = settings.routeKey;
   $("clientLabel").value = settings.clientLabel;
+  $("workerPageUrl").value = settings.workerPageUrl;
+  $("usePersistentWorkerTab").checked = settings.usePersistentWorkerTab;
+  $("autoRecycleWorkerTabOnCaptchaFailure").checked = settings.autoRecycleWorkerTabOnCaptchaFailure;
   setActiveMode(settings.connectionMode);
+  updateWorkerActionButtons();
 }
 
 function saveSettings() {
@@ -147,7 +171,7 @@ function saveSettings() {
         setStatus(`Save failed: ${chrome.runtime.lastError.message}`, true);
         return;
       }
-      setStatus("Saved (End user). Worker key cleared. Background will reconnect.");
+      setStatus("Saved connection (End user). Worker key cleared. Background will reconnect.");
     });
     return;
   }
@@ -170,11 +194,47 @@ function saveSettings() {
       setStatus(`Save failed: ${chrome.runtime.lastError.message}`, true);
       return;
     }
-    setStatus("Saved (Worker). API key and labels cleared. Background will reconnect.");
+    setStatus("Saved connection (Worker). API key and labels cleared. Background will reconnect.");
     $("apiKey").value = "";
     $("clientLabel").value = "";
     $("routeKey").value = "";
   });
+}
+
+function saveWorkerSettings() {
+  let workerPageUrl = normalizeWorkerPageUrl(($("workerPageUrl").value || "").trim());
+  $("workerPageUrl").value = workerPageUrl;
+  try {
+    const u = new URL(workerPageUrl);
+    if (u.hostname.toLowerCase() !== "labs.google") {
+      setStatus("Worker URL must use hostname labs.google (extension host permissions).", true);
+      return;
+    }
+    if (u.protocol !== "https:") {
+      setStatus("Worker URL must use https://", true);
+      return;
+    }
+  } catch {
+    setStatus("Invalid worker page URL.", true);
+    return;
+  }
+  const usePersistentWorkerTab = $("usePersistentWorkerTab").checked;
+  const autoRecycleWorkerTabOnCaptchaFailure = $("autoRecycleWorkerTabOnCaptchaFailure").checked;
+  chrome.storage.local.set(
+    {
+      workerPageUrl,
+      usePersistentWorkerTab,
+      autoRecycleWorkerTabOnCaptchaFailure
+    },
+    () => {
+      if (chrome.runtime.lastError) {
+        setStatus(`Save worker settings failed: ${chrome.runtime.lastError.message}`, true);
+        return;
+      }
+      setStatus("Worker tab settings saved.");
+      updateWorkerActionButtons();
+    }
+  );
 }
 
 function escapeHtml(value) {
@@ -184,6 +244,74 @@ function escapeHtml(value) {
     .replace(/>/g, "&gt;")
     .replace(/\"/g, "&quot;")
     .replace(/'/g, "&#039;");
+}
+
+function formatPercent(solved, total) {
+  if (!total) return "—";
+  return `${((100 * solved) / total).toFixed(1)}%`;
+}
+
+function renderMetrics(state) {
+  const el = $("metricsGrid");
+  if (!state) {
+    el.innerHTML = "";
+    return;
+  }
+  const solved = Number(state.captchaJobsSucceeded) || 0;
+  const failed = Number(state.captchaJobsFailed) || 0;
+  const total = solved + failed;
+  const srOk = Number(state.sessionRefreshSucceeded) || 0;
+  const srFail = Number(state.sessionRefreshFailed) || 0;
+
+  el.innerHTML = `
+    <div class="metric-card">
+      <span class="metric-label">Captcha solved</span>
+      <span class="metric-value ok">${escapeHtml(String(solved))}</span>
+    </div>
+    <div class="metric-card">
+      <span class="metric-label">Captcha failed</span>
+      <span class="metric-value bad">${escapeHtml(String(failed))}</span>
+    </div>
+    <div class="metric-card">
+      <span class="metric-label">Captcha total</span>
+      <span class="metric-value">${escapeHtml(String(total))}</span>
+      <div class="metric-sub">Success rate: ${escapeHtml(formatPercent(solved, total))}</div>
+    </div>
+    <div class="metric-card">
+      <span class="metric-label">Session refresh</span>
+      <span class="metric-value">${escapeHtml(String(srOk))} ok / ${escapeHtml(String(srFail))} fail</span>
+      <div class="metric-sub">Worker mode server refresh</div>
+    </div>
+  `;
+}
+
+function renderJobHistory(state) {
+  const body = $("jobHistoryBody");
+  const list = Array.isArray(state.recentCaptchaJobs) ? [...state.recentCaptchaJobs].reverse() : [];
+  if (!list.length) {
+    body.innerHTML = `<tr><td colspan="5" class="event-item" style="border:0;">No captcha jobs yet</td></tr>`;
+    return;
+  }
+  body.innerHTML = list
+    .map((row) => {
+      const ts = row && row.ts ? Number(row.ts) : 0;
+      const timeStr = ts ? escapeHtml(new Date(ts).toLocaleString()) : "—";
+      const action = escapeHtml(String((row && row.action) || ""));
+      const ok = row && row.ok;
+      const resCell = ok
+        ? `<span class="job-ok">OK</span>`
+        : `<span class="job-fail">FAIL</span>`;
+      const req = escapeHtml(String((row && row.req_id) || ""));
+      const err = escapeHtml(String((row && row.error) || ""));
+      return `<tr>
+        <td>${timeStr}</td>
+        <td><code>${action}</code></td>
+        <td>${resCell}</td>
+        <td><code style="word-break:break-all;">${req}</code></td>
+        <td>${err || "—"}</td>
+      </tr>`;
+    })
+    .join("");
 }
 
 function renderStatusCards(state) {
@@ -200,6 +328,9 @@ function renderStatusCards(state) {
   const source = state.bindingSource || "unknown";
   const registerError = state.lastRegisterError || "-";
   const lastError = state.lastError || "-";
+  const persistent = state.usePersistentWorkerTab ? "on" : "off";
+  const workerTabId =
+    state.workerTabId != null && state.workerTabId !== "" ? String(state.workerTabId) : "(none)";
 
   const items = [
     ["Connection", ws, false],
@@ -212,6 +343,8 @@ function renderStatusCards(state) {
     ["Route key", route, false],
     ["Instance ID", instance, false],
     ["Worker session", workerSession, false],
+    ["Persistent worker tab", persistent, false],
+    ["Worker tab ID", workerTabId, false],
     ["Register error", registerError, registerError !== "-"],
     ["Last error", lastError, lastError !== "-"],
   ];
@@ -257,9 +390,13 @@ function renderSessionTokenHistory(entries) {
 
 function renderEventLog(events) {
   const logEl = $("eventLogList");
-  const list = Array.isArray(events) ? events.slice(-10).reverse() : [];
+  let list = Array.isArray(events) ? [...events] : [];
+  list = list.slice().reverse();
+  if (eventLogFilter === "issues") {
+    list = list.filter((evt) => evt && (evt.level === "warn" || evt.level === "error"));
+  }
   if (!list.length) {
-    logEl.innerHTML = `<li class="event-item">No recent events</li>`;
+    logEl.innerHTML = `<li class="event-item">No events match this filter</li>`;
     return;
   }
   logEl.innerHTML = list
@@ -282,14 +419,18 @@ function updateRuntimeStatus(state) {
   if (!state) {
     $("statusCards").innerHTML = `<div class="status-card"><span class="status-label">Connection</span><span class="status-value">unknown</span></div>`;
     metaEl.textContent = "Last update: no runtime state";
+    renderMetrics(null);
+    renderJobHistory({ recentCaptchaJobs: [] });
     renderSessionTokenHistory([]);
     renderEventLog([]);
     return;
   }
+  renderMetrics(state);
+  renderJobHistory(state);
   renderStatusCards(state);
   renderSessionTokenHistory(state.flowSessionTokenHistory);
   renderEventLog(state.events);
-  metaEl.textContent = `Last update: ${new Date().toLocaleTimeString()} • Status: ${state.wsStatus || "unknown"}`;
+  metaEl.textContent = `Last update: ${new Date().toLocaleTimeString()} • WebSocket: ${state.wsStatus || "unknown"}`;
 }
 
 function refreshRuntimeStatus() {
@@ -320,7 +461,7 @@ function reconnectNow() {
 }
 
 function runResetExtension() {
-  if (!confirm("Reset this extension?\n\nThis removes WebSocket URL, API key, worker key, labels, route key, stored Flow session token history (last 3), and assigns a new instance id. The background worker reconnects with default local URL.")) {
+  if (!confirm("Reset this extension?\n\nThis removes WebSocket URL, API keys, labels, route key, worker tab settings, captcha job stats and history, session refresh counters, stored Flow session token history (last 3), worker tab id, and assigns a new instance id. The background worker reconnects with default local URL.")) {
     return;
   }
   setStatus("Resetting extension…", false);
@@ -340,7 +481,7 @@ function runResetExtension() {
 }
 
 function runTokenTest() {
-  setStatus("Running token test, please wait...");
+  setStatus("Running token test, please wait...", false);
   chrome.runtime.sendMessage({ type: "test_token", action: "IMAGE_GENERATION" }, (resp) => {
     if (chrome.runtime.lastError) {
       setStatus(`Test failed: ${chrome.runtime.lastError.message}`, true);
@@ -355,6 +496,33 @@ function runTokenTest() {
   });
 }
 
+function updateWorkerActionButtons() {
+  const on = $("usePersistentWorkerTab").checked;
+  $("workerOpenBtn").disabled = !on;
+  $("workerRecycleBtn").disabled = !on;
+}
+
+function sendWorkerMessage(type, okMsg) {
+  setStatus("Working…", false);
+  chrome.runtime.sendMessage({ type }, (resp) => {
+    if (chrome.runtime.lastError) {
+      setStatus(`${type} failed: ${chrome.runtime.lastError.message}`, true);
+      return;
+    }
+    if (!resp || !resp.success) {
+      const err = (resp && resp.error) || "unknown";
+      if (err === "enable_persistent_worker_tab_first") {
+        setStatus("Turn on “Use persistent worker tab” and save worker tab settings first.", true);
+      } else {
+        setStatus(`${type} failed: ${err}`, true);
+      }
+      return;
+    }
+    setStatus(okMsg || "Done.");
+    refreshRuntimeStatus();
+  });
+}
+
 function wireTabs() {
   $("tabEndUser").addEventListener("click", () => setActiveMode("endUser"));
   $("tabWorker").addEventListener("click", () => setActiveMode("worker"));
@@ -364,9 +532,25 @@ document.addEventListener("DOMContentLoaded", () => {
   wireTabs();
   loadSettings();
   $("saveBtn").addEventListener("click", saveSettings);
+  $("saveWorkerBtn").addEventListener("click", saveWorkerSettings);
   $("reconnectBtn").addEventListener("click", reconnectNow);
   $("testBtn").addEventListener("click", runTokenTest);
   $("resetBtn").addEventListener("click", runResetExtension);
+  $("usePersistentWorkerTab").addEventListener("change", updateWorkerActionButtons);
+  $("workerOpenBtn").addEventListener("click", () =>
+    sendWorkerMessage("worker_tab_open", "Worker tab opened.")
+  );
+  $("workerCloseBtn").addEventListener("click", () =>
+    sendWorkerMessage("worker_tab_close", "Worker tab closed.")
+  );
+  $("workerRecycleBtn").addEventListener("click", () =>
+    sendWorkerMessage("worker_tab_recycle", "Worker tab recycled.")
+  );
+  $("eventLogFilter").addEventListener("change", (e) => {
+    eventLogFilter = (e.target && e.target.value) || "all";
+    refreshRuntimeStatus();
+  });
   refreshRuntimeStatus();
+  updateWorkerActionButtons();
   setInterval(refreshRuntimeStatus, 3000);
 });

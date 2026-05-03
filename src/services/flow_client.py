@@ -41,6 +41,59 @@ def _proxy_endpoint_for_log(url: Optional[str]) -> str:
         return "unparseable"
 
 
+PollTaskProgressHook = Optional[Callable[[Dict[str, Any]], Awaitable[None]]]
+
+
+def _http_status_from_flow_error(message: str) -> int:
+    if not message:
+        return 0
+    marker = "HTTP Error "
+    if marker not in message:
+        return 0
+    start = message.index(marker) + len(marker)
+    digits = ""
+    for i in range(start, min(start + 5, len(message))):
+        ch = message[i]
+        if ch.isdigit():
+            digits += ch
+        elif digits:
+            break
+    return int(digits) if digits else 0
+
+
+def classify_recaptcha_upstream_failure(status_code: int, error_detail: str) -> Optional[str]:
+    """Return ``upstream_rejected`` when error text matches upstream captcha heuristics (else None)."""
+    if status_code < 400:
+        return None
+    detail = (error_detail or "").strip().replace("\n", " ")
+    detail_lower = detail.lower()
+    if len(detail) > 240:
+        detail = detail[:240] + "..."
+    if "public_error_unusual_activity" in detail_lower or "recaptcha evaluation failed" in detail_lower:
+        return "upstream_rejected"
+    if "recaptcha" in detail_lower or "public_error" in detail_lower:
+        return "upstream_rejected"
+    return None
+
+
+async def _emit_poll_task_progress(hook: PollTaskProgressHook, updates: Dict[str, Any]) -> None:
+    if hook is None:
+        return
+    payload = {k: v for k, v in updates.items() if v is not None}
+    if not payload:
+        return
+    try:
+        await hook(payload)
+    except Exception as exc:
+        debug_logger.log_warning(f"[poll_task_progress] update failed: {exc}")
+
+
+_flow_extension_upstream_req_id: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "flow_extension_upstream_req_id",
+    default=None,
+)
+
+
 class FlowClient:
     """VideoFX API客户端"""
 
@@ -379,6 +432,13 @@ class FlowClient:
                         error_reason=error_reason,
                         response_text=response.text,
                     )
+                    await self._send_extension_upstream_verdict_if_needed(
+                        url,
+                        json_data,
+                        response.status_code,
+                        error_reason,
+                        response.text,
+                    )
                     raise Exception(error_reason)
 
                 self._log_recaptcha_verdict_from_response(
@@ -388,10 +448,19 @@ class FlowClient:
                     error_reason="",
                     response_text=response.text,
                 )
+                parsed_body = response.json()
+                await self._send_extension_upstream_verdict_if_needed(
+                    url,
+                    json_data,
+                    response.status_code,
+                    "",
+                    response.text,
+                )
 
-                return response.json()
+                return parsed_body
 
         except Exception as e:
+            await self._abandon_extension_upstream_verdict_if_needed()
             duration_ms = (time.time() - start_time) * 1000
             error_msg = str(e)
 
@@ -406,7 +475,7 @@ class FlowClient:
                     f"[HTTP FALLBACK] curl_cffi 请求失败，回退 urllib: {method.upper()} {url}"
                 )
                 try:
-                    return await asyncio.to_thread(
+                    urllib_result = await asyncio.to_thread(
                         self._sync_json_request_via_urllib,
                         method.upper(),
                         url,
@@ -415,6 +484,14 @@ class FlowClient:
                         proxy_url,
                         request_timeout,
                     )
+                    await self._send_extension_upstream_verdict_if_needed(
+                        url,
+                        json_data,
+                        200,
+                        "",
+                        "",
+                    )
+                    return urllib_result
                 except Exception as fallback_error:
                     debug_logger.log_error(
                         f"[HTTP FALLBACK] urllib 回退也失败: {fallback_error}"
@@ -434,6 +511,11 @@ class FlowClient:
             "batchgenerateimages",
             "batchasyncgeneratevideotext",
             "batchasyncgeneratevideoimage",
+            "batchasyncgeneratevideoreferenceimages",
+            "batchasyncgeneratevideostartandendimage",
+            "batchasyncgeneratevideostartimage",
+            "batchasyncgeneratevideoextendvideo",
+            "batchasyncgeneratevideoupsamplevideo",
             "upsampleimage",
             "remix",
         ]):
@@ -483,6 +565,58 @@ class FlowClient:
             debug_logger.log_recaptcha_proxy_check(
                 f"[reCAPTCHA verdict] UPSTREAM captcha-related error: status={status_code}, reason={detail}"
             )
+
+    async def _send_extension_upstream_verdict_if_needed(
+        self,
+        url: str,
+        json_data: Optional[Dict[str, Any]],
+        status_code: int,
+        error_reason: str,
+        response_text: str,
+    ) -> None:
+        """Notify Chrome extension whether Flow accepted the reCAPTCHA token (extension captcha mode only)."""
+        if config.captcha_method != "extension":
+            return
+        if not self._is_generation_request_with_recaptcha(url, json_data):
+            return
+        req_id = _flow_extension_upstream_req_id.get()
+        if not req_id:
+            return
+        accepted = status_code < 400
+        merged = f"{error_reason or ''} {(response_text or '')[:800]}".strip()
+        captcha_rej = (not accepted) and (
+            classify_recaptcha_upstream_failure(status_code, merged) == "upstream_rejected"
+        )
+        try:
+            from .browser_captcha_extension import ExtensionCaptchaService
+
+            svc = await ExtensionCaptchaService.get_instance(self.db)
+            await svc.notify_upstream_verdict(
+                req_id,
+                accepted=accepted,
+                captcha_rejected=captcha_rej,
+                detail=merged[:500] if merged else None,
+            )
+        except Exception as exc:
+            debug_logger.log_warning(f"[Extension Captcha] upstream verdict notify failed: {exc}")
+        finally:
+            _flow_extension_upstream_req_id.set(None)
+
+    async def _abandon_extension_upstream_verdict_if_needed(self) -> None:
+        if config.captcha_method != "extension":
+            return
+        req_id = _flow_extension_upstream_req_id.get()
+        if not req_id:
+            return
+        try:
+            from .browser_captcha_extension import ExtensionCaptchaService
+
+            svc = await ExtensionCaptchaService.get_instance(self.db)
+            await svc.abandon_upstream_verdict(req_id)
+        except Exception:
+            pass
+        finally:
+            _flow_extension_upstream_req_id.set(None)
 
     def _should_fallback_to_urllib(self, error_message: str) -> bool:
         """判断是否应从 curl_cffi 回退到 urllib。"""
@@ -1114,6 +1248,7 @@ class FlowClient:
         token_id: Optional[int] = None,
         token_image_concurrency: Optional[int] = None,
         progress_callback: Optional[Callable[[str, int], Awaitable[None]]] = None,
+        poll_task_progress: PollTaskProgressHook = None,
     ) -> tuple[dict, str, Dict[str, Any]]:
         """生成图片(同步返回)
 
@@ -1168,6 +1303,10 @@ class FlowClient:
 
             launch_gate_acquired = True
             try:
+                await _emit_poll_task_progress(
+                    poll_task_progress,
+                    {"job_phase": "generation_captcha", "captcha_status": "pending"},
+                )
                 recaptcha_token, browser_id = await self._get_recaptcha_token(
                     project_id,
                     action="IMAGE_GENERATION",
@@ -1181,6 +1320,14 @@ class FlowClient:
             attempt_trace["recaptcha_ms"] = int((time.time() - recaptcha_started_at) * 1000)
             attempt_trace["recaptcha_ok"] = bool(recaptcha_token)
             if not recaptcha_token:
+                await _emit_poll_task_progress(
+                    poll_task_progress,
+                    {
+                        "job_phase": "generation_captcha",
+                        "captcha_status": "token_failed",
+                        "captcha_detail": "Failed to obtain reCAPTCHA token",
+                    },
+                )
                 last_error = Exception("Failed to obtain reCAPTCHA token")
                 attempt_trace["success"] = False
                 attempt_trace["error"] = str(last_error)
@@ -1196,6 +1343,10 @@ class FlowClient:
                 if should_retry:
                     continue
                 raise last_error
+            await _emit_poll_task_progress(
+                poll_task_progress,
+                {"job_phase": "generation_submitted", "captcha_status": "token_acquired"},
+            )
             if progress_callback is not None:
                 await progress_callback("submitting_image", 48)
             session_id = self._generate_session_id()
@@ -1235,6 +1386,10 @@ class FlowClient:
             }
 
             try:
+                await _emit_poll_task_progress(
+                    poll_task_progress,
+                    {"job_phase": "generation_awaiting"},
+                )
                 result = await self._make_image_generation_request(
                     url=url,
                     json_data=json_data,
@@ -1245,9 +1400,25 @@ class FlowClient:
                 attempt_trace["duration_ms"] = int((time.time() - attempt_started_at) * 1000)
                 perf_trace["generation_attempts"].append(attempt_trace)
                 perf_trace["final_success_attempt"] = retry_attempt + 1
+                await _emit_poll_task_progress(
+                    poll_task_progress,
+                    {"captcha_status": "idle"},
+                )
                 return result, session_id, perf_trace
             except Exception as e:
                 last_error = e
+                err_text = str(e)
+                status_code = _http_status_from_flow_error(err_text)
+                cap = classify_recaptcha_upstream_failure(status_code, err_text)
+                if cap:
+                    await _emit_poll_task_progress(
+                        poll_task_progress,
+                        {
+                            "job_phase": "generation_awaiting",
+                            "captcha_status": cap,
+                            "captcha_detail": err_text[:240],
+                        },
+                    )
                 attempt_trace["success"] = False
                 attempt_trace["error"] = str(e)[:240]
                 attempt_trace["duration_ms"] = int((time.time() - attempt_started_at) * 1000)
@@ -1278,7 +1449,8 @@ class FlowClient:
         target_resolution: str = "UPSAMPLE_IMAGE_RESOLUTION_4K",
         user_paygate_tier: str = "PAYGATE_TIER_NOT_PAID",
         session_id: Optional[str] = None,
-        token_id: Optional[int] = None
+        token_id: Optional[int] = None,
+        poll_task_progress: PollTaskProgressHook = None,
     ) -> str:
         """放大图片到 2K/4K
 
@@ -1300,6 +1472,10 @@ class FlowClient:
         last_error = None
 
         for retry_attempt in range(max_retries):
+            await _emit_poll_task_progress(
+                poll_task_progress,
+                {"job_phase": "upscale_captcha", "captcha_status": "pending"},
+            )
             # 获取 reCAPTCHA token - 使用 IMAGE_GENERATION action
             recaptcha_token, browser_id = await self._get_recaptcha_token(
                 project_id,
@@ -1309,6 +1485,14 @@ class FlowClient:
                 max_retries=max_retries,
             )
             if not recaptcha_token:
+                await _emit_poll_task_progress(
+                    poll_task_progress,
+                    {
+                        "job_phase": "upscale_captcha",
+                        "captcha_status": "token_failed",
+                        "captcha_detail": "Failed to obtain reCAPTCHA token",
+                    },
+                )
                 last_error = Exception("Failed to obtain reCAPTCHA token")
                 should_retry = await self._handle_missing_recaptcha_token(
                     retry_attempt=retry_attempt,
@@ -1339,6 +1523,18 @@ class FlowClient:
 
             # 4K/2K 放大使用专用超时，因为返回的 base64 数据量很大
             try:
+                await _emit_poll_task_progress(
+                    poll_task_progress,
+                    {
+                        "job_phase": "upscale_submitted",
+                        "captcha_status": "token_acquired",
+                        "upscale_status": "processing",
+                    },
+                )
+                await _emit_poll_task_progress(
+                    poll_task_progress,
+                    {"job_phase": "upscale_awaiting"},
+                )
                 result = await self._make_request(
                     method="POST",
                     url=url,
@@ -1349,9 +1545,25 @@ class FlowClient:
                 )
 
                 # 返回 base64 编码的图片
+                await _emit_poll_task_progress(
+                    poll_task_progress,
+                    {"captcha_status": "idle"},
+                )
                 return result.get("encodedImage", "")
             except Exception as e:
                 last_error = e
+                err_text = str(e)
+                status_code = _http_status_from_flow_error(err_text)
+                cap = classify_recaptcha_upstream_failure(status_code, err_text)
+                if cap:
+                    await _emit_poll_task_progress(
+                        poll_task_progress,
+                        {
+                            "job_phase": "upscale_awaiting",
+                            "captcha_status": cap,
+                            "captcha_detail": err_text[:240],
+                        },
+                    )
                 should_retry = await self._handle_retryable_generation_error(
                     error=e,
                     retry_attempt=retry_attempt,
@@ -1394,6 +1606,7 @@ class FlowClient:
         user_paygate_tier: str = "PAYGATE_TIER_ONE",
         token_id: Optional[int] = None,
         token_video_concurrency: Optional[int] = None,
+        poll_task_progress: PollTaskProgressHook = None,
     ) -> dict:
         """文生视频,返回task_id
 
@@ -1434,6 +1647,10 @@ class FlowClient:
 
             launch_gate_acquired = True
             try:
+                await _emit_poll_task_progress(
+                    poll_task_progress,
+                    {"job_phase": "generation_captcha", "captcha_status": "pending"},
+                )
                 recaptcha_token, browser_id = await self._get_recaptcha_token(
                     project_id,
                     action="VIDEO_GENERATION",
@@ -1445,6 +1662,14 @@ class FlowClient:
                 if launch_gate_acquired:
                     await self._release_video_launch_gate(token_id)
             if not recaptcha_token:
+                await _emit_poll_task_progress(
+                    poll_task_progress,
+                    {
+                        "job_phase": "generation_captcha",
+                        "captcha_status": "token_failed",
+                        "captcha_detail": "Failed to obtain reCAPTCHA token",
+                    },
+                )
                 last_error = Exception("Failed to obtain reCAPTCHA token")
                 should_retry = await self._handle_missing_recaptcha_token(
                     retry_attempt=retry_attempt,
@@ -1456,6 +1681,10 @@ class FlowClient:
                 if should_retry:
                     continue
                 raise last_error
+            await _emit_poll_task_progress(
+                poll_task_progress,
+                {"job_phase": "generation_submitted", "captcha_status": "token_acquired"},
+            )
             session_id = self._generate_session_id()
             scene_id = str(uuid.uuid4())
             client_context = {
@@ -1488,15 +1717,35 @@ class FlowClient:
                 json_data["useV2ModelConfig"] = True
 
             try:
+                await _emit_poll_task_progress(
+                    poll_task_progress,
+                    {"job_phase": "generation_awaiting"},
+                )
                 result = await self._make_video_api_request(
                     url=url,
                     json_data=json_data,
                     at=at,
                     timeout=self._get_video_submit_timeout(),
                 )
+                await _emit_poll_task_progress(
+                    poll_task_progress,
+                    {"job_phase": "generation_awaiting", "captcha_status": "idle"},
+                )
                 return result
             except Exception as e:
                 last_error = e
+                err_text = str(e)
+                status_code = _http_status_from_flow_error(err_text)
+                cap = classify_recaptcha_upstream_failure(status_code, err_text)
+                if cap:
+                    await _emit_poll_task_progress(
+                        poll_task_progress,
+                        {
+                            "job_phase": "generation_awaiting",
+                            "captcha_status": cap,
+                            "captcha_detail": err_text[:240],
+                        },
+                    )
                 should_retry = await self._handle_retryable_generation_error(
                     error=e,
                     retry_attempt=retry_attempt,
@@ -1525,6 +1774,7 @@ class FlowClient:
         user_paygate_tier: str = "PAYGATE_TIER_ONE",
         token_id: Optional[int] = None,
         token_video_concurrency: Optional[int] = None,
+        poll_task_progress: PollTaskProgressHook = None,
     ) -> dict:
         """图生视频,返回task_id
 
@@ -1559,6 +1809,10 @@ class FlowClient:
 
             launch_gate_acquired = True
             try:
+                await _emit_poll_task_progress(
+                    poll_task_progress,
+                    {"job_phase": "generation_captcha", "captcha_status": "pending"},
+                )
                 recaptcha_token, browser_id = await self._get_recaptcha_token(
                     project_id,
                     action="VIDEO_GENERATION",
@@ -1570,6 +1824,14 @@ class FlowClient:
                 if launch_gate_acquired:
                     await self._release_video_launch_gate(token_id)
             if not recaptcha_token:
+                await _emit_poll_task_progress(
+                    poll_task_progress,
+                    {
+                        "job_phase": "generation_captcha",
+                        "captcha_status": "token_failed",
+                        "captcha_detail": "Failed to obtain reCAPTCHA token",
+                    },
+                )
                 last_error = Exception("Failed to obtain reCAPTCHA token")
                 should_retry = await self._handle_missing_recaptcha_token(
                     retry_attempt=retry_attempt,
@@ -1581,6 +1843,10 @@ class FlowClient:
                 if should_retry:
                     continue
                 raise last_error
+            await _emit_poll_task_progress(
+                poll_task_progress,
+                {"job_phase": "generation_submitted", "captcha_status": "token_acquired"},
+            )
             session_id = self._generate_session_id()
             batch_id = str(uuid.uuid4())
             scene_id = str(uuid.uuid4())
@@ -1619,15 +1885,35 @@ class FlowClient:
             }
 
             try:
+                await _emit_poll_task_progress(
+                    poll_task_progress,
+                    {"job_phase": "generation_awaiting"},
+                )
                 result = await self._make_video_api_request(
                     url=url,
                     json_data=json_data,
                     at=at,
                     timeout=self._get_video_submit_timeout(),
                 )
+                await _emit_poll_task_progress(
+                    poll_task_progress,
+                    {"job_phase": "generation_awaiting", "captcha_status": "idle"},
+                )
                 return result
             except Exception as e:
                 last_error = e
+                err_text = str(e)
+                status_code = _http_status_from_flow_error(err_text)
+                cap = classify_recaptcha_upstream_failure(status_code, err_text)
+                if cap:
+                    await _emit_poll_task_progress(
+                        poll_task_progress,
+                        {
+                            "job_phase": "generation_awaiting",
+                            "captcha_status": cap,
+                            "captcha_detail": err_text[:240],
+                        },
+                    )
                 should_retry = await self._handle_retryable_generation_error(
                     error=e,
                     retry_attempt=retry_attempt,
@@ -1658,6 +1944,7 @@ class FlowClient:
         user_paygate_tier: str = "PAYGATE_TIER_ONE",
         token_id: Optional[int] = None,
         token_video_concurrency: Optional[int] = None,
+        poll_task_progress: PollTaskProgressHook = None,
     ) -> dict:
         """收尾帧生成视频,返回task_id
 
@@ -1693,6 +1980,10 @@ class FlowClient:
 
             launch_gate_acquired = True
             try:
+                await _emit_poll_task_progress(
+                    poll_task_progress,
+                    {"job_phase": "generation_captcha", "captcha_status": "pending"},
+                )
                 recaptcha_token, browser_id = await self._get_recaptcha_token(
                     project_id,
                     action="VIDEO_GENERATION",
@@ -1704,6 +1995,14 @@ class FlowClient:
                 if launch_gate_acquired:
                     await self._release_video_launch_gate(token_id)
             if not recaptcha_token:
+                await _emit_poll_task_progress(
+                    poll_task_progress,
+                    {
+                        "job_phase": "generation_captcha",
+                        "captcha_status": "token_failed",
+                        "captcha_detail": "Failed to obtain reCAPTCHA token",
+                    },
+                )
                 last_error = Exception("Failed to obtain reCAPTCHA token")
                 should_retry = await self._handle_missing_recaptcha_token(
                     retry_attempt=retry_attempt,
@@ -1715,6 +2014,10 @@ class FlowClient:
                 if should_retry:
                     continue
                 raise last_error
+            await _emit_poll_task_progress(
+                poll_task_progress,
+                {"job_phase": "generation_submitted", "captcha_status": "token_acquired"},
+            )
             session_id = self._generate_session_id()
             scene_id = str(uuid.uuid4())
             client_context = {
@@ -1753,15 +2056,35 @@ class FlowClient:
                 json_data["useV2ModelConfig"] = True
 
             try:
+                await _emit_poll_task_progress(
+                    poll_task_progress,
+                    {"job_phase": "generation_awaiting"},
+                )
                 result = await self._make_video_api_request(
                     url=url,
                     json_data=json_data,
                     at=at,
                     timeout=self._get_video_submit_timeout(),
                 )
+                await _emit_poll_task_progress(
+                    poll_task_progress,
+                    {"job_phase": "generation_awaiting", "captcha_status": "idle"},
+                )
                 return result
             except Exception as e:
                 last_error = e
+                err_text = str(e)
+                status_code = _http_status_from_flow_error(err_text)
+                cap = classify_recaptcha_upstream_failure(status_code, err_text)
+                if cap:
+                    await _emit_poll_task_progress(
+                        poll_task_progress,
+                        {
+                            "job_phase": "generation_awaiting",
+                            "captcha_status": cap,
+                            "captcha_detail": err_text[:240],
+                        },
+                    )
                 should_retry = await self._handle_retryable_generation_error(
                     error=e,
                     retry_attempt=retry_attempt,
@@ -1791,6 +2114,7 @@ class FlowClient:
         user_paygate_tier: str = "PAYGATE_TIER_ONE",
         token_id: Optional[int] = None,
         token_video_concurrency: Optional[int] = None,
+        poll_task_progress: PollTaskProgressHook = None,
     ) -> dict:
         """仅首帧生成视频,返回task_id
 
@@ -1825,6 +2149,10 @@ class FlowClient:
 
             launch_gate_acquired = True
             try:
+                await _emit_poll_task_progress(
+                    poll_task_progress,
+                    {"job_phase": "generation_captcha", "captcha_status": "pending"},
+                )
                 recaptcha_token, browser_id = await self._get_recaptcha_token(
                     project_id,
                     action="VIDEO_GENERATION",
@@ -1836,6 +2164,14 @@ class FlowClient:
                 if launch_gate_acquired:
                     await self._release_video_launch_gate(token_id)
             if not recaptcha_token:
+                await _emit_poll_task_progress(
+                    poll_task_progress,
+                    {
+                        "job_phase": "generation_captcha",
+                        "captcha_status": "token_failed",
+                        "captcha_detail": "Failed to obtain reCAPTCHA token",
+                    },
+                )
                 last_error = Exception("Failed to obtain reCAPTCHA token")
                 should_retry = await self._handle_missing_recaptcha_token(
                     retry_attempt=retry_attempt,
@@ -1847,6 +2183,10 @@ class FlowClient:
                 if should_retry:
                     continue
                 raise last_error
+            await _emit_poll_task_progress(
+                poll_task_progress,
+                {"job_phase": "generation_submitted", "captcha_status": "token_acquired"},
+            )
             session_id = self._generate_session_id()
             scene_id = str(uuid.uuid4())
             client_context = {
@@ -1883,15 +2223,35 @@ class FlowClient:
                 json_data["useV2ModelConfig"] = True
 
             try:
+                await _emit_poll_task_progress(
+                    poll_task_progress,
+                    {"job_phase": "generation_awaiting"},
+                )
                 result = await self._make_video_api_request(
                     url=url,
                     json_data=json_data,
                     at=at,
                     timeout=self._get_video_submit_timeout(),
                 )
+                await _emit_poll_task_progress(
+                    poll_task_progress,
+                    {"job_phase": "generation_awaiting", "captcha_status": "idle"},
+                )
                 return result
             except Exception as e:
                 last_error = e
+                err_text = str(e)
+                status_code = _http_status_from_flow_error(err_text)
+                cap = classify_recaptcha_upstream_failure(status_code, err_text)
+                if cap:
+                    await _emit_poll_task_progress(
+                        poll_task_progress,
+                        {
+                            "job_phase": "generation_awaiting",
+                            "captcha_status": cap,
+                            "captcha_detail": err_text[:240],
+                        },
+                    )
                 should_retry = await self._handle_retryable_generation_error(
                     error=e,
                     retry_attempt=retry_attempt,
@@ -1920,6 +2280,7 @@ class FlowClient:
         user_paygate_tier: str = "PAYGATE_TIER_ONE",
         token_id: Optional[int] = None,
         token_video_concurrency: Optional[int] = None,
+        poll_task_progress: PollTaskProgressHook = None,
     ) -> dict:
         """视频续写,基于已生成的视频延伸7秒"""
         url = f"{self.api_base_url}/video:batchAsyncGenerateVideoExtendVideo"
@@ -1936,6 +2297,10 @@ class FlowClient:
                 raise last_error
             launch_gate_acquired = True
             try:
+                await _emit_poll_task_progress(
+                    poll_task_progress,
+                    {"job_phase": "generation_captcha", "captcha_status": "pending"},
+                )
                 recaptcha_token, browser_id = await self._get_recaptcha_token(
                     project_id,
                     action="VIDEO_GENERATION",
@@ -1945,6 +2310,14 @@ class FlowClient:
                 if launch_gate_acquired:
                     await self._release_video_launch_gate(token_id)
             if not recaptcha_token:
+                await _emit_poll_task_progress(
+                    poll_task_progress,
+                    {
+                        "job_phase": "generation_captcha",
+                        "captcha_status": "token_failed",
+                        "captcha_detail": "Failed to obtain reCAPTCHA token",
+                    },
+                )
                 last_error = Exception("Failed to obtain reCAPTCHA token")
                 should_retry = await self._handle_missing_recaptcha_token(
                     retry_attempt=retry_attempt,
@@ -1956,6 +2329,10 @@ class FlowClient:
                 if should_retry:
                     continue
                 raise last_error
+            await _emit_poll_task_progress(
+                poll_task_progress,
+                {"job_phase": "generation_submitted", "captcha_status": "token_acquired"},
+            )
             session_id = self._generate_session_id()
             workflow_id = str(uuid.uuid4())
             json_data = {
@@ -1981,14 +2358,35 @@ class FlowClient:
                 "useV2ModelConfig": True,
             }
             try:
-                return await self._make_video_api_request(
+                await _emit_poll_task_progress(
+                    poll_task_progress,
+                    {"job_phase": "generation_awaiting"},
+                )
+                result = await self._make_video_api_request(
                     url=url,
                     json_data=json_data,
                     at=at,
                     timeout=self._get_video_submit_timeout(),
                 )
+                await _emit_poll_task_progress(
+                    poll_task_progress,
+                    {"job_phase": "generation_awaiting", "captcha_status": "idle"},
+                )
+                return result
             except Exception as e:
                 last_error = e
+                err_text = str(e)
+                status_code = _http_status_from_flow_error(err_text)
+                cap = classify_recaptcha_upstream_failure(status_code, err_text)
+                if cap:
+                    await _emit_poll_task_progress(
+                        poll_task_progress,
+                        {
+                            "job_phase": "generation_awaiting",
+                            "captcha_status": cap,
+                            "captcha_detail": err_text[:240],
+                        },
+                    )
                 should_retry = await self._handle_retryable_generation_error(
                     error=e,
                     retry_attempt=retry_attempt,
@@ -2086,6 +2484,7 @@ class FlowClient:
         model_key: str,
         token_id: Optional[int] = None,
         token_video_concurrency: Optional[int] = None,
+        poll_task_progress: PollTaskProgressHook = None,
     ) -> dict:
         """视频放大到 4K/1080P，返回 task_id
 
@@ -2107,6 +2506,10 @@ class FlowClient:
         last_error = None
         
         for retry_attempt in range(max_retries):
+            await _emit_poll_task_progress(
+                poll_task_progress,
+                {"job_phase": "upscale_captcha", "captcha_status": "pending"},
+            )
             launch_gate_acquired = False
             launch_ok, _, _ = await self._acquire_video_launch_gate(
                 token_id=token_id,
@@ -2129,6 +2532,14 @@ class FlowClient:
                 if launch_gate_acquired:
                     await self._release_video_launch_gate(token_id)
             if not recaptcha_token:
+                await _emit_poll_task_progress(
+                    poll_task_progress,
+                    {
+                        "job_phase": "upscale_captcha",
+                        "captcha_status": "token_failed",
+                        "captcha_detail": "Failed to obtain reCAPTCHA token",
+                    },
+                )
                 last_error = Exception("Failed to obtain reCAPTCHA token")
                 should_retry = await self._handle_missing_recaptcha_token(
                     retry_attempt=retry_attempt,
@@ -2166,15 +2577,43 @@ class FlowClient:
             }
 
             try:
+                await _emit_poll_task_progress(
+                    poll_task_progress,
+                    {
+                        "job_phase": "upscale_submitted",
+                        "captcha_status": "token_acquired",
+                        "upscale_status": "processing",
+                    },
+                )
+                await _emit_poll_task_progress(
+                    poll_task_progress,
+                    {"job_phase": "upscale_awaiting"},
+                )
                 result = await self._make_video_api_request(
                     url=url,
                     json_data=json_data,
                     at=at,
                     timeout=self._get_video_submit_timeout(),
                 )
+                await _emit_poll_task_progress(
+                    poll_task_progress,
+                    {"captcha_status": "idle"},
+                )
                 return result
             except Exception as e:
                 last_error = e
+                err_text = str(e)
+                status_code = _http_status_from_flow_error(err_text)
+                cap = classify_recaptcha_upstream_failure(status_code, err_text)
+                if cap:
+                    await _emit_poll_task_progress(
+                        poll_task_progress,
+                        {
+                            "job_phase": "upscale_awaiting",
+                            "captcha_status": cap,
+                            "captcha_detail": err_text[:240],
+                        },
+                    )
                 should_retry = await self._handle_retryable_generation_error(
                     error=e,
                     retry_attempt=retry_attempt,
@@ -2814,7 +3253,7 @@ class FlowClient:
                     if getattr(config, "dedicated_extension_enabled", False)
                     else default_timeout
                 )
-                token = await service.get_token(
+                token, ext_req_id = await service.get_token(
                     project_id,
                     action,
                     timeout=extension_timeout,
@@ -2822,6 +3261,10 @@ class FlowClient:
                     managed_api_key_id=managed_api_key_id,
                 )
                 self._set_request_fingerprint(None)
+                if ext_req_id:
+                    _flow_extension_upstream_req_id.set(ext_req_id)
+                else:
+                    _flow_extension_upstream_req_id.set(None)
                 return token, None
             except Exception as e:
                 debug_logger.log_error(f"[reCAPTCHA Extension] 错误: {str(e)}")

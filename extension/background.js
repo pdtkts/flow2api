@@ -10,8 +10,30 @@ const DEFAULT_SETTINGS = {
     apiKey: "",
     workerAuthKey: "",
     routeKey: "",
-    clientLabel: ""
+    clientLabel: "",
 };
+
+const DEFAULT_WORKER_PAGE_URL = "https://labs.google/fx/tools/flow";
+
+const DEFAULT_WORKER_SETTINGS = {
+    workerPageUrl: DEFAULT_WORKER_PAGE_URL,
+    usePersistentWorkerTab: false,
+    autoRecycleWorkerTabOnCaptchaFailure: true,
+};
+
+const EVENTS_MAX = 100;
+const RECENT_CAPTCHA_JOBS_MAX = 50;
+
+const SESSION_REFRESH_WARMUP_URL = "https://labs.google/fx/tools/flow";
+const SESSION_REFRESH_WARMUP_WAIT_MS = 10000;
+const FLOW_SESSION_TOKEN_HISTORY_KEY = "flowSessionTokenHistory";
+const FLOW_SESSION_TOKEN_HISTORY_MAX = 3;
+
+const STORAGE_CAPTCHA_STATS = "extensionCaptchaJobStats";
+const STORAGE_RECENT_JOBS = "extensionRecentCaptchaJobs";
+const STORAGE_SESSION_REFRESH_STATS = "extensionSessionRefreshStats";
+const STORAGE_WORKER_TAB_ID = "extensionWorkerTabId";
+
 const runtimeState = {
     wsStatus: "idle",
     connectionMode: "",
@@ -33,14 +55,14 @@ const runtimeState = {
     sessionRefreshConsecutiveFailures: 0,
     sessionRefreshNextAt: 0,
     events: [],
-    /** Newest first; persisted under FLOW_SESSION_TOKEN_HISTORY_KEY (last 3 captures). */
-    flowSessionTokenHistory: []
+    flowSessionTokenHistory: [],
+    captchaJobsSucceeded: 0,
+    captchaJobsFailed: 0,
+    recentCaptchaJobs: [],
+    sessionRefreshSucceeded: 0,
+    sessionRefreshFailed: 0,
+    workerTabId: null,
 };
-
-const SESSION_REFRESH_WARMUP_URL = "https://labs.google/fx/tools/flow";
-const SESSION_REFRESH_WARMUP_WAIT_MS = 10000;
-const FLOW_SESSION_TOKEN_HISTORY_KEY = "flowSessionTokenHistory";
-const FLOW_SESSION_TOKEN_HISTORY_MAX = 3;
 
 function inferConnectionMode(stored) {
     const explicit = String(stored.connectionMode || "").trim();
@@ -53,6 +75,18 @@ function inferConnectionMode(stored) {
     return "endUser";
 }
 
+function normalizeWorkerPageUrl(raw) {
+    const t = String(raw || "").trim();
+    if (!t) return DEFAULT_WORKER_PAGE_URL;
+    try {
+        const u = new URL(t);
+        if (u.protocol !== "https:" && u.protocol !== "http:") return DEFAULT_WORKER_PAGE_URL;
+        return u.toString();
+    } catch {
+        return DEFAULT_WORKER_PAGE_URL;
+    }
+}
+
 function pushEvent(type, message, level = "info") {
     const evt = {
         ts: Date.now(),
@@ -62,10 +96,130 @@ function pushEvent(type, message, level = "info") {
     };
     const list = Array.isArray(runtimeState.events) ? runtimeState.events : [];
     list.push(evt);
-    if (list.length > 50) {
-        list.splice(0, list.length - 50);
+    if (list.length > EVENTS_MAX) {
+        list.splice(0, list.length - EVENTS_MAX);
     }
     runtimeState.events = list;
+}
+
+function normalizeRecentCaptchaJobs(raw) {
+    if (!Array.isArray(raw)) return [];
+    const out = [];
+    for (const row of raw) {
+        if (!row || typeof row !== "object") continue;
+        out.push({
+            ts: Number(row.ts) || 0,
+            req_id: String(row.req_id || ""),
+            action: String(row.action || ""),
+            ok: !!row.ok,
+            error: String(row.error || "").slice(0, 500),
+        });
+    }
+    return out.slice(-RECENT_CAPTCHA_JOBS_MAX);
+}
+
+function persistCaptchaPersistence() {
+    chrome.storage.local.set(
+        {
+            [STORAGE_CAPTCHA_STATS]: {
+                solved: runtimeState.captchaJobsSucceeded || 0,
+                failed: runtimeState.captchaJobsFailed || 0,
+            },
+            [STORAGE_RECENT_JOBS]: runtimeState.recentCaptchaJobs || [],
+            [STORAGE_SESSION_REFRESH_STATS]: {
+                succeeded: runtimeState.sessionRefreshSucceeded || 0,
+                failed: runtimeState.sessionRefreshFailed || 0,
+            },
+        },
+        () => {
+            if (chrome.runtime.lastError) {
+                console.log("[Flow2API] persistCaptchaPersistence:", chrome.runtime.lastError.message);
+            }
+        }
+    );
+}
+
+function persistWorkerTabId(tabId) {
+    if (tabId == null || Number.isNaN(Number(tabId))) {
+        runtimeState.workerTabId = null;
+        chrome.storage.local.remove([STORAGE_WORKER_TAB_ID], () => {});
+        return;
+    }
+    runtimeState.workerTabId = Number(tabId);
+    chrome.storage.local.set({ [STORAGE_WORKER_TAB_ID]: runtimeState.workerTabId }, () => {});
+}
+
+function recordCaptchaJobCompletion(reqId, action, success, error) {
+    if (success) {
+        runtimeState.captchaJobsSucceeded = (runtimeState.captchaJobsSucceeded || 0) + 1;
+    } else {
+        runtimeState.captchaJobsFailed = (runtimeState.captchaJobsFailed || 0) + 1;
+    }
+    const list = Array.isArray(runtimeState.recentCaptchaJobs) ? runtimeState.recentCaptchaJobs : [];
+    list.push({
+        ts: Date.now(),
+        req_id: String(reqId || ""),
+        action: String(action || ""),
+        ok: !!success,
+        error: String(error || "").slice(0, 500),
+    });
+    if (list.length > RECENT_CAPTCHA_JOBS_MAX) {
+        list.splice(0, list.length - RECENT_CAPTCHA_JOBS_MAX);
+    }
+    runtimeState.recentCaptchaJobs = list;
+    persistCaptchaPersistence();
+}
+
+function recordSessionRefreshOutcome(success) {
+    if (success) {
+        runtimeState.sessionRefreshSucceeded = (runtimeState.sessionRefreshSucceeded || 0) + 1;
+    } else {
+        runtimeState.sessionRefreshFailed = (runtimeState.sessionRefreshFailed || 0) + 1;
+    }
+    persistCaptchaPersistence();
+}
+
+function loadExtensionJobAndWorkerState() {
+    return new Promise((resolve) => {
+        chrome.storage.local.get(
+            {
+                [STORAGE_CAPTCHA_STATS]: { solved: 0, failed: 0 },
+                [STORAGE_RECENT_JOBS]: [],
+                [STORAGE_SESSION_REFRESH_STATS]: { succeeded: 0, failed: 0 },
+                [STORAGE_WORKER_TAB_ID]: null,
+                workerPageUrl: DEFAULT_WORKER_PAGE_URL,
+                usePersistentWorkerTab: false,
+                autoRecycleWorkerTabOnCaptchaFailure: true,
+            },
+            (stored) => {
+                const st = stored[STORAGE_CAPTCHA_STATS] || {};
+                runtimeState.captchaJobsSucceeded = Number(st.solved) || 0;
+                runtimeState.captchaJobsFailed = Number(st.failed) || 0;
+                runtimeState.recentCaptchaJobs = normalizeRecentCaptchaJobs(stored[STORAGE_RECENT_JOBS]);
+                const sr = stored[STORAGE_SESSION_REFRESH_STATS] || {};
+                runtimeState.sessionRefreshSucceeded = Number(sr.succeeded) || 0;
+                runtimeState.sessionRefreshFailed = Number(sr.failed) || 0;
+                const wid = stored[STORAGE_WORKER_TAB_ID];
+                runtimeState.workerTabId = wid != null && wid !== "" ? Number(wid) : null;
+                if (runtimeState.workerTabId != null && Number.isNaN(runtimeState.workerTabId)) {
+                    runtimeState.workerTabId = null;
+                }
+                resolve();
+            }
+        );
+    });
+}
+
+function validateStoredWorkerTab() {
+    const id = runtimeState.workerTabId;
+    if (id == null) return;
+    chrome.tabs.get(id, (tab) => {
+        if (chrome.runtime.lastError || !tab) {
+            runtimeState.workerTabId = null;
+            persistWorkerTabId(null);
+            pushEvent("worker_tab_gone", "Stored worker tab missing; cleared id", "warn");
+        }
+    });
 }
 
 /** Public hosts should use wss://; keep ws:// for localhost-style hosts. */
@@ -115,7 +269,8 @@ function getInstanceId() {
 
 function getSettings() {
     return new Promise((resolve) => {
-        chrome.storage.local.get(DEFAULT_SETTINGS, (stored) => {
+        const keys = { ...DEFAULT_SETTINGS, ...DEFAULT_WORKER_SETTINGS };
+        chrome.storage.local.get(keys, (stored) => {
             const connectionMode = inferConnectionMode(stored);
             resolve({
                 serverUrl: normalizeWebSocketUrl((stored.serverUrl || DEFAULT_SETTINGS.serverUrl).trim()),
@@ -124,6 +279,10 @@ function getSettings() {
                 workerAuthKey: (stored.workerAuthKey || "").trim(),
                 routeKey: (stored.routeKey || "").trim(),
                 clientLabel: (stored.clientLabel || "").trim(),
+                workerPageUrl: normalizeWorkerPageUrl(stored.workerPageUrl),
+                usePersistentWorkerTab: !!stored.usePersistentWorkerTab,
+                autoRecycleWorkerTabOnCaptchaFailure:
+                    stored.autoRecycleWorkerTabOnCaptchaFailure !== false,
             });
         });
     });
@@ -217,6 +376,7 @@ async function performSessionRefresh({ reason = "server_request", reqId = null }
             runtimeState.sessionRefreshConsecutiveFailures = 0;
             pushEvent("session_refresh_ok", `Session refresh succeeded (${refreshReason})`);
             recordCapturedFlowSessionToken(result.sessionToken);
+            recordSessionRefreshOutcome(true);
             if (reqId && ws && ws.readyState === WebSocket.OPEN) {
                 ws.send(JSON.stringify({
                     req_id: reqId,
@@ -232,6 +392,7 @@ async function performSessionRefresh({ reason = "server_request", reqId = null }
         runtimeState.sessionRefreshLastError = errorCode;
         runtimeState.sessionRefreshConsecutiveFailures += 1;
         pushEvent("session_refresh_error", `Session refresh failed (${refreshReason}): ${errorCode}`, "warn");
+        recordSessionRefreshOutcome(false);
         if (reqId && ws && ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify({
                 req_id: reqId,
@@ -266,6 +427,24 @@ function resetRuntimeStatePartial() {
     runtimeState.sessionRefreshNextAt = 0;
     runtimeState.events = [];
     runtimeState.flowSessionTokenHistory = [];
+    runtimeState.captchaJobsSucceeded = 0;
+    runtimeState.captchaJobsFailed = 0;
+    runtimeState.recentCaptchaJobs = [];
+    runtimeState.sessionRefreshSucceeded = 0;
+    runtimeState.sessionRefreshFailed = 0;
+    runtimeState.workerTabId = null;
+}
+
+async function closeWorkerTabIfAny() {
+    const id = runtimeState.workerTabId;
+    if (id == null) return;
+    try {
+        await chrome.tabs.remove(id);
+    } catch (e) {
+        console.log("[Flow2API] closeWorkerTabIfAny:", e);
+    }
+    runtimeState.workerTabId = null;
+    persistWorkerTabId(null);
 }
 
 /** Clear saved settings, drop stable instance id, and reconnect (used by options Reset). */
@@ -273,26 +452,37 @@ function resetExtensionToDefaults(done) {
     cachedInstanceId = null;
     resetRuntimeStatePartial();
     closeSocket();
-    chrome.storage.local.remove(["extensionInstanceId", FLOW_SESSION_TOKEN_HISTORY_KEY], () => {
-        chrome.storage.local.set(
-            {
-                serverUrl: DEFAULT_SETTINGS.serverUrl,
-                connectionMode: DEFAULT_SETTINGS.connectionMode,
-                apiKey: DEFAULT_SETTINGS.apiKey,
-                workerAuthKey: DEFAULT_SETTINGS.workerAuthKey,
-                routeKey: DEFAULT_SETTINGS.routeKey,
-                clientLabel: DEFAULT_SETTINGS.clientLabel,
-            },
+    closeWorkerTabIfAny().finally(() => {
+        chrome.storage.local.remove(
+            ["extensionInstanceId", FLOW_SESSION_TOKEN_HISTORY_KEY, STORAGE_WORKER_TAB_ID],
             () => {
-                console.log("[Flow2API] Extension reset to defaults.");
-                pushEvent("reset", "Extension reset to defaults and reconnect started");
-                connectWS()
-                    .then(() => {
-                        if (typeof done === "function") done(null);
-                    })
-                    .catch((err) => {
-                        if (typeof done === "function") done(err);
-                    });
+                chrome.storage.local.set(
+                    {
+                        serverUrl: DEFAULT_SETTINGS.serverUrl,
+                        connectionMode: DEFAULT_SETTINGS.connectionMode,
+                        apiKey: DEFAULT_SETTINGS.apiKey,
+                        workerAuthKey: DEFAULT_SETTINGS.workerAuthKey,
+                        routeKey: DEFAULT_SETTINGS.routeKey,
+                        clientLabel: DEFAULT_SETTINGS.clientLabel,
+                        workerPageUrl: DEFAULT_WORKER_PAGE_URL,
+                        usePersistentWorkerTab: false,
+                        autoRecycleWorkerTabOnCaptchaFailure: true,
+                        [STORAGE_CAPTCHA_STATS]: { solved: 0, failed: 0 },
+                        [STORAGE_RECENT_JOBS]: [],
+                        [STORAGE_SESSION_REFRESH_STATS]: { succeeded: 0, failed: 0 },
+                    },
+                    () => {
+                        console.log("[Flow2API] Extension reset to defaults.");
+                        pushEvent("reset", "Extension reset to defaults and reconnect started");
+                        connectWS()
+                            .then(() => {
+                                if (typeof done === "function") done(null);
+                            })
+                            .catch((err) => {
+                                if (typeof done === "function") done(err);
+                            });
+                    }
+                );
             }
         );
     });
@@ -330,6 +520,255 @@ function waitForTabReady(tabId, timeoutMs = 12000) {
             }
         });
     });
+}
+
+function tabUrlMatchesWorker(tabUrl, workerUrl) {
+    if (!tabUrl) return false;
+    try {
+        const a = new URL(tabUrl);
+        const b = new URL(workerUrl);
+        const pathA = `${a.origin}${a.pathname}${a.search}`;
+        const pathB = `${b.origin}${b.pathname}${b.search}`;
+        return pathA === pathB;
+    } catch {
+        return false;
+    }
+}
+
+async function executeRecaptchaScriptInTab(tabId, action) {
+    const scriptTimeoutMs = action === "VIDEO_GENERATION" ? 30000 : 20000;
+    let lastErrorMsg = "No response from tab.";
+    try {
+        const results = await chrome.scripting.executeScript({
+            target: { tabId },
+            world: "MAIN",
+            func: async (actionArg, timeoutMs) => {
+                return new Promise((resolve, reject) => {
+                    let settled = false;
+                    const finish = (fn, value) => {
+                        if (settled) return;
+                        settled = true;
+                        fn(value);
+                    };
+                    try {
+                        function run() {
+                            grecaptcha.enterprise.ready(function() {
+                                grecaptcha.enterprise.execute("6LdsFiUsAAAAAIjVDZcuLhaHiDn5nnHVXVRQGeMV", { action: actionArg })
+                                    .then(token => finish(resolve, token))
+                                    .catch(err => finish(reject, err.message || "reCAPTCHA evaluation failed internally"));
+                            });
+                        }
+
+                        if (typeof grecaptcha !== "undefined" && grecaptcha.enterprise) {
+                            run();
+                        } else {
+                            const s = document.createElement("script");
+                            s.src = "https://www.google.com/recaptcha/enterprise.js?render=6LdsFiUsAAAAAIjVDZcuLhaHiDn5nnHVXVRQGeMV";
+                            s.onload = run;
+                            s.onerror = () => finish(reject, "Failed to load enterprise.js via network");
+                            document.head.appendChild(s);
+                        }
+
+                        setTimeout(() => finish(reject, "Timeout generating reCAPTCHA locally"), timeoutMs);
+                    } catch (e) {
+                        finish(reject, e.message);
+                    }
+                });
+            },
+            args: [action || "IMAGE_GENERATION", scriptTimeoutMs]
+        });
+
+        if (results && results[0] && results[0].result) {
+            return { success: true, token: results[0].result };
+        }
+    } catch (e) {
+        lastErrorMsg = e.message || "Script execution failed";
+    }
+    return { success: false, error: "Extension script failed: " + lastErrorMsg };
+}
+
+async function generateTokenInFreshTab(action, pageUrl) {
+    const url = normalizeWorkerPageUrl(pageUrl);
+    let newTabId = null;
+    try {
+        console.log("[Flow2API] Opening fresh Labs tab for captcha:", url);
+        const newTab = await chrome.tabs.create({ url, active: false });
+        newTabId = newTab.id;
+
+        await waitForTabReady(newTabId);
+        await sleep(1200);
+
+        const execResult = await executeRecaptchaScriptInTab(newTabId, action);
+        if (execResult.success) {
+            runtimeState.lastError = "";
+            return { success: true, token: execResult.token };
+        }
+        runtimeState.lastError = execResult.error;
+        return { success: false, error: execResult.error };
+    } catch (err) {
+        runtimeState.lastError = err.message || "unknown_error";
+        return { success: false, error: err.message || "unknown_error" };
+    } finally {
+        if (newTabId) {
+            try {
+                await chrome.tabs.remove(newTabId);
+                console.log("[Flow2API] Closed temporary token tab.");
+            } catch (e) {
+                console.log("[Flow2API] Error closing tab:", e);
+            }
+        }
+    }
+}
+
+async function reopenWorkerLabsPageAfterUpstreamRejection(settings, reason) {
+    const pageUrl = normalizeWorkerPageUrl(settings.workerPageUrl);
+    const auto = settings.autoRecycleWorkerTabOnCaptchaFailure !== false;
+    if (!auto) {
+        pushEvent("upstream_captcha_recycle_skipped", "autoRecycleWorkerTabOnCaptchaFailure disabled", "warn");
+        return;
+    }
+    if (settings.usePersistentWorkerTab) {
+        await recyclePersistentWorkerTab(settings, reason || "upstream_captcha_rejected");
+        return;
+    }
+    const tabId = runtimeState.workerTabId;
+    if (tabId != null) {
+        try {
+            await new Promise((resolve, reject) => {
+                chrome.tabs.update(tabId, { url: pageUrl }, () => {
+                    if (chrome.runtime.lastError) {
+                        reject(new Error(chrome.runtime.lastError.message || "tabs_update_failed"));
+                    } else {
+                        resolve();
+                    }
+                });
+            });
+            await waitForTabReady(tabId);
+            await sleep(800);
+            pushEvent("worker_page_reopened", `Navigated worker tab to Labs (${reason || "upstream_captcha"})`);
+            return;
+        } catch (e) {
+            runtimeState.workerTabId = null;
+            persistWorkerTabId(null);
+            pushEvent("worker_tab_nav_failed", String(e && e.message ? e.message : e), "warn");
+        }
+    }
+    try {
+        const tab = await chrome.tabs.create({ url: pageUrl, active: false });
+        if (tab && tab.id) {
+            pushEvent("worker_page_opened", `Opened Labs tab after upstream captcha rejection (${reason || "upstream"})`);
+        }
+    } catch (e) {
+        pushEvent("worker_page_open_failed", String(e && e.message ? e.message : e), "error");
+    }
+}
+
+async function handleCaptchaUpstreamVerdict(data) {
+    const accepted = !!data.accepted;
+    const captchaRejected = !!data.captcha_rejected;
+    const reqId = String(data.req_id || "");
+    const detail = String(data.detail || "").trim();
+    pushEvent(
+        "captcha_upstream_verdict",
+        `req=${reqId} accepted=${accepted} captcha_rejected=${captchaRejected}${detail ? ` detail=${detail.slice(0, 160)}` : ""}`
+    );
+    if (accepted || !captchaRejected) {
+        return;
+    }
+    const settings = await getSettings();
+    await reopenWorkerLabsPageAfterUpstreamRejection(settings, detail || "upstream_captcha_rejected");
+}
+
+async function recyclePersistentWorkerTab(settings, reason) {
+    const oldId = runtimeState.workerTabId;
+    if (oldId != null) {
+        try {
+            await chrome.tabs.remove(oldId);
+        } catch (_) {}
+    }
+    runtimeState.workerTabId = null;
+    persistWorkerTabId(null);
+    pushEvent("worker_tab_recycled", `Worker tab recycled (${reason})`);
+    const pageUrl = normalizeWorkerPageUrl(settings.workerPageUrl);
+    const newTab = await chrome.tabs.create({ url: pageUrl, active: false });
+    const newId = newTab.id;
+    runtimeState.workerTabId = newId;
+    persistWorkerTabId(newId);
+    await waitForTabReady(newId);
+    await sleep(1200);
+    return newId;
+}
+
+async function ensurePersistentWorkerTab(settings) {
+    const pageUrl = normalizeWorkerPageUrl(settings.workerPageUrl);
+    let tabId = runtimeState.workerTabId;
+
+    if (tabId != null) {
+        const tab = await new Promise((resolve) => {
+            chrome.tabs.get(tabId, (t) => {
+                if (chrome.runtime.lastError) resolve(null);
+                else resolve(t);
+            });
+        });
+        if (!tab) {
+            tabId = null;
+            runtimeState.workerTabId = null;
+            persistWorkerTabId(null);
+        } else {
+            const currentUrl = tab.url || tab.pendingUrl || "";
+            if (!tabUrlMatchesWorker(currentUrl, pageUrl)) {
+                await new Promise((resolve) => {
+                    chrome.tabs.update(tabId, { url: pageUrl }, () => resolve());
+                });
+                await waitForTabReady(tabId);
+                await sleep(1200);
+            }
+            return tabId;
+        }
+    }
+
+    console.log("[Flow2API] Creating persistent worker tab:", pageUrl);
+    const newTab = await chrome.tabs.create({ url: pageUrl, active: false });
+    tabId = newTab.id;
+    runtimeState.workerTabId = tabId;
+    persistWorkerTabId(tabId);
+    await waitForTabReady(tabId);
+    await sleep(1200);
+    pushEvent("worker_tab_created", `Worker tab created (${pageUrl})`);
+    return tabId;
+}
+
+async function generateTokenWithPersistentTab(action, settings) {
+    try {
+        let tabId = await ensurePersistentWorkerTab(settings);
+        const execResult = await executeRecaptchaScriptInTab(tabId, action);
+        if (execResult.success) {
+            runtimeState.lastError = "";
+            return { success: true, token: execResult.token };
+        }
+        runtimeState.lastError = execResult.error;
+        if (settings.autoRecycleWorkerTabOnCaptchaFailure) {
+            tabId = await recyclePersistentWorkerTab(settings, "captcha_failure");
+        }
+        return { success: false, error: execResult.error };
+    } catch (err) {
+        const msg = err.message || "unknown_error";
+        runtimeState.lastError = msg;
+        if (settings.autoRecycleWorkerTabOnCaptchaFailure && runtimeState.workerTabId != null) {
+            try {
+                await recyclePersistentWorkerTab(settings, "captcha_exception");
+            } catch (_) {}
+        }
+        return { success: false, error: msg };
+    }
+}
+
+async function generateTokenForCaptcha(action) {
+    const settings = await getSettings();
+    if (settings.usePersistentWorkerTab) {
+        return generateTokenWithPersistentTab(action, settings);
+    }
+    return generateTokenInFreshTab(action, settings.workerPageUrl);
 }
 
 async function connectWS() {
@@ -434,6 +873,13 @@ async function connectWS() {
             return;
         }
 
+        if (data.type === "captcha_upstream_verdict") {
+            tokenQueue = tokenQueue.then(() => handleCaptchaUpstreamVerdict(data)).catch(err => {
+                console.error("[Flow2API] captcha_upstream_verdict error:", err);
+            });
+            return;
+        }
+
         if (data.type === "get_token") {
             tokenQueue = tokenQueue.then(() => handleGetToken(data)).catch(err => {
                 console.error("[Flow2API] Queue Error:", err);
@@ -468,90 +914,10 @@ async function connectWS() {
     };
 }
 
-async function generateTokenInFreshTab(action) {
-    let newTabId = null;
-    let lastErrorMsg = "No response from tab.";
-    try {
-        console.log("[Flow2API] Auto-opening fresh Google Labs tab to avoid token expiry...");
-        const newTab = await chrome.tabs.create({ url: "https://labs.google/fx/tools/flow", active: false });
-        newTabId = newTab.id;
-
-        await waitForTabReady(newTabId);
-        await sleep(1200);
-
-        let successToken = null;
-        const scriptTimeoutMs = action === "VIDEO_GENERATION" ? 30000 : 20000;
-
-        try {
-            const results = await chrome.scripting.executeScript({
-                target: { tabId: newTabId },
-                world: "MAIN",
-                func: async (action, timeoutMs) => {
-                    return new Promise((resolve, reject) => {
-                        let settled = false;
-                        const finish = (fn, value) => {
-                            if (settled) return;
-                            settled = true;
-                            fn(value);
-                        };
-                        try {
-                            function run() {
-                                grecaptcha.enterprise.ready(function() {
-                                    grecaptcha.enterprise.execute("6LdsFiUsAAAAAIjVDZcuLhaHiDn5nnHVXVRQGeMV", { action: action })
-                                        .then(token => finish(resolve, token))
-                                        .catch(err => finish(reject, err.message || "reCAPTCHA evaluation failed internally"));
-                                });
-                            }
-
-                            if (typeof grecaptcha !== "undefined" && grecaptcha.enterprise) {
-                                run();
-                            } else {
-                                const s = document.createElement("script");
-                                s.src = "https://www.google.com/recaptcha/enterprise.js?render=6LdsFiUsAAAAAIjVDZcuLhaHiDn5nnHVXVRQGeMV";
-                                s.onload = run;
-                                s.onerror = () => finish(reject, "Failed to load enterprise.js via network");
-                                document.head.appendChild(s);
-                            }
-
-                            setTimeout(() => finish(reject, "Timeout generating reCAPTCHA locally"), timeoutMs);
-                        } catch (e) {
-                            finish(reject, e.message);
-                        }
-                    });
-                },
-                args: [action || "IMAGE_GENERATION", scriptTimeoutMs]
-            });
-
-            if (results && results[0] && results[0].result) {
-                successToken = results[0].result;
-            }
-        } catch (e) {
-            lastErrorMsg = e.message || "Script execution failed";
-        }
-
-        if (successToken) {
-            runtimeState.lastError = "";
-            return { success: true, token: successToken };
-        }
-        runtimeState.lastError = lastErrorMsg;
-        return { success: false, error: "Extension script failed: " + lastErrorMsg };
-    } catch (err) {
-        runtimeState.lastError = err.message || "unknown_error";
-        return { success: false, error: err.message || "unknown_error" };
-    } finally {
-        if (newTabId) {
-            try {
-                await chrome.tabs.remove(newTabId);
-                console.log("[Flow2API] Closed temporary token tab.");
-            } catch (e) {
-                console.log("[Flow2API] Error closing tab:", e);
-            }
-        }
-    }
-}
-
 async function handleGetToken(data) {
-    const result = await generateTokenInFreshTab(data.action || "IMAGE_GENERATION");
+    const action = data.action || "IMAGE_GENERATION";
+    const result = await generateTokenForCaptcha(action);
+    recordCaptchaJobCompletion(data.req_id, action, result.success, result.error || "");
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     if (result.success) {
         ws.send(JSON.stringify({
@@ -616,6 +982,14 @@ async function handleRefreshSessionToken(data) {
     await performSessionRefresh({ reason: "server_request", reqId: data && data.req_id ? data.req_id : null });
 }
 
+chrome.tabs.onRemoved.addListener((tabId) => {
+    if (runtimeState.workerTabId != null && tabId === runtimeState.workerTabId) {
+        runtimeState.workerTabId = null;
+        persistWorkerTabId(null);
+        pushEvent("worker_tab_removed", "Worker tab closed (browser)", "warn");
+    }
+});
+
 chrome.storage.onChanged.addListener((changes, areaName) => {
     if (areaName !== "local") return;
     if (
@@ -633,11 +1007,22 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
     }
 });
 
+function mergeStateForStatus(settings) {
+    return {
+        ...runtimeState,
+        workerPageUrl: settings.workerPageUrl,
+        usePersistentWorkerTab: settings.usePersistentWorkerTab,
+        autoRecycleWorkerTabOnCaptchaFailure: settings.autoRecycleWorkerTabOnCaptchaFailure,
+    };
+}
+
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (!message || !message.type) return;
     if (message.type === "get_status") {
-        sendResponse({ success: true, state: runtimeState });
-        return;
+        getSettings().then((s) => {
+            sendResponse({ success: true, state: mergeStateForStatus(s) });
+        });
+        return true;
     }
     if (message.type === "reconnect_now") {
         pushEvent("manual_reconnect", "Manual reconnect triggered");
@@ -660,14 +1045,47 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     }
     if (message.type === "test_token") {
         pushEvent("test_token", `Test token started (${message.action || "IMAGE_GENERATION"})`);
-        generateTokenInFreshTab(message.action || "IMAGE_GENERATION")
+        generateTokenForCaptcha(message.action || "IMAGE_GENERATION")
             .then((result) => sendResponse(result))
             .catch((err) => sendResponse({ success: false, error: err.message || "test_failed" }));
         return true;
     }
+    if (message.type === "worker_tab_open") {
+        getSettings()
+            .then(async (s) => {
+                if (!s.usePersistentWorkerTab) {
+                    sendResponse({ success: false, error: "enable_persistent_worker_tab_first" });
+                    return;
+                }
+                const tabId = await ensurePersistentWorkerTab(s);
+                sendResponse({ success: true, tabId });
+            })
+            .catch((err) => sendResponse({ success: false, error: err.message || "worker_tab_open_failed" }));
+        return true;
+    }
+    if (message.type === "worker_tab_close") {
+        closeWorkerTabIfAny()
+            .then(() => sendResponse({ success: true }))
+            .catch((err) => sendResponse({ success: false, error: err.message || "worker_tab_close_failed" }));
+        return true;
+    }
+    if (message.type === "worker_tab_recycle") {
+        getSettings()
+            .then(async (s) => {
+                if (!s.usePersistentWorkerTab) {
+                    sendResponse({ success: false, error: "enable_persistent_worker_tab_first" });
+                    return;
+                }
+                const tabId = await recyclePersistentWorkerTab(s, "manual");
+                sendResponse({ success: true, tabId });
+            })
+            .catch((err) => sendResponse({ success: false, error: err.message || "worker_tab_recycle_failed" }));
+        return true;
+    }
 });
 
-loadFlowSessionTokenHistoryFromStorage().then(() => {
+Promise.all([loadFlowSessionTokenHistoryFromStorage(), loadExtensionJobAndWorkerState()]).then(() => {
+    validateStoredWorkerTab();
     pushEvent("startup", "Background worker started");
     connectWS();
 });

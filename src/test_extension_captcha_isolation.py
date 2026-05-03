@@ -118,7 +118,7 @@ def test_extension_get_token_isolated_by_managed_api_key():
             ws,
             json.dumps({"req_id": req_id, "status": "success", "token": "tok-abc"}),
         )
-        token = await asyncio.wait_for(token_task, timeout=2)
+        token, _ext_rid = await asyncio.wait_for(token_task, timeout=2)
         assert token == "tok-abc"
 
         with pytest.raises(RuntimeError):
@@ -180,7 +180,7 @@ def test_extension_get_token_fallback_after_dedicated_failure():
             ws_u,
             json.dumps({"req_id": req2, "status": "success", "token": "tok-fallback"}),
         )
-        token = await asyncio.wait_for(token_task, timeout=2)
+        token, _ext_rid = await asyncio.wait_for(token_task, timeout=2)
         assert token == "tok-fallback"
 
     asyncio.run(_run())
@@ -220,7 +220,7 @@ def test_extension_waits_queue_until_worker_connects():
             ws,
             json.dumps({"req_id": req_id, "status": "success", "token": "tok-wait"}),
         )
-        token = await asyncio.wait_for(token_task, timeout=2)
+        token, _ext_rid = await asyncio.wait_for(token_task, timeout=2)
         assert token == "tok-wait"
 
     asyncio.run(_run())

@@ -12,7 +12,7 @@
       color: #111827;
     }
     .wrap {
-      max-width: 720px;
+      max-width: 920px;
       margin: 0 auto;
       padding: 24px;
     }
@@ -27,6 +27,11 @@
       font-size: 20px;
       margin: 0 0 8px;
     }
+    h2 {
+      font-size: 15px;
+      margin: 20px 0 10px;
+      color: #111827;
+    }
     p {
       color: #4b5563;
       line-height: 1.5;
@@ -36,7 +41,8 @@
       margin: 16px 0 8px;
       font-weight: 600;
     }
-    input {
+    input[type="text"],
+    input[type="password"] {
       width: 100%;
       box-sizing: border-box;
       padding: 10px 12px;
@@ -54,10 +60,69 @@
       font-size: 14px;
       cursor: pointer;
     }
+    button.secondary {
+      background: #374151;
+    }
+    button.danger {
+      background: #b91c1c;
+    }
+    button:disabled {
+      opacity: 0.55;
+      cursor: not-allowed;
+    }
+    .btn-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      margin-top: 12px;
+    }
+    .btn-row button {
+      margin-top: 0;
+    }
     .hint {
       margin-top: 12px;
       font-size: 13px;
       color: #6b7280;
+    }
+    .metrics-grid {
+      margin-top: 12px;
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+    @media (min-width: 640px) {
+      .metrics-grid {
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+      }
+    }
+    .metric-card {
+      border: 1px solid #e5e7eb;
+      background: linear-gradient(180deg, #fafafa 0%, #fff 100%);
+      border-radius: 10px;
+      padding: 12px;
+      min-height: 72px;
+    }
+    .metric-label {
+      display: block;
+      font-size: 11px;
+      color: #6b7280;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      margin-bottom: 6px;
+    }
+    .metric-value {
+      font-size: 22px;
+      font-weight: 700;
+      color: #111827;
+      line-height: 1.2;
+    }
+    .metric-value.ok { color: #047857; }
+    .metric-value.bad { color: #b91c1c; }
+    .metric-sub {
+      font-size: 12px;
+      color: #6b7280;
+      margin-top: 4px;
     }
     .status-grid {
       margin-top: 12px;
@@ -115,13 +180,35 @@
       border-bottom: 1px solid #e5e7eb;
       background: #f8fafc;
       color: #374151;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 10px;
+      justify-content: space-between;
+    }
+    .event-head label {
+      margin: 0;
+      font-weight: 500;
+      font-size: 12px;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .event-head select {
+      font-size: 12px;
+      padding: 4px 8px;
+      border-radius: 8px;
+      border: 1px solid #d1d5db;
     }
     .event-list {
-      max-height: 180px;
+      max-height: 220px;
       overflow-y: auto;
       padding: 0;
       margin: 0;
       list-style: none;
+    }
+    .event-list.tall {
+      max-height: 280px;
     }
     .event-item {
       border-bottom: 1px solid #f1f5f9;
@@ -137,6 +224,28 @@
       word-break: break-all;
       white-space: pre-wrap;
     }
+    .job-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+    }
+    .job-table th,
+    .job-table td {
+      padding: 8px 10px;
+      text-align: left;
+      border-bottom: 1px solid #f1f5f9;
+      vertical-align: top;
+    }
+    .job-table th {
+      background: #f8fafc;
+      color: #64748b;
+      font-weight: 600;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+    }
+    .job-ok { color: #047857; font-weight: 600; }
+    .job-fail { color: #b91c1c; font-weight: 600; }
     .event-time {
       color: #6b7280;
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -219,6 +328,25 @@
       border-bottom: 1px solid #f3f4f6;
       margin-bottom: 8px;
     }
+    .checkbox-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-top: 12px;
+    }
+    .checkbox-row input[type="checkbox"] {
+      width: 18px;
+      height: 18px;
+    }
+    .checkbox-row label {
+      margin: 0;
+      font-weight: 500;
+    }
+    .section-border {
+      margin-top: 20px;
+      padding-top: 16px;
+      border-top: 1px solid #e5e7eb;
+    }
   </style>
 </head>
 <body>
@@ -230,7 +358,29 @@
         Only one mode is active at a time after you save.
       </p>
 
-      <div class="shared-block">
+      <h2>Captcha jobs</h2>
+      <div class="metrics-grid" id="metricsGrid"></div>
+
+      <h2>Job history</h2>
+      <div class="event-wrap">
+        <div class="event-head">Recent server captcha jobs (newest first)</div>
+        <div style="overflow-x: auto;">
+          <table class="job-table" id="jobHistoryTable">
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Action</th>
+                <th>Result</th>
+                <th>req_id</th>
+                <th>Error</th>
+              </tr>
+            </thead>
+            <tbody id="jobHistoryBody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="shared-block section-border">
         <label for="serverUrl">WebSocket URL</label>
         <input id="serverUrl" type="text" placeholder="wss://example.com/captcha_ws">
         <p class="hint" style="margin-top:8px;margin-bottom:0;">
@@ -260,13 +410,38 @@
         <input id="workerAuthKey" type="password" placeholder="Paste dedicated worker key here">
       </div>
 
-      <button id="saveBtn" type="button">Save</button>
-      <button id="reconnectBtn" type="button" style="margin-left:8px;background:#1f2937;">Reconnect Now</button>
-      <button id="testBtn" type="button" style="margin-left:8px;background:#374151;">Test Token</button>
-      <button id="resetBtn" type="button" style="margin-left:8px;background:#b91c1c;">Reset extension</button>
+      <button id="saveBtn" type="button">Save connection</button>
+      <button id="reconnectBtn" type="button" class="secondary" style="margin-left:8px;">Reconnect Now</button>
+      <button id="testBtn" type="button" class="secondary" style="margin-left:8px;">Test Token</button>
+      <button id="resetBtn" type="button" class="danger" style="margin-left:8px;">Reset extension</button>
       <div class="status" id="status"></div>
+
+      <h2 class="section-border">Worker tab (Labs / Flow)</h2>
+      <p class="hint" style="margin-top:0;">
+        Optional: keep one background tab for reCAPTCHA instead of opening a new tab every job.
+        Worker page URL must stay on <code>https://labs.google/...</code> so the extension can script the page.
+      </p>
+      <label for="workerPageUrl">Worker page URL</label>
+      <input id="workerPageUrl" type="text" placeholder="https://labs.google/fx/tools/flow">
+      <div class="checkbox-row">
+        <input type="checkbox" id="usePersistentWorkerTab">
+        <label for="usePersistentWorkerTab">Use persistent worker tab</label>
+      </div>
+      <div class="checkbox-row">
+        <input type="checkbox" id="autoRecycleWorkerTabOnCaptchaFailure">
+        <label for="autoRecycleWorkerTabOnCaptchaFailure">Auto-recycle worker tab after captcha failure</label>
+      </div>
+      <div class="btn-row">
+        <button type="button" id="saveWorkerBtn" class="secondary">Save worker tab settings</button>
+        <button type="button" id="workerOpenBtn" class="secondary">Open worker tab</button>
+        <button type="button" id="workerCloseBtn" class="secondary">Close worker tab</button>
+        <button type="button" id="workerRecycleBtn" class="secondary">Recycle worker tab</button>
+      </div>
+
+      <h2 class="section-border">Connection status</h2>
       <div class="status-grid" id="statusCards"></div>
       <div class="status-meta" id="statusMeta">Last update: —</div>
+
       <div class="event-wrap">
         <div class="event-head">Recent Flow session tokens (last 3, newest first)</div>
         <ul class="event-list" id="sessionTokenHistoryList">
@@ -274,14 +449,23 @@
         </ul>
       </div>
       <div class="event-wrap">
-        <div class="event-head">Recent events (latest 10)</div>
-        <ul class="event-list" id="eventLogList">
+        <div class="event-head">
+          <span>Activity log</span>
+          <label>
+            Show
+            <select id="eventLogFilter" aria-label="Filter activity log">
+              <option value="all">All</option>
+              <option value="issues">Errors &amp; warnings</option>
+            </select>
+          </label>
+        </div>
+        <ul class="event-list tall" id="eventLogList">
           <li class="event-item">No recent events</li>
         </ul>
       </div>
       <div class="hint">
-        WebSocket URL is shared. Saving as <strong>End user</strong> clears the worker key; saving as <strong>Worker</strong> clears API key, client label, and route key.
-        <strong>Reset extension</strong> clears all saved settings, the last-3 Flow session token history, generates a new instance id, and reconnects with defaults.
+        WebSocket URL is shared. Saving <strong>connection</strong> as End user clears the worker key; saving as Worker clears API key, client label, and route key.
+        <strong>Reset extension</strong> clears connection keys, worker tab settings, captcha job stats, job history, session refresh counters, the last-3 Flow session token history, worker tab id, generates a new instance id, and reconnects with defaults.
       </div>
     </div>
   </div>

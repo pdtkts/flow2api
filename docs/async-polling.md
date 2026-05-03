@@ -76,6 +76,9 @@ Notes:
   "upscale_status": "completed",
   "upscale_error_message": null,
   "error_message": null,
+  "job_phase": "completed",
+  "captcha_status": "not_applicable",
+  "captcha_detail": null,
   "created_at": "2026-04-29T13:14:55.000000",
   "completed_at": "2026-04-29T13:15:12.000000"
 }
@@ -107,6 +110,55 @@ Terminal states:
 - `completed`: generation finished; URLs and metadata may be present.
 - `failed`: generation failed; check `error_message`.
 
+While `status` stays `processing`, use `job_phase`, `captcha_status`, and `upscale_status` for finer-grained UX (for example waiting on extension captcha vs waiting on upscale HTTP).
+
+## Job status reference
+
+### Top-level `status` (`GET /v1/jobs/{job_id}`)
+
+| Value | Terminal? | Meaning |
+|-------|------------|---------|
+| `processing` | No | Job still running; use `job_phase`, `captcha_status`, `upscale_status` for detail. |
+| `completed` | Yes | Success; URLs populated per existing rules. |
+| `failed` | Yes | Failure; see `error_message` (and `captcha_detail` / `upscale_error_message` when relevant). |
+
+### `job_phase` (non-terminal while `status=processing`)
+
+| Value | Typical `captcha_status` / notes |
+|-------|--------------------------------|
+| `queued` | Job accepted; worker may not have entered captcha yet. |
+| `generation_captcha` | `pending` -> `token_acquired` / `token_failed` |
+| `generation_submitted` | `token_acquired` — Flow generate (or video submit) request sent. |
+| `generation_awaiting` | `token_acquired` or `idle` — waiting on upstream HTTP or long-running generation. |
+| `upscale_captcha` | `pending` again (second captcha round before upsample). |
+| `upscale_submitted` | `token_acquired` — upsample request sent; `upscale_status` usually `processing`. |
+| `upscale_awaiting` | Waiting on upsample HTTP response. |
+| `finalizing` | Optional — cache / URL enrichment before terminal. |
+| `completed` | Mirrors `status=completed`. |
+| `failed` | Mirrors `status=failed`. |
+
+### `captcha_status`
+
+| Value | Meaning |
+|-------|---------|
+| `not_applicable` | Captcha not relevant to terminal success summary, or deployment path without a captcha gate. |
+| `idle` | No captcha work in progress for the current step. |
+| `pending` | Obtaining token for the current `job_phase` (generation vs upscale). |
+| `token_acquired` | Token obtained; submit or upstream in flight for that phase. |
+| `token_failed` | Could not obtain token (timeout, extension error, etc.); see `captcha_detail`. |
+| `upstream_rejected` | Token was sent; Flow returned captcha-related failure. |
+| `unknown` | Failed but could not classify as captcha vs other upstream error. |
+
+### `upscale_status`
+
+| Value | When set |
+|-------|-----------|
+| `not_requested` | Model has no upscale / 1x path. |
+| `pending` | Upscale planned; base generation not done yet. |
+| `processing` | Upsample API call in progress (after second captcha if applicable). |
+| `completed` | Upscale succeeded or not needed; final URLs reflect upscale. |
+| `failed` | Upscale failed; see `upscale_error_message`. |
+
 ## Response Field Semantics
 
 - `result_urls`: final pipeline URLs (often upscaled or final output).
@@ -114,7 +166,9 @@ Terminal states:
 - `delivery_urls`: preferred URLs clients should render first.
 - `requested_resolution`: target resolution inferred from model config (for example `4k`, `2k`, `1080p`).
 - `output_resolution`: delivered output resolution.
-- `upscale_status`: `not_requested`, `processing`, `completed`, or `failed`.
+- `job_phase`: coarse pipeline stage for pollers (see tables above).
+- `captcha_status` / `captcha_detail`: latest captcha gate outcome for the current phase.
+- `upscale_status`: `not_requested`, `pending`, `processing`, `completed`, or `failed`.
 - `upscale_error_message`: upscale-specific error details when applicable.
 - `project_id`: project selected for the job.
 

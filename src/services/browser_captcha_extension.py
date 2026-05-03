@@ -32,6 +32,8 @@ class ExtensionCaptchaService:
         self.db = db
         self.active_connections: list[ExtensionConnection] = []
         self.pending_requests: dict[str, tuple[asyncio.Future, WebSocket]] = {}
+        # req_id -> websocket to notify after Flow upstream accepts/rejects the token
+        self._upstream_verdict_targets: dict[str, WebSocket] = {}
         self._state_lock = asyncio.Lock()
         self._connection_changed = asyncio.Condition()
         self._queue_waiters: dict[str, int] = {}
@@ -170,6 +172,9 @@ class ExtensionCaptchaService:
         for conn in list(self.active_connections):
             if conn.websocket is websocket:
                 self.active_connections.remove(conn)
+                stale_reqs = [rid for rid, ws in list(self._upstream_verdict_targets.items()) if ws is websocket]
+                for rid in stale_reqs:
+                    self._upstream_verdict_targets.pop(rid, None)
                 debug_logger.log_info(
                     f"[Extension Captcha] Client disconnected. Total: {len(self.active_connections)}, "
                     f"worker_session_id={conn.worker_session_id}, "
@@ -533,7 +538,7 @@ class ExtensionCaptchaService:
         managed_api_key_id: Optional[int],
         timeout: int,
         selection_meta: Optional[Dict[str, Any]] = None,
-    ) -> Optional[str]:
+    ) -> tuple[Optional[str], Optional[str]]:
         req_id = f"req_{uuid.uuid4().hex}"
         future = asyncio.get_running_loop().create_future()
         self.pending_requests[req_id] = (future, conn.websocket)
@@ -566,18 +571,59 @@ class ExtensionCaptchaService:
             await conn.websocket.send_text(json.dumps(request_data))
             result = await asyncio.wait_for(future, timeout=timeout)
             if result.get("status") == "success":
-                return result.get("token")
+                tok = result.get("token")
+                if isinstance(tok, str) and tok.strip():
+                    async with self._state_lock:
+                        self._upstream_verdict_targets[req_id] = conn.websocket
+                    return tok.strip(), req_id
+                return None, None
             error_msg = result.get("error")
             debug_logger.log_error(f"[Extension Captcha] Error from extension: {error_msg}")
-            return None
+            return None, None
         except asyncio.TimeoutError:
             debug_logger.log_error(f"[Extension Captcha] Timeout waiting for token (req_id: {req_id})")
-            return None
+            return None, None
         except Exception as e:
             debug_logger.log_error(f"[Extension Captcha] Communication error: {e}")
-            return None
+            return None, None
         finally:
             self.pending_requests.pop(req_id, None)
+
+    async def notify_upstream_verdict(
+        self,
+        req_id: Optional[str],
+        *,
+        accepted: bool,
+        captcha_rejected: bool,
+        detail: Optional[str] = None,
+    ) -> None:
+        """Tell the extension whether Flow accepted the reCAPTCHA token (same WebSocket as get_token)."""
+        rid = (req_id or "").strip()
+        if not rid:
+            return
+        async with self._state_lock:
+            websocket = self._upstream_verdict_targets.pop(rid, None)
+        if websocket is None:
+            return
+        payload = {
+            "type": "captcha_upstream_verdict",
+            "req_id": rid,
+            "accepted": bool(accepted),
+            "captcha_rejected": bool(captcha_rejected),
+            "detail": (detail or "")[:500],
+        }
+        try:
+            await websocket.send_text(json.dumps(payload))
+        except Exception as exc:
+            debug_logger.log_warning(f"[Extension Captcha] Failed to send upstream verdict: {exc}")
+
+    async def abandon_upstream_verdict(self, req_id: Optional[str]) -> None:
+        """Remove pending verdict routing without notifying (e.g. request failed before HTTP response)."""
+        rid = (req_id or "").strip()
+        if not rid:
+            return
+        async with self._state_lock:
+            self._upstream_verdict_targets.pop(rid, None)
 
     async def get_token(
         self,
@@ -586,7 +632,7 @@ class ExtensionCaptchaService:
         timeout: int = 20,
         token_id: Optional[int] = None,
         managed_api_key_id: Optional[int] = None,
-    ) -> Optional[str]:
+    ) -> tuple[Optional[str], Optional[str]]:
         route_key = ""
         if managed_api_key_id is None:
             route_key = await self._resolve_route_key(token_id)
@@ -623,7 +669,7 @@ class ExtensionCaptchaService:
                 f"Available route keys: {available}. Active workers: {workers_verbose}"
             )
 
-        token = await self._extension_recaptcha_token_once(
+        token, ext_req_id = await self._extension_recaptcha_token_once(
             conn,
             project_id=project_id,
             action=action,
@@ -633,7 +679,7 @@ class ExtensionCaptchaService:
             selection_meta=sel_meta if sel_meta else None,
         )
         if token:
-            return token
+            return token, ext_req_id
 
         use_fallback = (
             fallback_to_managed
@@ -643,7 +689,7 @@ class ExtensionCaptchaService:
             and int(conn.dedicated_token_id) == int(token_id)
         )
         if not use_fallback:
-            return None
+            return None, None
 
         sel_meta2: Dict[str, Any] = {}
         conn2 = await self._wait_for_connection(
@@ -655,7 +701,7 @@ class ExtensionCaptchaService:
             selection_meta_out=sel_meta2,
         )
         if conn2 is None or conn2.websocket is conn.websocket:
-            return None
+            return None, None
         debug_logger.log_info(
             "[Extension Captcha] Retrying reCAPTCHA on managed-key end-user extension "
             f"after dedicated worker failure (token_id={token_id}, managed_api_key_id={managed_api_key_id})"

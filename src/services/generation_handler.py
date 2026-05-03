@@ -756,6 +756,27 @@ class GenerationHandler:
             return text
         return f"{text[:max_length - 3]}..."
 
+    async def _maybe_update_poll_task(self, poll_task_id: Optional[str], **kwargs: Any) -> None:
+        """Best-effort `tasks` row updates for `GET /v1/jobs/{job_id}` when async polling is active."""
+        if not poll_task_id:
+            return
+        updates = {k: v for k, v in kwargs.items() if v is not None}
+        if not updates:
+            return
+        try:
+            await self.db.update_task(poll_task_id, **updates)
+        except Exception as exc:
+            debug_logger.log_warning(f"[poll_task] update_task failed: {exc}")
+
+    def _build_poll_task_progress_hook(self, poll_task_id: Optional[str]):
+        if not poll_task_id:
+            return None
+
+        async def _hook(updates: Dict[str, Any]) -> None:
+            await self._maybe_update_poll_task(poll_task_id, **updates)
+
+        return _hook
+
     def _resolve_video_model_key_for_tier(self, model_config: Dict[str, Any], user_tier: str) -> tuple[str, Optional[str]]:
         """根据账号层级调整视频模型 key。"""
         model_key = model_config["model_key"]
@@ -825,6 +846,7 @@ class GenerationHandler:
         api_key_id: Optional[int] = None,
         requested_project_id: Optional[str] = None,
         video_media_id: Optional[str] = None,
+        poll_task_id: Optional[str] = None,
     ) -> AsyncGenerator:
         """统一生成入口
 
@@ -833,6 +855,7 @@ class GenerationHandler:
             prompt: 提示词
             images: 图片列表 (bytes格式)
             stream: 是否流式输出
+            poll_task_id: When set (async OpenAI job id), persist captcha/upscale phase to `tasks` for polling.
         """
         start_time = time.time()
         token = None
@@ -1061,6 +1084,11 @@ class GenerationHandler:
                 progress=22,
                 response_extra={"project_id": project_id},
             )
+            await self._maybe_update_poll_task(
+                poll_task_id,
+                job_phase="generation_captcha",
+                captcha_status="pending",
+            )
             prefill_action = "IMAGE_GENERATION" if generation_type == "image" else "VIDEO_GENERATION"
             await self.flow_client.prefill_remote_browser_pool(
                 project_id=project_id,
@@ -1079,7 +1107,8 @@ class GenerationHandler:
                     generation_result=generation_result,
                     response_state=response_state,
                     request_log_state=request_log_state,
-                    pending_token_state=pending_token_state
+                    pending_token_state=pending_token_state,
+                    poll_task_id=poll_task_id,
                 ):
                     yield chunk
             else:  # video
@@ -1092,7 +1121,8 @@ class GenerationHandler:
                     response_state=response_state,
                     request_log_state=request_log_state,
                     pending_token_state=pending_token_state,
-                    video_media_id=video_media_id
+                    video_media_id=video_media_id,
+                    poll_task_id=poll_task_id,
                 ):
                     yield chunk
             perf_trace["generation_pipeline_ms"] = int((time.time() - generation_pipeline_started_at) * 1000)
@@ -1267,7 +1297,7 @@ class GenerationHandler:
         response_state: Optional[Dict[str, Any]] = None,
         request_log_state: Optional[Dict[str, Any]] = None,
         pending_token_state: Optional[Dict[str, bool]] = None,
-        video_media_id: Optional[str] = None
+        poll_task_id: Optional[str] = None,
     ) -> AsyncGenerator:
         """处理图片生成 (同步返回)"""
 
@@ -1330,6 +1360,7 @@ class GenerationHandler:
                     progress=progress,
                 )
 
+            poll_hook = self._build_poll_task_progress_hook(poll_task_id)
             generate_started_at = time.time()
             result, generation_session_id, upstream_trace = await self.flow_client.generate_image(
                 at=token.at,
@@ -1341,6 +1372,7 @@ class GenerationHandler:
                 token_id=token.id,
                 token_image_concurrency=token.image_concurrency,
                 progress_callback=_image_progress_callback,
+                poll_task_progress=poll_hook,
             )
             if image_trace is not None:
                 image_trace["generate_api_ms"] = int((time.time() - generate_started_at) * 1000)
@@ -1371,9 +1403,21 @@ class GenerationHandler:
                 "origin_image_url": image_url
             }
 
+            if poll_task_id and not (model_config.get("upsample") and media_id):
+                await self._maybe_update_poll_task(
+                    poll_task_id,
+                    job_phase="finalizing",
+                    captcha_status="idle",
+                )
+
             # 检查是否需要 upsample
             upsample_resolution = model_config.get("upsample")
             if upsample_resolution and media_id:
+                await self._maybe_update_poll_task(
+                    poll_task_id,
+                    job_phase="upscale_captcha",
+                    captcha_status="pending",
+                )
                 upsample_started_at = time.time()
                 resolution_name = "4K" if "4K" in upsample_resolution else "2K"
                 await self._update_request_log_progress(request_log_state, token_id=token.id, status_text=f"upsampling_{resolution_name.lower()}", progress=82)
@@ -1392,10 +1436,16 @@ class GenerationHandler:
                             target_resolution=upsample_resolution,
                             user_paygate_tier=normalized_tier,
                             session_id=generation_session_id,
-                            token_id=token.id
+                            token_id=token.id,
+                            poll_task_progress=poll_hook,
                         )
 
                         if encoded_image:
+                            await self._maybe_update_poll_task(
+                                poll_task_id,
+                                job_phase="finalizing",
+                                upscale_status="processing",
+                            )
                             debug_logger.log_info(f"[UPSAMPLE] 图片已放大到 {resolution_name}")
 
                             if stream:
@@ -1582,7 +1632,8 @@ class GenerationHandler:
         response_state: Optional[Dict[str, Any]] = None,
         request_log_state: Optional[Dict[str, Any]] = None,
         pending_token_state: Optional[Dict[str, bool]] = None,
-        video_media_id: Optional[str] = None
+        video_media_id: Optional[str] = None,
+        poll_task_id: Optional[str] = None,
     ) -> AsyncGenerator:
         """处理视频生成 (异步轮询)"""
 
@@ -1596,6 +1647,7 @@ class GenerationHandler:
 
         # 不在本地等待视频硬并发槽位；请求一到就直接向上游提交。
         normalized_tier = normalize_user_paygate_tier(token.user_paygate_tier)
+        poll_hook = self._build_poll_task_progress_hook(poll_task_id)
 
         if video_trace is not None:
             video_trace["slot_wait_ms"] = 0
@@ -1720,6 +1772,7 @@ class GenerationHandler:
                         user_paygate_tier=normalized_tier,
                         token_id=token.id,
                         token_video_concurrency=token.video_concurrency,
+                        poll_task_progress=poll_hook,
                     )
                 else:
                     # 只有首帧 - 需要去掉 model_key 中的 _fl
@@ -1740,6 +1793,7 @@ class GenerationHandler:
                         user_paygate_tier=normalized_tier,
                         token_id=token.id,
                         token_video_concurrency=token.video_concurrency,
+                        poll_task_progress=poll_hook,
                     )
 
             # R2V: 多图生成
@@ -1754,6 +1808,7 @@ class GenerationHandler:
                     user_paygate_tier=normalized_tier,
                     token_id=token.id,
                     token_video_concurrency=token.video_concurrency,
+                    poll_task_progress=poll_hook,
                 )
 
             # Extend: 视频续写
@@ -1775,6 +1830,7 @@ class GenerationHandler:
                     user_paygate_tier=normalized_tier,
                     token_id=token.id,
                     token_video_concurrency=token.video_concurrency,
+                    poll_task_progress=poll_hook,
                 )
 
             # T2V 或 R2V无图: 纯文本生成
@@ -1789,6 +1845,7 @@ class GenerationHandler:
                     user_paygate_tier=normalized_tier,
                     token_id=token.id,
                     token_video_concurrency=token.video_concurrency,
+                    poll_task_progress=poll_hook,
                 )
             if video_trace is not None:
                 video_trace["submit_generation_ms"] = int((time.time() - submit_started_at) * 1000)
@@ -1842,6 +1899,7 @@ class GenerationHandler:
                 response_state,
                 request_log_state,
                 extend_source_media_id=extend_source_id,
+                poll_task_id=poll_task_id,
             ):
                 yield chunk
 
@@ -1859,7 +1917,8 @@ class GenerationHandler:
         generation_result: Optional[Dict[str, Any]] = None,
         response_state: Optional[Dict[str, Any]] = None,
         request_log_state: Optional[Dict[str, Any]] = None,
-        extend_source_media_id: Optional[str] = None
+        extend_source_media_id: Optional[str] = None,
+        poll_task_id: Optional[str] = None,
     ) -> AsyncGenerator:
         """轮询视频生成结果
         
@@ -1869,6 +1928,8 @@ class GenerationHandler:
 
         if response_state is None:
             response_state = self._create_response_state()
+
+        poll_hook = self._build_poll_task_progress_hook(poll_task_id)
 
         max_attempts = config.max_poll_attempts
         poll_interval = config.poll_interval
@@ -1929,6 +1990,11 @@ class GenerationHandler:
                             yield self._create_stream_chunk(f"\n视频生成完成，开始 {resolution_name} 放大处理...（可能需要 30 分钟）\n")
                         
                         try:
+                            await self._maybe_update_poll_task(
+                                poll_task_id,
+                                job_phase="upscale_captcha",
+                                captcha_status="pending",
+                            )
                             # 提交放大任务
                             upsample_result = await self.flow_client.upsample_video(
                                 at=token.at,
@@ -1939,6 +2005,7 @@ class GenerationHandler:
                                 model_key=upsample_config["model_key"],
                                 token_id=token.id,
                                 token_video_concurrency=token.video_concurrency,
+                                poll_task_progress=poll_hook,
                             )
                             
                             upsample_operations = upsample_result.get("operations", [])
@@ -1957,6 +2024,7 @@ class GenerationHandler:
                                     generation_result,
                                     response_state,
                                     request_log_state,
+                                    poll_task_id=poll_task_id,
                                     extend_source_media_id=extend_source_media_id,
                                 ):
                                     yield chunk

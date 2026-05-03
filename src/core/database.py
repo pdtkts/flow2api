@@ -1266,6 +1266,9 @@ class Database:
                 "output_resolution": "TEXT",
                 "upscale_status": "TEXT",
                 "upscale_error_message": "TEXT",
+                "job_phase": "TEXT",
+                "captcha_status": "TEXT",
+                "captcha_detail": "TEXT",
             }
             for column_name, column_type in async_columns.items():
                 if not await self._column_exists(db, "tasks", column_name):
@@ -1679,9 +1682,9 @@ class Database:
                     task_id, token_id, api_key_id, project_id, model, prompt, status, progress,
                     result_urls, base_result_urls, delivery_urls,
                     requested_resolution, output_resolution, upscale_status, upscale_error_message,
-                    scene_id
+                    scene_id, job_phase, captcha_status, captcha_detail
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 task.task_id,
                 task.token_id,
@@ -1699,6 +1702,9 @@ class Database:
                 task.upscale_status,
                 task.upscale_error_message,
                 task.scene_id,
+                task.job_phase,
+                task.captcha_status,
+                task.captcha_detail,
             ))
             await db.commit()
             return cursor.lastrowid

@@ -625,6 +625,7 @@ async def _collect_non_stream_result(
     allowed_token_ids: Optional[set[int]] = None,
     selection_context: Optional[Dict[str, Any]] = None,
     api_key_id: Optional[int] = None,
+    poll_task_id: Optional[str] = None,
 ) -> str:
     handler = _ensure_generation_handler()
     result = None
@@ -639,6 +640,7 @@ async def _collect_non_stream_result(
         api_key_id=api_key_id,
         requested_project_id=normalized.project_id,
         video_media_id=normalized.video_media_id,
+        poll_task_id=poll_task_id,
     ):
         result = chunk
 
@@ -757,6 +759,13 @@ def _infer_requested_resolution(model: str) -> Optional[str]:
 def _new_async_job_id() -> str:
     # Example: gen-20260429-181455-a1b2c3d4
     return f"gen-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
+
+
+def _infer_async_failed_captcha_status(message: str) -> str:
+    m = (message or "").lower()
+    if any(s in m for s in ("recaptcha", "captcha", "public_error")):
+        return "upstream_rejected"
+    return "unknown"
 
 
 def _looks_like_mojibake(text: str) -> bool:
@@ -891,6 +900,7 @@ async def _run_async_generation_task(
             allowed_token_ids,
             selection_context,
             api_key_id,
+            poll_task_id=task_id,
         )
         payload = _enrich_payload_with_direct_url(_parse_handler_result(raw_result))
         if "error" in payload:
@@ -908,6 +918,8 @@ async def _run_async_generation_task(
                 error_message=error_msg,
                 upscale_status="failed" if _infer_requested_resolution(normalized.model) else "not_requested",
                 completed_at=datetime.utcnow(),
+                job_phase="failed",
+                captcha_status=_infer_async_failed_captcha_status(error_msg),
             )
             return
 
@@ -924,18 +936,23 @@ async def _run_async_generation_task(
             upscale_status=fields["upscale_status"],
             upscale_error_message=fields["upscale_error_message"],
             completed_at=datetime.utcnow(),
+            job_phase="completed",
+            captcha_status="not_applicable",
         )
         debug_logger.log_info(
             f"[ASYNC JOB] completed task: task_id={task_id}, status=completed, result_count={len(fields.get('delivery_urls') or [])}"
         )
     except Exception as exc:
         debug_logger.log_error(f"[ASYNC JOB] Generation failed for task {task_id}: {exc}")
+        err_final = _sanitize_async_error_message(exc, selection_context=selection_context)
         await handler.db.update_task(
             task_id,
             status="failed",
-            error_message=_sanitize_async_error_message(exc, selection_context=selection_context),
+            error_message=err_final,
             upscale_status="failed" if _infer_requested_resolution(normalized.model) else "not_requested",
             completed_at=datetime.utcnow(),
+            job_phase="failed",
+            captcha_status=_infer_async_failed_captcha_status(err_final),
         )
 
 
@@ -1843,7 +1860,9 @@ async def create_chat_completion_async(
                 status="processing",
                 progress=0,
                 requested_resolution=_infer_requested_resolution(normalized.model),
-                upscale_status="processing" if _infer_requested_resolution(normalized.model) else "not_requested",
+                upscale_status="pending" if _infer_requested_resolution(normalized.model) else "not_requested",
+                job_phase="queued",
+                captcha_status="pending",
             )
         )
 
@@ -1898,6 +1917,9 @@ async def get_job_status(
         "upscale_status": task.upscale_status,
         "upscale_error_message": task.upscale_error_message,
         "error_message": task.error_message,
+        "job_phase": getattr(task, "job_phase", None),
+        "captcha_status": getattr(task, "captcha_status", None),
+        "captcha_detail": getattr(task, "captcha_detail", None),
         "created_at": task.created_at.isoformat() if task.created_at else None,
         "completed_at": task.completed_at.isoformat() if task.completed_at else None,
     }
