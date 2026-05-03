@@ -21,18 +21,6 @@ from .file_cache import FileCache
 
 # Model configuration
 MODEL_CONFIG = {
-    # 图片生成 - GEM_PIX (Gemini 2.5 Flash)
-    "gemini-2.5-flash-image-landscape": {
-        "type": "image",
-        "model_name": "GEM_PIX",
-        "aspect_ratio": "IMAGE_ASPECT_RATIO_LANDSCAPE"
-    },
-    "gemini-2.5-flash-image-portrait": {
-        "type": "image",
-        "model_name": "GEM_PIX",
-        "aspect_ratio": "IMAGE_ASPECT_RATIO_PORTRAIT"
-    },
-
     # 图片生成 - GEM_PIX_2 (Gemini 3.0 Pro)
     "gemini-3.0-pro-image-landscape": {
         "type": "image",
@@ -687,6 +675,186 @@ MODEL_CONFIG = {
 }
 
 
+def _make_t2v_config(
+    model_key: str,
+    aspect_ratio: str,
+    *,
+    use_v2_model_config: bool = False,
+    allow_tier_upgrade: bool = True,
+    upsample: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
+    cfg: Dict[str, Any] = {
+        "type": "video",
+        "video_type": "t2v",
+        "model_key": model_key,
+        "aspect_ratio": aspect_ratio,
+        "supports_images": False,
+    }
+    if use_v2_model_config:
+        cfg["use_v2_model_config"] = True
+    if not allow_tier_upgrade:
+        cfg["allow_tier_upgrade"] = False
+    if upsample:
+        cfg["upsample"] = upsample
+    return cfg
+
+
+def _make_i2v_config(
+    model_key: str,
+    aspect_ratio: str,
+    *,
+    min_images: int = 1,
+    max_images: int = 2,
+    use_v2_model_config: bool = False,
+    allow_tier_upgrade: bool = True,
+    upsample: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
+    cfg: Dict[str, Any] = {
+        "type": "video",
+        "video_type": "i2v",
+        "model_key": model_key,
+        "aspect_ratio": aspect_ratio,
+        "supports_images": True,
+        "min_images": min_images,
+        "max_images": max_images,
+    }
+    if use_v2_model_config:
+        cfg["use_v2_model_config"] = True
+    if not allow_tier_upgrade:
+        cfg["allow_tier_upgrade"] = False
+    if upsample:
+        cfg["upsample"] = upsample
+    return cfg
+
+
+def _apply_veo_3_1_model_updates():
+    """Keep the public aliases aligned with the current Veo 3.1 model families."""
+    landscape = "VIDEO_ASPECT_RATIO_LANDSCAPE"
+    portrait = "VIDEO_ASPECT_RATIO_PORTRAIT"
+
+    # Non-fast/non-lite Veo 3.1 aliases must call Quality upstream keys.
+    MODEL_CONFIG["veo_3_1_t2v_landscape"].update({"model_key": "veo_3_1_t2v"})
+    MODEL_CONFIG["veo_3_1_t2v_portrait"].update({"model_key": "veo_3_1_t2v_portrait"})
+    MODEL_CONFIG["veo_3_1_i2v_s_landscape"].update({"model_key": "veo_3_1_i2v_s_fl"})
+    MODEL_CONFIG["veo_3_1_i2v_s_portrait"].update({"model_key": "veo_3_1_i2v_s_portrait_fl"})
+    MODEL_CONFIG["veo_3_1_extend"].update({"model_key": "veo_3_1_extend_landscape"})
+    MODEL_CONFIG["veo_3_1_extend_portrait"].update({"model_key": "veo_3_1_extend_portrait"})
+
+    for seconds in (4, 6):
+        suffix = f"{seconds}s"
+
+        # T2V duration variants.
+        MODEL_CONFIG[f"veo_3_1_t2v_fast_{suffix}"] = _make_t2v_config(
+            f"veo_3_1_t2v_fast_{suffix}", landscape
+        )
+        MODEL_CONFIG[f"veo_3_1_t2v_fast_portrait_{suffix}"] = _make_t2v_config(
+            f"veo_3_1_t2v_fast_{suffix}", portrait
+        )
+        MODEL_CONFIG[f"veo_3_1_t2v_lite_{suffix}_landscape"] = _make_t2v_config(
+            f"veo_3_1_t2v_lite_{suffix}",
+            landscape,
+            use_v2_model_config=True,
+            allow_tier_upgrade=False,
+        )
+        MODEL_CONFIG[f"veo_3_1_t2v_lite_{suffix}_portrait"] = _make_t2v_config(
+            f"veo_3_1_t2v_lite_{suffix}",
+            portrait,
+            use_v2_model_config=True,
+            allow_tier_upgrade=False,
+        )
+        MODEL_CONFIG[f"veo_3_1_t2v_{suffix}"] = _make_t2v_config(
+            f"veo_3_1_t2v_quality_{suffix}", landscape
+        )
+        MODEL_CONFIG[f"veo_3_1_t2v_portrait_{suffix}"] = _make_t2v_config(
+            f"veo_3_1_t2v_quality_{suffix}", portrait
+        )
+
+        # I2V duration variants. FL keys are used for 2 images; the single-image path strips "_fl".
+        MODEL_CONFIG[f"veo_3_1_i2v_s_fast_{suffix}_fl"] = _make_i2v_config(
+            f"veo_3_1_i2v_s_fast_{suffix}_fl", landscape
+        )
+        MODEL_CONFIG[f"veo_3_1_i2v_s_fast_portrait_{suffix}_fl"] = _make_i2v_config(
+            f"veo_3_1_i2v_s_fast_{suffix}_fl", portrait
+        )
+        MODEL_CONFIG[f"veo_3_1_i2v_lite_{suffix}_landscape"] = _make_i2v_config(
+            f"veo_3_1_i2v_s_lite_{suffix}",
+            landscape,
+            min_images=1,
+            max_images=1,
+            use_v2_model_config=True,
+            allow_tier_upgrade=False,
+        )
+        MODEL_CONFIG[f"veo_3_1_i2v_lite_{suffix}_portrait"] = _make_i2v_config(
+            f"veo_3_1_i2v_s_lite_{suffix}",
+            portrait,
+            min_images=1,
+            max_images=1,
+            use_v2_model_config=True,
+            allow_tier_upgrade=False,
+        )
+        MODEL_CONFIG[f"veo_3_1_interpolation_lite_{suffix}_landscape"] = _make_i2v_config(
+            f"veo_3_1_i2v_s_lite_{suffix}_fl",
+            landscape,
+            min_images=2,
+            max_images=2,
+            use_v2_model_config=True,
+            allow_tier_upgrade=False,
+        )
+        MODEL_CONFIG[f"veo_3_1_interpolation_lite_{suffix}_portrait"] = _make_i2v_config(
+            f"veo_3_1_i2v_s_lite_{suffix}_fl",
+            portrait,
+            min_images=2,
+            max_images=2,
+            use_v2_model_config=True,
+            allow_tier_upgrade=False,
+        )
+        MODEL_CONFIG[f"veo_3_1_i2v_s_{suffix}"] = _make_i2v_config(
+            f"veo_3_1_i2v_s_quality_{suffix}_fl", landscape
+        )
+        MODEL_CONFIG[f"veo_3_1_i2v_s_portrait_{suffix}"] = _make_i2v_config(
+            f"veo_3_1_i2v_s_quality_{suffix}_fl", portrait
+        )
+
+        for resolution_name, resolution, upsampler_model_key in (
+            ("4k", "VIDEO_RESOLUTION_4K", "veo_3_1_upsampler_4k"),
+            ("1080p", "VIDEO_RESOLUTION_1080P", "veo_3_1_upsampler_1080p"),
+        ):
+            upsample = {"resolution": resolution, "model_key": upsampler_model_key}
+            MODEL_CONFIG[f"veo_3_1_t2v_{suffix}_{resolution_name}"] = _make_t2v_config(
+                f"veo_3_1_t2v_quality_{suffix}", landscape, upsample=upsample
+            )
+            MODEL_CONFIG[f"veo_3_1_t2v_portrait_{suffix}_{resolution_name}"] = _make_t2v_config(
+                f"veo_3_1_t2v_quality_{suffix}", portrait, upsample=upsample
+            )
+            MODEL_CONFIG[f"veo_3_1_i2v_s_{suffix}_{resolution_name}"] = _make_i2v_config(
+                f"veo_3_1_i2v_s_quality_{suffix}_fl", landscape, upsample=upsample
+            )
+            MODEL_CONFIG[f"veo_3_1_i2v_s_portrait_{suffix}_{resolution_name}"] = _make_i2v_config(
+                f"veo_3_1_i2v_s_quality_{suffix}_fl", portrait, upsample=upsample
+            )
+
+    for resolution_name, resolution, upsampler_model_key in (
+        ("4k", "VIDEO_RESOLUTION_4K", "veo_3_1_upsampler_4k"),
+        ("1080p", "VIDEO_RESOLUTION_1080P", "veo_3_1_upsampler_1080p"),
+    ):
+        upsample = {"resolution": resolution, "model_key": upsampler_model_key}
+        MODEL_CONFIG[f"veo_3_1_t2v_{resolution_name}"] = _make_t2v_config(
+            "veo_3_1_t2v", landscape, upsample=upsample
+        )
+        MODEL_CONFIG[f"veo_3_1_t2v_portrait_{resolution_name}"] = _make_t2v_config(
+            "veo_3_1_t2v_portrait", portrait, upsample=upsample
+        )
+        MODEL_CONFIG[f"veo_3_1_i2v_s_{resolution_name}"] = _make_i2v_config(
+            "veo_3_1_i2v_s_fl", landscape, upsample=upsample
+        )
+        MODEL_CONFIG[f"veo_3_1_i2v_s_portrait_{resolution_name}"] = _make_i2v_config(
+            "veo_3_1_i2v_s_portrait_fl", portrait, upsample=upsample
+        )
+
+
+_apply_veo_3_1_model_updates()
+
+
 def _known_video_model_keys() -> set[str]:
     return {
         cfg["model_key"]
@@ -763,11 +931,9 @@ class GenerationHandler:
 
         if user_tier == "PAYGATE_TIER_TWO":
             if allow_tier_upgrade and "ultra" not in model_key:
-                if "_fl" in model_key:
-                    model_key = model_key.replace("_fl", "_ultra_fl")
-                else:
-                    model_key = model_key + "_ultra"
-                return model_key, f"TIER_TWO 账号自动切换到 ultra 模型: {model_key}"
+                upgraded_model_key = _resolve_tier_two_model_key(model_key)
+                if upgraded_model_key != model_key:
+                    return upgraded_model_key, f"TIER_TWO 账号自动切换到 ultra 模型: {upgraded_model_key}"
             return model_key, None
 
         if user_tier == "PAYGATE_TIER_ONE" and "ultra" in model_key:
@@ -1504,39 +1670,14 @@ class GenerationHandler:
             # 根据账号tier自动调整模型 key
             user_tier = normalized_tier
 
-            # Extend 模型跳过 ultra 自动降级（只有 ultra 版本有效）
-            is_extend = video_type == "extend"
-
-            # TIER_TWO 账号需要使用 ultra 版本的模型
-            if user_tier == "PAYGATE_TIER_TWO":
-                # 如果模型 key 不包含 ultra，自动添加
-                if "ultra" not in model_key:
-                    original_model_key = model_key
-                    model_key = _resolve_tier_two_model_key(model_key)
-                    if stream:
-                        if model_key != original_model_key:
-                            yield self._create_stream_chunk(f"TIER_TWO 账号自动切换到 ultra 模型: {model_key}\n")
-                        else:
-                            yield self._create_stream_chunk(f"TIER_TWO 账号保持当前模型: {model_key}\n")
-                    if model_key != original_model_key:
-                        debug_logger.log_info(f"[VIDEO] TIER_TWO 账号，模型自动调整: {original_model_key} -> {model_key}")
-                    else:
-                        debug_logger.log_info(f"[VIDEO] TIER_TWO 账号，未找到有效 ultra 变体，保持模型: {model_key}")
-
-
-            # TIER_ONE 账号需要使用非 ultra 版本
-            elif user_tier == "PAYGATE_TIER_ONE":
-                # 如果模型 key 包含 ultra，需要移除（避免用户误用）
-                if "ultra" in model_key:
-                    # veo_3_1_i2v_s_fast_ultra_fl -> veo_3_1_i2v_s_fast_fl
-                    # veo_3_1_t2v_fast_ultra -> veo_3_1_t2v_fast
-                    # veo_3_1_r2v_fast_landscape_ultra -> veo_3_1_r2v_fast_landscape
-                    # veo_3_1_extend_fast_portrait_ultra -> veo_3_1_extend_fast_portrait
-                    model_key = model_key.replace("_ultra_fl", "_fl").replace("_ultra", "")
-                    
-                    if stream:
-                        yield self._create_stream_chunk(f"TIER_ONE 账号自动切换到标准模型: {model_key}\n")
-                    debug_logger.log_info(f"[VIDEO] TIER_ONE 账号，模型自动调整: {model_config['model_key']} -> {model_key}")
+            original_model_key = model_config["model_key"]
+            model_key, tier_message = self._resolve_video_model_key_for_tier(model_config, user_tier)
+            if tier_message:
+                if stream:
+                    yield self._create_stream_chunk(f"{tier_message}\n")
+                debug_logger.log_info(f"[VIDEO] 账号层级模型调整: {original_model_key} -> {model_key}")
+            elif user_tier == "PAYGATE_TIER_TWO" and original_model_key == model_key:
+                debug_logger.log_info(f"[VIDEO] TIER_TWO 账号，未找到有效 ultra 变体，保持模型: {model_key}")
 
             # 更新 model_config 中的 model_key
             model_config = dict(model_config)  # 创建副本避免修改原配置

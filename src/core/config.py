@@ -3,6 +3,26 @@ import tomli
 from pathlib import Path
 from typing import Dict, Any, Optional
 
+DEFAULT_YESCAPTCHA_TASK_TYPE = "RecaptchaV3TaskProxylessM1"
+YESCAPTCHA_TASK_TYPE_OPTIONS = {
+    "RecaptchaV3TaskProxyless": None,
+    "RecaptchaV3TaskProxylessM1": None,
+    "RecaptchaV3TaskProxylessM1S7": 0.7,
+    "RecaptchaV3TaskProxylessM1S9": 0.9,
+}
+
+
+def normalize_yescaptcha_task_type(task_type: Optional[str]) -> str:
+    normalized = (task_type or "").strip()
+    if normalized in YESCAPTCHA_TASK_TYPE_OPTIONS:
+        return normalized
+    return DEFAULT_YESCAPTCHA_TASK_TYPE
+
+
+def get_yescaptcha_min_score(task_type: Optional[str]) -> Optional[float]:
+    return YESCAPTCHA_TASK_TYPE_OPTIONS.get(normalize_yescaptcha_task_type(task_type))
+
+
 class Config:
     """Application configuration"""
 
@@ -468,6 +488,22 @@ class Config:
         if "captcha" not in self._config:
             self._config["captcha"] = {}
         self._config["captcha"]["yescaptcha_base_url"] = base_url
+
+    @property
+    def yescaptcha_task_type(self) -> str:
+        """Get YesCaptcha reCAPTCHA V3 task type"""
+        return normalize_yescaptcha_task_type(
+            self._config.get("captcha", {}).get(
+                "yescaptcha_task_type",
+                DEFAULT_YESCAPTCHA_TASK_TYPE,
+            )
+        )
+
+    def set_yescaptcha_task_type(self, task_type: str):
+        """Set YesCaptcha reCAPTCHA V3 task type"""
+        if "captcha" not in self._config:
+            self._config["captcha"] = {}
+        self._config["captcha"]["yescaptcha_task_type"] = normalize_yescaptcha_task_type(task_type)
 
     @property
     def capmonster_api_key(self) -> str:

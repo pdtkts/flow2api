@@ -181,6 +181,7 @@ class CaptchaConfig(BaseModel):
     captcha_method: str = "browser"  # yescaptcha/capmonster/ezcaptcha/capsolver/browser/personal/remote_browser
     yescaptcha_api_key: str = ""
     yescaptcha_base_url: str = "https://api.yescaptcha.com"
+    yescaptcha_task_type: str = "RecaptchaV3TaskProxylessM1"
     capmonster_api_key: str = ""
     capmonster_base_url: str = "https://api.capmonster.cloud"
     ezcaptcha_api_key: str = ""
