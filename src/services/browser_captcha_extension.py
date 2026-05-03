@@ -22,6 +22,8 @@ class ExtensionConnection:
     dedicated_worker_id: Optional[int] = None
     dedicated_token_id: Optional[int] = None
     connected_at: float = field(default_factory=time.time)
+    # Serialize send+wait on this WebSocket (FIFO waiters); matches extension tokenQueue.
+    dispatch_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 class ExtensionCaptchaService:
@@ -669,15 +671,16 @@ class ExtensionCaptchaService:
                 f"Available route keys: {available}. Active workers: {workers_verbose}"
             )
 
-        token, ext_req_id = await self._extension_recaptcha_token_once(
-            conn,
-            project_id=project_id,
-            action=action,
-            route_key=route_key,
-            managed_api_key_id=managed_api_key_id,
-            timeout=timeout,
-            selection_meta=sel_meta if sel_meta else None,
-        )
+        async with conn.dispatch_lock:
+            token, ext_req_id = await self._extension_recaptcha_token_once(
+                conn,
+                project_id=project_id,
+                action=action,
+                route_key=route_key,
+                managed_api_key_id=managed_api_key_id,
+                timeout=timeout,
+                selection_meta=sel_meta if sel_meta else None,
+            )
         if token:
             return token, ext_req_id
 
@@ -706,15 +709,16 @@ class ExtensionCaptchaService:
             "[Extension Captcha] Retrying reCAPTCHA on managed-key end-user extension "
             f"after dedicated worker failure (token_id={token_id}, managed_api_key_id={managed_api_key_id})"
         )
-        return await self._extension_recaptcha_token_once(
-            conn2,
-            project_id=project_id,
-            action=action,
-            route_key=route_key,
-            managed_api_key_id=managed_api_key_id,
-            timeout=timeout,
-            selection_meta=sel_meta2 if sel_meta2 else None,
-        )
+        async with conn2.dispatch_lock:
+            return await self._extension_recaptcha_token_once(
+                conn2,
+                project_id=project_id,
+                action=action,
+                route_key=route_key,
+                managed_api_key_id=managed_api_key_id,
+                timeout=timeout,
+                selection_meta=sel_meta2 if sel_meta2 else None,
+            )
 
     async def _extension_refresh_st_once(
         self,
@@ -762,7 +766,8 @@ class ExtensionCaptchaService:
         conn = self._select_connection(route_key="", managed_api_key_id=None, preferred_token_id=token_id)
         if conn is None:
             return None
-        return await self._extension_refresh_st_once(conn, token_id=token_id, timeout=timeout)
+        async with conn.dispatch_lock:
+            return await self._extension_refresh_st_once(conn, token_id=token_id, timeout=timeout)
 
     async def report_flow_error(self, project_id: str, error_reason: str, error_message: str = ""):
         _ = project_id, error_message

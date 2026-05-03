@@ -15,10 +15,14 @@ const DEFAULT_SETTINGS = {
 
 const DEFAULT_WORKER_PAGE_URL = "https://labs.google/fx/tools/flow";
 
+const WORKER_RECAPTCHA_SETTLE_DEFAULT_MS = 1200;
+const WORKER_RECAPTCHA_SETTLE_MAX_MS = 120000;
+
 const DEFAULT_WORKER_SETTINGS = {
     workerPageUrl: DEFAULT_WORKER_PAGE_URL,
     usePersistentWorkerTab: false,
     autoRecycleWorkerTabOnCaptchaFailure: true,
+    workerRecaptchaSettleMs: WORKER_RECAPTCHA_SETTLE_DEFAULT_MS,
 };
 
 const EVENTS_MAX = 100;
@@ -283,6 +287,7 @@ function getSettings() {
                 usePersistentWorkerTab: !!stored.usePersistentWorkerTab,
                 autoRecycleWorkerTabOnCaptchaFailure:
                     stored.autoRecycleWorkerTabOnCaptchaFailure !== false,
+                workerRecaptchaSettleMs: clampWorkerRecaptchaSettleMs(stored.workerRecaptchaSettleMs),
             });
         });
     });
@@ -467,6 +472,7 @@ function resetExtensionToDefaults(done) {
                         workerPageUrl: DEFAULT_WORKER_PAGE_URL,
                         usePersistentWorkerTab: false,
                         autoRecycleWorkerTabOnCaptchaFailure: true,
+                        workerRecaptchaSettleMs: WORKER_RECAPTCHA_SETTLE_DEFAULT_MS,
                         [STORAGE_CAPTCHA_STATS]: { solved: 0, failed: 0 },
                         [STORAGE_RECENT_JOBS]: [],
                         [STORAGE_SESSION_REFRESH_STATS]: { succeeded: 0, failed: 0 },
@@ -490,6 +496,21 @@ function resetExtensionToDefaults(done) {
 
 function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function clampWorkerRecaptchaSettleMs(raw) {
+    const n = Number(raw);
+    if (!Number.isFinite(n)) return WORKER_RECAPTCHA_SETTLE_DEFAULT_MS;
+    const i = Math.floor(n);
+    if (i < 0) return 0;
+    if (i > WORKER_RECAPTCHA_SETTLE_MAX_MS) return WORKER_RECAPTCHA_SETTLE_MAX_MS;
+    return i;
+}
+
+/** After worker tab reaches `complete`, wait for enterprise.js / grecaptcha to be usable. */
+async function sleepWorkerRecaptchaSettle(settings) {
+    const ms = clampWorkerRecaptchaSettleMs(settings && settings.workerRecaptchaSettleMs);
+    if (ms > 0) await sleep(ms);
 }
 
 function waitForTabReady(tabId, timeoutMs = 12000) {
@@ -599,7 +620,8 @@ async function generateTokenInFreshTab(action, pageUrl) {
         newTabId = newTab.id;
 
         await waitForTabReady(newTabId);
-        await sleep(1200);
+        const settleSettings = await getSettings();
+        await sleepWorkerRecaptchaSettle(settleSettings);
 
         const execResult = await executeRecaptchaScriptInTab(newTabId, action);
         if (execResult.success) {
@@ -647,7 +669,7 @@ async function reopenWorkerLabsPageAfterUpstreamRejection(settings, reason) {
                 runtimeState.workerTabId = newTab.id;
                 persistWorkerTabId(newTab.id);
                 await waitForTabReady(newTab.id);
-                await sleep(1200);
+                await sleepWorkerRecaptchaSettle(settings);
                 pushEvent("worker_tab_recycled", `Worker tab replaced after upstream captcha (${reason || "upstream_captcha"})`);
             }
         } catch (e) {
@@ -658,6 +680,8 @@ async function reopenWorkerLabsPageAfterUpstreamRejection(settings, reason) {
     try {
         const tab = await chrome.tabs.create({ url: pageUrl, active: false });
         if (tab && tab.id) {
+            await waitForTabReady(tab.id);
+            await sleepWorkerRecaptchaSettle(settings);
             pushEvent("worker_page_opened", `Opened Labs tab after upstream captcha rejection (${reason || "upstream"})`);
         }
     } catch (e) {
@@ -697,7 +721,7 @@ async function recyclePersistentWorkerTab(settings, reason) {
     runtimeState.workerTabId = newId;
     persistWorkerTabId(newId);
     await waitForTabReady(newId);
-    await sleep(1200);
+    await sleepWorkerRecaptchaSettle(settings);
     return newId;
 }
 
@@ -725,7 +749,7 @@ async function ensurePersistentWorkerTab(settings) {
                     chrome.tabs.update(tabId, { url: pageUrl }, () => resolve());
                 });
                 await waitForTabReady(tabId);
-                await sleep(1200);
+                await sleepWorkerRecaptchaSettle(settings);
             } else {
                 // Same Labs/Flow surface as worker URL: no navigation — wait for load if needed, skip settle delay.
                 await waitForTabReady(tabId);
@@ -740,7 +764,7 @@ async function ensurePersistentWorkerTab(settings) {
     runtimeState.workerTabId = tabId;
     persistWorkerTabId(tabId);
     await waitForTabReady(tabId);
-    await sleep(1200);
+    await sleepWorkerRecaptchaSettle(settings);
     pushEvent("worker_tab_created", `Worker tab created (${pageUrl})`);
     return tabId;
 }
@@ -1020,6 +1044,7 @@ function mergeStateForStatus(settings) {
         workerPageUrl: settings.workerPageUrl,
         usePersistentWorkerTab: settings.usePersistentWorkerTab,
         autoRecycleWorkerTabOnCaptchaFailure: settings.autoRecycleWorkerTabOnCaptchaFailure,
+        workerRecaptchaSettleMs: settings.workerRecaptchaSettleMs,
     };
 }
 

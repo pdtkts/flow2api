@@ -8,6 +8,8 @@ const DEFAULT_SETTINGS = {
 };
 
 const DEFAULT_WORKER_PAGE_URL = "https://labs.google/fx/tools/flow";
+const WORKER_RECAPTCHA_SETTLE_DEFAULT_MS = 1200;
+const WORKER_RECAPTCHA_SETTLE_MAX_MS = 120000;
 
 const STORAGE_KEYS = {
   serverUrl: DEFAULT_SETTINGS.serverUrl,
@@ -18,12 +20,22 @@ const STORAGE_KEYS = {
   clientLabel: "",
   workerPageUrl: DEFAULT_WORKER_PAGE_URL,
   usePersistentWorkerTab: false,
-  autoRecycleWorkerTabOnCaptchaFailure: true
+  autoRecycleWorkerTabOnCaptchaFailure: true,
+  workerRecaptchaSettleMs: WORKER_RECAPTCHA_SETTLE_DEFAULT_MS
 };
 
 const $ = (id) => document.getElementById(id);
 let reconnectInProgress = false;
 let eventLogFilter = "all";
+
+function clampWorkerRecaptchaSettleMs(raw) {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return WORKER_RECAPTCHA_SETTLE_DEFAULT_MS;
+  const i = Math.floor(n);
+  if (i < 0) return 0;
+  if (i > WORKER_RECAPTCHA_SETTLE_MAX_MS) return WORKER_RECAPTCHA_SETTLE_MAX_MS;
+  return i;
+}
 
 function normalizeWorkerPageUrl(raw) {
   const t = (raw || "").trim();
@@ -48,7 +60,8 @@ function normalizeSettings(values) {
     clientLabel: (values.clientLabel || "").trim(),
     workerPageUrl: normalizeWorkerPageUrl(values.workerPageUrl),
     usePersistentWorkerTab: !!values.usePersistentWorkerTab,
-    autoRecycleWorkerTabOnCaptchaFailure: values.autoRecycleWorkerTabOnCaptchaFailure !== false
+    autoRecycleWorkerTabOnCaptchaFailure: values.autoRecycleWorkerTabOnCaptchaFailure !== false,
+    workerRecaptchaSettleMs: clampWorkerRecaptchaSettleMs(values.workerRecaptchaSettleMs)
   };
 }
 
@@ -136,6 +149,7 @@ function applyLoadedSettings(stored, inferredMode) {
   $("routeKey").value = settings.routeKey;
   $("clientLabel").value = settings.clientLabel;
   $("workerPageUrl").value = settings.workerPageUrl;
+  $("workerRecaptchaSettleMs").value = String(settings.workerRecaptchaSettleMs);
   $("usePersistentWorkerTab").checked = settings.usePersistentWorkerTab;
   $("autoRecycleWorkerTabOnCaptchaFailure").checked = settings.autoRecycleWorkerTabOnCaptchaFailure;
   setActiveMode(settings.connectionMode);
@@ -220,11 +234,16 @@ function saveWorkerSettings() {
   }
   const usePersistentWorkerTab = $("usePersistentWorkerTab").checked;
   const autoRecycleWorkerTabOnCaptchaFailure = $("autoRecycleWorkerTabOnCaptchaFailure").checked;
+  const workerRecaptchaSettleMs = clampWorkerRecaptchaSettleMs(
+    parseInt(String($("workerRecaptchaSettleMs").value || "").trim(), 10)
+  );
+  $("workerRecaptchaSettleMs").value = String(workerRecaptchaSettleMs);
   chrome.storage.local.set(
     {
       workerPageUrl,
       usePersistentWorkerTab,
-      autoRecycleWorkerTabOnCaptchaFailure
+      autoRecycleWorkerTabOnCaptchaFailure,
+      workerRecaptchaSettleMs
     },
     () => {
       if (chrome.runtime.lastError) {
@@ -344,6 +363,11 @@ function renderStatusCards(state) {
     ["Instance ID", instance, false],
     ["Worker session", workerSession, false],
     ["Persistent worker tab", persistent, false],
+    [
+      "reCAPTCHA settle (ms)",
+      String(state.workerRecaptchaSettleMs != null ? state.workerRecaptchaSettleMs : "—"),
+      false
+    ],
     ["Worker tab ID", workerTabId, false],
     ["Register error", registerError, registerError !== "-"],
     ["Last error", lastError, lastError !== "-"],
@@ -461,7 +485,7 @@ function reconnectNow() {
 }
 
 function runResetExtension() {
-  if (!confirm("Reset this extension?\n\nThis removes WebSocket URL, API keys, labels, route key, worker tab settings, captcha job stats and history, session refresh counters, stored Flow session token history (last 3), worker tab id, and assigns a new instance id. The background worker reconnects with default local URL.")) {
+  if (!confirm("Reset this extension?\n\nThis removes WebSocket URL, API keys, labels, route key, worker tab settings (URL, persistent tab, auto-recycle, reCAPTCHA settle delay), captcha job stats and history, session refresh counters, stored Flow session token history (last 3), worker tab id, and assigns a new instance id. The background worker reconnects with default local URL.")) {
     return;
   }
   setStatus("Resetting extension…", false);

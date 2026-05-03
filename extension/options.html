@@ -425,6 +425,11 @@
       </p>
       <label for="workerPageUrl">Worker page URL</label>
       <input id="workerPageUrl" type="text" placeholder="https://labs.google/fx/tools/flow">
+      <label for="workerRecaptchaSettleMs">reCAPTCHA page settle delay (milliseconds)</label>
+      <input id="workerRecaptchaSettleMs" type="number" min="0" max="120000" step="100" value="1200">
+      <p class="hint" style="margin-top:0;">
+        After the worker tab finishes loading (<code>complete</code>), wait this long before running reCAPTCHA so <code>enterprise.js</code> / <code>grecaptcha</code> can initialize. Increase on slow hardware or networks; <code>0</code> skips the delay (not recommended).
+      </p>
       <div class="checkbox-row">
         <input type="checkbox" id="usePersistentWorkerTab">
         <label for="usePersistentWorkerTab">Use persistent worker tab</label>

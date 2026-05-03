@@ -224,3 +224,62 @@ def test_extension_waits_queue_until_worker_connects():
         assert token == "tok-wait"
 
     asyncio.run(_run())
+
+
+def test_extension_get_token_serializes_per_connection_fifo():
+    """Two concurrent get_token calls on the same WebSocket must not overlap send+wait."""
+
+    async def _run():
+        ExtensionCaptchaService._instance = None
+        db = FakeDB()
+        db.tokens[100] = SimpleNamespace(id=100, extension_route_key="rk-1")
+        db.bindings["rk-1"] = 1
+        service = await ExtensionCaptchaService.get_instance(db=db)
+        ws = FakeWebSocket({"route_key": "rk-1", "managed_api_key_id": "1"})
+        await service.connect(ws)
+
+        t1 = asyncio.create_task(
+            service.get_token(
+                project_id="p1",
+                action="IMAGE_GENERATION",
+                timeout=5,
+                token_id=100,
+                managed_api_key_id=1,
+            )
+        )
+        await asyncio.sleep(0.05)
+        assert len(ws.sent_payloads) == 1
+        t2 = asyncio.create_task(
+            service.get_token(
+                project_id="p1",
+                action="IMAGE_GENERATION",
+                timeout=5,
+                token_id=100,
+                managed_api_key_id=1,
+            )
+        )
+        await asyncio.sleep(0.05)
+        assert len(ws.sent_payloads) == 1
+
+        req1 = ws.sent_payloads[0]["req_id"]
+        await service.handle_message(
+            ws,
+            json.dumps({"req_id": req1, "status": "success", "token": "tok-1"}),
+        )
+        tok1, _rid1 = await asyncio.wait_for(t1, timeout=2)
+        assert tok1 == "tok-1"
+
+        for _ in range(50):
+            if len(ws.sent_payloads) >= 2:
+                break
+            await asyncio.sleep(0.05)
+        assert len(ws.sent_payloads) == 2
+        req2 = ws.sent_payloads[1]["req_id"]
+        await service.handle_message(
+            ws,
+            json.dumps({"req_id": req2, "status": "success", "token": "tok-2"}),
+        )
+        tok2, _rid2 = await asyncio.wait_for(t2, timeout=2)
+        assert tok2 == "tok-2"
+
+    asyncio.run(_run())
