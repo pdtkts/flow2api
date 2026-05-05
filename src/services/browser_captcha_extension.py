@@ -740,18 +740,36 @@ class ExtensionCaptchaService:
         headers: Optional[Dict[str, Any]] = None,
         json_data: Optional[Dict[str, Any]] = None,
         timeout: int = 60,
+        token_id: Optional[int] = None,
         managed_api_key_id: Optional[int] = None,
     ) -> Dict[str, Any]:
+        route_key = ""
+        if managed_api_key_id is None:
+            route_key = await self._resolve_route_key(token_id)
+        queue_wait_timeout = 20
+        if self.db and hasattr(self.db, "get_captcha_config"):
+            try:
+                captcha_config = await self.db.get_captcha_config()
+                queue_wait_timeout = int(getattr(captcha_config, "extension_queue_wait_timeout_seconds", 20) or 20)
+            except Exception as exc:
+                debug_logger.log_warning(f"[Extension Captcha] Failed to load queue timeout for generation submit: {exc}")
+        queue_wait_timeout = max(1, min(120, queue_wait_timeout))
+        selection_meta: Dict[str, Any] = {}
         conn = await self._wait_for_connection(
-            route_key="",
+            route_key=route_key,
             managed_api_key_id=managed_api_key_id,
-            preferred_token_id=None,
-            timeout=min(max(1, int(timeout or 60)), 120),
+            preferred_token_id=token_id,
+            timeout=queue_wait_timeout,
             exclude_dedicated_token_id=None,
-            selection_meta_out=None,
+            selection_meta_out=selection_meta,
         )
         if conn is None:
             raise RuntimeError("No extension worker available for generation submit")
+        selection_source = "dedicated" if selection_meta.get("dedicated_hybrid") else "managed_or_route"
+        debug_logger.log_info(
+            f"[EXT-GEN] submit worker selected: source={selection_source}, worker_session_id={conn.worker_session_id}, "
+            f"token_id={token_id}, managed_api_key_id={managed_api_key_id}, route_key={route_key or '-'}"
+        )
         payload = {
             "url": str(url or "").strip(),
             "method": str(method or "POST").strip().upper(),
@@ -774,18 +792,36 @@ class ExtensionCaptchaService:
         headers: Optional[Dict[str, Any]] = None,
         json_data: Optional[Dict[str, Any]] = None,
         timeout: int = 45,
+        token_id: Optional[int] = None,
         managed_api_key_id: Optional[int] = None,
     ) -> Dict[str, Any]:
+        route_key = ""
+        if managed_api_key_id is None:
+            route_key = await self._resolve_route_key(token_id)
+        queue_wait_timeout = 20
+        if self.db and hasattr(self.db, "get_captcha_config"):
+            try:
+                captcha_config = await self.db.get_captcha_config()
+                queue_wait_timeout = int(getattr(captcha_config, "extension_queue_wait_timeout_seconds", 20) or 20)
+            except Exception as exc:
+                debug_logger.log_warning(f"[Extension Captcha] Failed to load queue timeout for generation poll: {exc}")
+        queue_wait_timeout = max(1, min(120, queue_wait_timeout))
+        selection_meta: Dict[str, Any] = {}
         conn = await self._wait_for_connection(
-            route_key="",
+            route_key=route_key,
             managed_api_key_id=managed_api_key_id,
-            preferred_token_id=None,
-            timeout=min(max(1, int(timeout or 45)), 120),
+            preferred_token_id=token_id,
+            timeout=queue_wait_timeout,
             exclude_dedicated_token_id=None,
-            selection_meta_out=None,
+            selection_meta_out=selection_meta,
         )
         if conn is None:
             raise RuntimeError("No extension worker available for generation polling fallback")
+        selection_source = "dedicated" if selection_meta.get("dedicated_hybrid") else "managed_or_route"
+        debug_logger.log_info(
+            f"[EXT-GEN] poll worker selected: source={selection_source}, worker_session_id={conn.worker_session_id}, "
+            f"token_id={token_id}, managed_api_key_id={managed_api_key_id}, route_key={route_key or '-'}"
+        )
         payload = {
             "url": str(url or "").strip(),
             "method": str(method or "POST").strip().upper(),

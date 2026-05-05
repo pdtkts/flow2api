@@ -835,8 +835,48 @@ async function generateTokenForCaptcha(action) {
     return generateTokenInFreshTab(action, settings.workerPageUrl);
 }
 
+/**
+ * Page-origin fetch to aisandbox from https://labs.google/* is CORS-restricted.
+ * The server only allows a small set of request headers on preflight. Flow2API's
+ * server-side client adds custom x-browser-* headers for curl_cffi; those must not
+ * be forwarded into fetch() or the OPTIONS preflight fails (no ACAO / wrong ACAH).
+ */
+function filterHeadersForLabsGoogleCors(rawHeaders) {
+    const allow = new Set([
+        "authorization",
+        "content-type",
+        "accept",
+        "accept-language",
+        "user-agent",
+        "referer",
+        "sec-ch-ua",
+        "sec-ch-ua-mobile",
+        "sec-ch-ua-platform",
+        "sec-fetch-dest",
+        "sec-fetch-mode",
+        "sec-fetch-site",
+    ]);
+    const out = {};
+    if (!rawHeaders || typeof rawHeaders !== "object") return out;
+    for (const [k, v] of Object.entries(rawHeaders)) {
+        if (v == null || v === "") continue;
+        const key = String(k).trim();
+        if (!key) continue;
+        if (!allow.has(key.toLowerCase())) continue;
+        out[key] = String(v);
+    }
+    if (!out.Referer && !out.referer) {
+        out["Referer"] = "https://labs.google/";
+    }
+    return out;
+}
+
 async function executeHttpRequestInTab(tabId, request) {
     const scriptTimeoutMs = Math.max(15000, Math.min(120000, Number(request.timeout_ms) || 60000));
+    const requestForPage = {
+        ...request,
+        headers: filterHeadersForLabsGoogleCors(request.headers || {}),
+    };
     try {
         const results = await chrome.scripting.executeScript({
             target: { tabId },
@@ -879,7 +919,7 @@ async function executeHttpRequestInTab(tabId, request) {
                     clearTimeout(timer);
                 }
             },
-            args: [request, scriptTimeoutMs],
+            args: [requestForPage, scriptTimeoutMs],
         });
         const payload = results && results[0] ? results[0].result : null;
         if (!payload || typeof payload !== "object") {

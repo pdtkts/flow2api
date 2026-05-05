@@ -128,6 +128,10 @@ class FlowClient:
             "flow_force_local_http",
             default=False,
         )
+        self._active_generation_token_id_ctx: contextvars.ContextVar[Optional[int]] = contextvars.ContextVar(
+            "flow_active_generation_token_id",
+            default=None,
+        )
         # Last reCAPTCHA action for narrative logs (IMAGE_GENERATION vs VIDEO_GENERATION, etc.)
         self._last_recaptcha_action: Optional[str] = None
 
@@ -221,6 +225,15 @@ class FlowClient:
     def clear_force_local_http(self) -> None:
         self._force_local_http_ctx.set(False)
 
+    def set_active_generation_token_id(self, token_id: Optional[int]) -> None:
+        self._active_generation_token_id_ctx.set(token_id if token_id is not None else None)
+
+    def get_active_generation_token_id(self) -> Optional[int]:
+        return self._active_generation_token_id_ctx.get()
+
+    def clear_active_generation_token_id(self) -> None:
+        self._active_generation_token_id_ctx.set(None)
+
     def _is_headed_docker_runtime(self) -> bool:
         raw = str(os.environ.get("ALLOW_DOCKER_HEADED_CAPTCHA", "")).strip().lower()
         return raw in {"1", "true", "yes", "on"}
@@ -269,6 +282,7 @@ class FlowClient:
         respect_fingerprint_proxy: bool = True,
         force_no_proxy: bool = False,
         allow_urllib_fallback: bool = True,
+        token_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         """统一HTTP请求处理
 
@@ -393,9 +407,10 @@ class FlowClient:
 
         if self._should_submit_generation_via_extension(method, url, json_data):
             managed_api_key_id = self.get_managed_api_key_id()
+            routing_token_id = token_id if token_id is not None else self.get_active_generation_token_id()
             try:
                 debug_logger.log_info(
-                    f"[EXT-GEN] submit dispatch via extension: method={method.upper()}, managed_api_key_id={managed_api_key_id}"
+                    f"[EXT-GEN] submit dispatch via extension: method={method.upper()}, managed_api_key_id={managed_api_key_id}, token_id={routing_token_id}"
                 )
                 return await self.extension_generation_service.submit_generation(
                     url=url,
@@ -403,6 +418,7 @@ class FlowClient:
                     headers=headers,
                     json_data=json_data if isinstance(json_data, dict) else {},
                     timeout_seconds=int(request_timeout),
+                    token_id=routing_token_id,
                     managed_api_key_id=managed_api_key_id,
                 )
             except Exception as ext_err:
@@ -802,6 +818,7 @@ class FlowClient:
         json_data: Dict[str, Any],
         at: str,
         timeout: int,
+        token_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         """视频 API 加硬截止，避免底层请求偶发卡住导致整条请求悬挂。"""
         try:
@@ -814,6 +831,7 @@ class FlowClient:
                     at_token=at,
                     timeout=timeout,
                     allow_urllib_fallback=False,
+                    token_id=token_id,
                 ),
                 timeout=timeout + 5,
             )
@@ -853,7 +871,8 @@ class FlowClient:
         url: str,
         json_data: Dict[str, Any],
         at: str,
-        attempt_trace: Optional[Dict[str, Any]] = None
+        attempt_trace: Optional[Dict[str, Any]] = None,
+        token_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         """图片生成请求使用更短超时，并在网络超时时快速重试。"""
         request_timeout = config.flow_image_request_timeout
@@ -913,6 +932,7 @@ class FlowClient:
                     timeout=request_timeout,
                     use_media_proxy=prefer_media_proxy,
                     respect_fingerprint_proxy=not prefer_media_proxy,
+                    token_id=token_id,
                 )
                 if http_attempt_info is not None:
                     http_attempt_info["duration_ms"] = int((time.time() - http_attempt_started_at) * 1000)
@@ -1431,11 +1451,13 @@ class FlowClient:
                     poll_task_progress,
                     {"job_phase": "generation_awaiting"},
                 )
+                self.set_active_generation_token_id(token_id)
                 result = await self._make_image_generation_request(
                     url=url,
                     json_data=json_data,
                     at=at,
                     attempt_trace=attempt_trace,
+                    token_id=token_id,
                 )
                 attempt_trace["success"] = True
                 attempt_trace["duration_ms"] = int((time.time() - attempt_started_at) * 1000)
@@ -1476,6 +1498,7 @@ class FlowClient:
                     continue
                 raise
             finally:
+                self.clear_active_generation_token_id()
                 await self._notify_browser_captcha_request_finished(browser_id)
         
         # 所有重试都失败
@@ -1762,11 +1785,13 @@ class FlowClient:
                     poll_task_progress,
                     {"job_phase": "generation_awaiting"},
                 )
+                self.set_active_generation_token_id(token_id)
                 result = await self._make_video_api_request(
                     url=url,
                     json_data=json_data,
                     at=at,
                     timeout=self._get_video_submit_timeout(),
+                    token_id=token_id,
                 )
                 await _emit_poll_task_progress(
                     poll_task_progress,
@@ -1930,11 +1955,13 @@ class FlowClient:
                     poll_task_progress,
                     {"job_phase": "generation_awaiting"},
                 )
+                self.set_active_generation_token_id(token_id)
                 result = await self._make_video_api_request(
                     url=url,
                     json_data=json_data,
                     at=at,
                     timeout=self._get_video_submit_timeout(),
+                    token_id=token_id,
                 )
                 await _emit_poll_task_progress(
                     poll_task_progress,
@@ -2101,11 +2128,13 @@ class FlowClient:
                     poll_task_progress,
                     {"job_phase": "generation_awaiting"},
                 )
+                self.set_active_generation_token_id(token_id)
                 result = await self._make_video_api_request(
                     url=url,
                     json_data=json_data,
                     at=at,
                     timeout=self._get_video_submit_timeout(),
+                    token_id=token_id,
                 )
                 await _emit_poll_task_progress(
                     poll_task_progress,
@@ -2268,11 +2297,13 @@ class FlowClient:
                     poll_task_progress,
                     {"job_phase": "generation_awaiting"},
                 )
+                self.set_active_generation_token_id(token_id)
                 result = await self._make_video_api_request(
                     url=url,
                     json_data=json_data,
                     at=at,
                     timeout=self._get_video_submit_timeout(),
+                    token_id=token_id,
                 )
                 await _emit_poll_task_progress(
                     poll_task_progress,
@@ -2403,11 +2434,13 @@ class FlowClient:
                     poll_task_progress,
                     {"job_phase": "generation_awaiting"},
                 )
+                self.set_active_generation_token_id(token_id)
                 result = await self._make_video_api_request(
                     url=url,
                     json_data=json_data,
                     at=at,
                     timeout=self._get_video_submit_timeout(),
+                    token_id=token_id,
                 )
                 await _emit_poll_task_progress(
                     poll_task_progress,
@@ -2472,6 +2505,7 @@ class FlowClient:
             json_data=json_data,
             at=at,
             timeout=self._get_video_submit_timeout(),
+            token_id=None,
         )
 
     async def poll_concatenation_status(
@@ -2491,6 +2525,7 @@ class FlowClient:
                 json_data=json_data,
                 at=at,
                 timeout=self._get_video_poll_timeout(),
+                token_id=self.get_active_generation_token_id(),
             )
             status = result.get("status", "")
             output_uri = result.get("outputUri", "")
@@ -2635,6 +2670,7 @@ class FlowClient:
                     json_data=json_data,
                     at=at,
                     timeout=self._get_video_submit_timeout(),
+                    token_id=token_id,
                 )
                 await _emit_poll_task_progress(
                     poll_task_progress,
@@ -2706,6 +2742,7 @@ class FlowClient:
                     json_data=json_data,
                     at=at,
                     timeout=self._get_video_poll_timeout(),
+                    token_id=self.get_active_generation_token_id(),
                 )
             except Exception as e:
                 last_error = e
@@ -2732,12 +2769,14 @@ class FlowClient:
             "Referer": f"{self.labs_base_url}/",
         }
         managed_api_key_id = self.get_managed_api_key_id()
+        routing_token_id = self.get_active_generation_token_id()
         return await self.extension_generation_service.poll_generation(
             url=url,
             method="POST",
             headers=headers,
             json_data={"operations": operations},
             timeout_seconds=self._get_video_poll_timeout(),
+            token_id=routing_token_id,
             managed_api_key_id=managed_api_key_id,
         )
 

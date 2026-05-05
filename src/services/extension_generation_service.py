@@ -24,6 +24,7 @@ class ExtensionGenerationService:
         headers: Dict[str, Any],
         json_data: Optional[Dict[str, Any]],
         timeout_seconds: int,
+        token_id: Optional[int],
         managed_api_key_id: Optional[int],
     ) -> Dict[str, Any]:
         svc = await ExtensionCaptchaService.get_instance(self.db)
@@ -34,6 +35,7 @@ class ExtensionGenerationService:
             headers=headers,
             json_data=json_data or {},
             timeout=timeout_seconds,
+            token_id=token_id,
             managed_api_key_id=managed_api_key_id,
         )
         return self._unwrap_extension_response(result)
@@ -46,6 +48,7 @@ class ExtensionGenerationService:
         headers: Dict[str, Any],
         json_data: Optional[Dict[str, Any]],
         timeout_seconds: int,
+        token_id: Optional[int],
         managed_api_key_id: Optional[int],
     ) -> Dict[str, Any]:
         svc = await ExtensionCaptchaService.get_instance(self.db)
@@ -56,6 +59,7 @@ class ExtensionGenerationService:
             headers=headers,
             json_data=json_data or {},
             timeout=timeout_seconds,
+            token_id=token_id,
             managed_api_key_id=managed_api_key_id,
         )
         return self._unwrap_extension_response(result)

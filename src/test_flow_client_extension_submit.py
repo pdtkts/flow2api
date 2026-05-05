@@ -21,14 +21,16 @@ def test_make_request_routes_generation_submit_to_extension_when_enabled():
     config.set_captcha_method("extension")
     client.set_force_local_http(False)
 
-    called = {"count": 0}
+    called = {"count": 0, "token_id": None}
 
     async def _submit_generation(**kwargs):
         called["count"] += 1
+        called["token_id"] = kwargs.get("token_id")
         return {"operations": [{"status": "MEDIA_GENERATION_STATUS_ACTIVE"}]}
 
     async def _run():
         client.extension_generation_service.submit_generation = _submit_generation
+        client.set_active_generation_token_id(6)
         result = await client._make_request(
             "POST",
             f"{client.api_base_url}/video:batchAsyncGenerateVideoText",
@@ -47,3 +49,4 @@ def test_make_request_routes_generation_submit_to_extension_when_enabled():
 
     asyncio.run(_run())
     assert called["count"] == 1
+    assert called["token_id"] == 6
