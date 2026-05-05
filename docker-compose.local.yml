@@ -15,6 +15,7 @@ services:
       - ./config/setting.toml:/app/config/setting.toml
     environment:
       - PYTHONUNBUFFERED=1
+      - FLOW2API_API_ONLY_HOST=${FLOW2API_API_ONLY_HOST:-}
       - FLOW2API_DB_URL=${FLOW2API_DB_URL:-postgresql://flow2api:flow2api@postgres:5432/flow2api}
       - FLOW2API_REDIS_URL=${FLOW2API_REDIS_URL:-redis://redis:6379/0}
     depends_on:
@@ -22,18 +23,6 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    restart: unless-stopped
-
-  frontend:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
-    image: flow2api-frontend-local:latest
-    container_name: flow2api-frontend-local
-    ports:
-      - "38080:80"
-    depends_on:
-      - flow2api
     restart: unless-stopped
 
   postgres:
