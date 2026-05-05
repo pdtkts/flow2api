@@ -1522,6 +1522,9 @@ class Database:
         async with self._connect(write=True) as db:
             await db.execute("UPDATE request_logs SET token_id = NULL WHERE token_id = ?", (token_id,))
             await db.execute("UPDATE cache_files SET token_id = NULL WHERE token_id = ?", (token_id,))
+            # Dedicated extension workers can outlive a token; detach ownership first
+            # so deleting token rows does not violate FK constraints.
+            await db.execute("UPDATE dedicated_extension_workers SET token_id = NULL WHERE token_id = ?", (token_id,))
             await db.execute("DELETE FROM tasks WHERE token_id = ?", (token_id,))
             await db.execute("DELETE FROM token_stats WHERE token_id = ?", (token_id,))
             await db.execute("DELETE FROM projects WHERE token_id = ?", (token_id,))
