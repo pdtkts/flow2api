@@ -768,6 +768,22 @@ class GenerationHandler:
         message = str(error or "")
         return classify_recaptcha_upstream_failure(400, message) == "upstream_rejected"
 
+    def _is_backend_poll_blocked_error(self, error: Exception) -> bool:
+        msg = str(error or "").lower()
+        if not msg:
+            return False
+        markers = (
+            "recaptcha",
+            "unusual_activity",
+            "captcha",
+            "403",
+            "429",
+            "forbidden",
+            "too many requests",
+            "flow api request failed",
+        )
+        return any(m in msg for m in markers)
+
     async def _execute_with_extension_fallback(
         self,
         operation_name: str,
@@ -777,13 +793,19 @@ class GenerationHandler:
         if not self._is_extension_generation_enabled():
             return await local_operation()
         try:
-            return await self.extension_generation_service.execute(operation_name, extension_operation)
+            return await extension_operation()
         except Exception as exc:
             if self._should_fallback_to_local_http(exc):
                 debug_logger.log_warning(
                     f"[EXT-GEN] fallback to local HTTP on reCAPTCHA rejection: op={operation_name}, err={exc}"
                 )
-                return await local_operation()
+                try:
+                    if hasattr(self.flow_client, "set_force_local_http"):
+                        self.flow_client.set_force_local_http(True)
+                    return await local_operation()
+                finally:
+                    if hasattr(self.flow_client, "clear_force_local_http"):
+                        self.flow_client.clear_force_local_http()
             raise
 
     async def _maybe_update_poll_task(self, poll_task_id: Optional[str], **kwargs: Any) -> None:
@@ -2222,6 +2244,49 @@ class GenerationHandler:
                 consecutive_poll_errors += 1
                 debug_logger.log_error(f"Poll error: {str(e)}")
                 if consecutive_poll_errors >= max_consecutive_poll_errors:
+                    if self._is_extension_generation_enabled() and self._is_backend_poll_blocked_error(e):
+                        try:
+                            debug_logger.log_warning("[EXT-GEN] backend poll blocked, trying extension poll fallback")
+                            operation_status = await self.flow_client.check_video_status_via_extension_poll(at, operations)
+                            checked_operations = operation_status.get("operations", [])
+                            if checked_operations:
+                                operation = checked_operations[0]
+                                status = operation.get("status", "")
+                                if status == "MEDIA_GENERATION_STATUS_SUCCESSFUL":
+                                    metadata = operation.get("operation", {}).get("metadata", {})
+                                    video_url = self._extract_video_url(metadata)
+                                    if video_url:
+                                        local_url = video_url
+                                        task_id = operation["operation"]["name"]
+                                        await self.db.update_task(
+                                            task_id,
+                                            status="completed",
+                                            progress=100,
+                                            result_urls=[local_url],
+                                            completed_at=time.time()
+                                        )
+                                        response_state["url"] = local_url
+                                        response_state["generated_assets"] = {
+                                            "type": "video",
+                                            "final_video_url": local_url,
+                                            "mediaGenerationId": video_media_id
+                                        }
+                                        self._mark_generation_succeeded(generation_result)
+                                        if stream:
+                                            yield self._create_stream_chunk(
+                                                f"<video src='{local_url}' data-media-id='{video_media_id}' controls style='max-width:100%'></video>",
+                                                finish_reason="stop",
+                                                extra_fields={"generated_assets": response_state.get("generated_assets")},
+                                            )
+                                        else:
+                                            yield self._create_completion_response(
+                                                local_url,
+                                                media_type="video",
+                                                extra_fields={"generated_assets": response_state.get("generated_assets")},
+                                            )
+                                        return
+                        except Exception as ext_poll_err:
+                            debug_logger.log_error(f"[EXT-GEN] extension poll fallback failed: {ext_poll_err}")
                     error_msg = f"视频状态查询失败: {self._normalize_error_message(e)}"
                     await self._fail_video_task(operations, error_msg)
                     self._mark_generation_failed(generation_result, error_msg)

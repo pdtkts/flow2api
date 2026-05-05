@@ -60,6 +60,8 @@ class ExtensionCaptchaService:
         self.db = db
         self.active_connections: list[ExtensionConnection] = []
         self.pending_requests: dict[str, tuple[asyncio.Future, WebSocket]] = {}
+        # generation_req_id -> websocket owner (submit_generation / poll_generation)
+        self.pending_generation_requests: dict[str, tuple[asyncio.Future, WebSocket]] = {}
         # req_id -> websocket to notify after Flow upstream accepts/rejects the token
         self._upstream_verdict_targets: dict[str, WebSocket] = {}
         self._state_lock = asyncio.Lock()
@@ -313,6 +315,16 @@ class ExtensionCaptchaService:
                 stale_reqs = [rid for rid, ws in list(self._upstream_verdict_targets.items()) if ws is websocket]
                 for rid in stale_reqs:
                     self._upstream_verdict_targets.pop(rid, None)
+                stale_gen_reqs = [
+                    rid for rid, (_fut, ws) in list(self.pending_generation_requests.items()) if ws is websocket
+                ]
+                for rid in stale_gen_reqs:
+                    future, _ = self.pending_generation_requests.pop(rid, (None, None))
+                    if future is not None and not future.done():
+                        try:
+                            future.set_exception(RuntimeError("Extension worker disconnected"))
+                        except Exception:
+                            pass
                 debug_logger.log_info(
                     f"[Extension Captcha] Client disconnected. Total: {len(self.active_connections)}, "
                     f"worker_session_id={conn.worker_session_id}, "
@@ -677,13 +689,116 @@ class ExtensionCaptchaService:
                 future, owner_websocket = self.pending_requests[req_id]
                 if websocket is not owner_websocket:
                     debug_logger.log_warning(
-                        f"[Extension Captcha] Ignoring response from non-owner connection: {req_id}"
+                        f"[Extension Captcha] Ignoring captcha response from non-owner connection: {req_id}"
                     )
                     return
                 if not future.done():
                     future.set_result(payload)
+                return
+            if req_id and req_id in self.pending_generation_requests:
+                future, owner_websocket = self.pending_generation_requests[req_id]
+                if websocket is not owner_websocket:
+                    debug_logger.log_warning(
+                        f"[Extension Captcha] Ignoring generation response from non-owner connection: {req_id}"
+                    )
+                    return
+                if not future.done():
+                    future.set_result(payload)
+                return
         except Exception as e:
             debug_logger.log_error(f"[Extension Captcha] Error handling message: {e}")
+
+    async def _generation_request_once(
+        self,
+        conn: ExtensionConnection,
+        *,
+        message_type: str,
+        request_payload: Dict[str, Any],
+        timeout: int,
+    ) -> Dict[str, Any]:
+        req_id = f"gen_req_{uuid.uuid4().hex}"
+        future = asyncio.get_running_loop().create_future()
+        self.pending_generation_requests[req_id] = (future, conn.websocket)
+        message = {"type": message_type, "req_id": req_id, **request_payload}
+        try:
+            await conn.websocket.send_text(json.dumps(message))
+            result = await asyncio.wait_for(future, timeout=max(5, int(timeout or 30)))
+            if not isinstance(result, dict):
+                raise RuntimeError("Invalid extension generation response format")
+            if result.get("status") == "success":
+                return result
+            error_msg = str(result.get("error") or "Extension generation request failed")
+            raise RuntimeError(error_msg)
+        finally:
+            self.pending_generation_requests.pop(req_id, None)
+
+    async def submit_generation_via_extension(
+        self,
+        *,
+        url: str,
+        method: str = "POST",
+        headers: Optional[Dict[str, Any]] = None,
+        json_data: Optional[Dict[str, Any]] = None,
+        timeout: int = 60,
+        managed_api_key_id: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        conn = await self._wait_for_connection(
+            route_key="",
+            managed_api_key_id=managed_api_key_id,
+            preferred_token_id=None,
+            timeout=min(max(1, int(timeout or 60)), 120),
+            exclude_dedicated_token_id=None,
+            selection_meta_out=None,
+        )
+        if conn is None:
+            raise RuntimeError("No extension worker available for generation submit")
+        payload = {
+            "url": str(url or "").strip(),
+            "method": str(method or "POST").strip().upper(),
+            "headers": dict(headers or {}),
+            "json_data": json_data if isinstance(json_data, dict) else {},
+        }
+        async with conn.dispatch_lock:
+            return await self._generation_request_once(
+                conn,
+                message_type="submit_generation",
+                request_payload=payload,
+                timeout=timeout,
+            )
+
+    async def poll_generation_via_extension(
+        self,
+        *,
+        url: str,
+        method: str = "POST",
+        headers: Optional[Dict[str, Any]] = None,
+        json_data: Optional[Dict[str, Any]] = None,
+        timeout: int = 45,
+        managed_api_key_id: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        conn = await self._wait_for_connection(
+            route_key="",
+            managed_api_key_id=managed_api_key_id,
+            preferred_token_id=None,
+            timeout=min(max(1, int(timeout or 45)), 120),
+            exclude_dedicated_token_id=None,
+            selection_meta_out=None,
+        )
+        if conn is None:
+            raise RuntimeError("No extension worker available for generation polling fallback")
+        payload = {
+            "url": str(url or "").strip(),
+            "method": str(method or "POST").strip().upper(),
+            "headers": dict(headers or {}),
+            "json_data": json_data if isinstance(json_data, dict) else {},
+        }
+        async with conn.dispatch_lock:
+            return await self._generation_request_once(
+                conn,
+                message_type="poll_generation",
+                request_payload=payload,
+                timeout=timeout,
+            )
 
     async def _extension_recaptcha_token_once(
         self,

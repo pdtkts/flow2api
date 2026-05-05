@@ -802,6 +802,145 @@ async function generateTokenForCaptcha(action) {
     return generateTokenInFreshTab(action, settings.workerPageUrl);
 }
 
+async function executeHttpRequestInTab(tabId, request) {
+    const scriptTimeoutMs = Math.max(15000, Math.min(120000, Number(request.timeout_ms) || 60000));
+    try {
+        const results = await chrome.scripting.executeScript({
+            target: { tabId },
+            world: "MAIN",
+            func: async (req, timeoutMs) => {
+                const ctl = new AbortController();
+                const timer = setTimeout(() => ctl.abort(), timeoutMs);
+                try {
+                    const method = String(req.method || "POST").toUpperCase();
+                    const headers = req.headers && typeof req.headers === "object" ? { ...req.headers } : {};
+                    const hasJson = req.json_data && typeof req.json_data === "object";
+                    const init = { method, headers, signal: ctl.signal };
+                    if (hasJson) {
+                        if (!init.headers["Content-Type"] && !init.headers["content-type"]) {
+                            init.headers["Content-Type"] = "application/json";
+                        }
+                        init.body = JSON.stringify(req.json_data);
+                    }
+                    const resp = await fetch(String(req.url || ""), init);
+                    const text = await resp.text();
+                    let parsed = null;
+                    try {
+                        parsed = text ? JSON.parse(text) : null;
+                    } catch (_) {}
+                    return {
+                        ok: !!resp.ok,
+                        status: Number(resp.status) || 0,
+                        response_text: String(text || ""),
+                        response_json: parsed,
+                    };
+                } catch (e) {
+                    return {
+                        ok: false,
+                        status: 0,
+                        error: String((e && e.message) || e || "request_failed"),
+                        response_text: "",
+                        response_json: null,
+                    };
+                } finally {
+                    clearTimeout(timer);
+                }
+            },
+            args: [request, scriptTimeoutMs],
+        });
+        const payload = results && results[0] ? results[0].result : null;
+        if (!payload || typeof payload !== "object") {
+            return { success: false, error: "empty_extension_http_response" };
+        }
+        if (!payload.ok) {
+            const err = payload.error || `HTTP ${payload.status || 0}`;
+            return {
+                success: false,
+                error: String(err),
+                response_status: Number(payload.status) || 0,
+                response_text: String(payload.response_text || ""),
+                response_json: payload.response_json || null,
+            };
+        }
+        return {
+            success: true,
+            response_status: Number(payload.status) || 200,
+            response_text: String(payload.response_text || ""),
+            response_json: payload.response_json || null,
+        };
+    } catch (e) {
+        return { success: false, error: String((e && e.message) || e || "script_execution_failed") };
+    }
+}
+
+async function executeGenerationHttpRequest(request) {
+    const settings = await getSettings();
+    if (settings.usePersistentWorkerTab) {
+        const tabId = await ensurePersistentWorkerTab(settings);
+        return executeHttpRequestInTab(tabId, request);
+    }
+    let tempTabId = null;
+    try {
+        const tab = await chrome.tabs.create({ url: normalizeWorkerPageUrl(settings.workerPageUrl), active: false });
+        tempTabId = tab && tab.id ? tab.id : null;
+        if (!tempTabId) {
+            return { success: false, error: "worker_tab_create_failed" };
+        }
+        await waitForTabReady(tempTabId);
+        await sleepWorkerRecaptchaSettle(settings);
+        return await executeHttpRequestInTab(tempTabId, request);
+    } finally {
+        if (tempTabId) {
+            try {
+                await chrome.tabs.remove(tempTabId);
+            } catch (_) {}
+        }
+    }
+}
+
+async function handleGenerationRequest(data, commandType) {
+    const request = {
+        url: String(data.url || "").trim(),
+        method: String(data.method || "POST").trim().toUpperCase(),
+        headers: data.headers && typeof data.headers === "object" ? data.headers : {},
+        json_data: data.json_data && typeof data.json_data === "object" ? data.json_data : {},
+        timeout_ms: Number(data.timeout_ms) || 60000,
+    };
+    if (!request.url) {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({
+                req_id: data.req_id,
+                type: `${commandType}_result`,
+                status: "error",
+                error: "missing_url",
+            }));
+        }
+        return;
+    }
+    const result = await executeGenerationHttpRequest(request);
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    if (result.success) {
+        ws.send(JSON.stringify({
+            req_id: data.req_id,
+            type: `${commandType}_result`,
+            status: "success",
+            response_status: result.response_status,
+            response_text: result.response_text,
+            response_json: result.response_json,
+        }));
+    } else {
+        ws.send(JSON.stringify({
+            req_id: data.req_id,
+            type: `${commandType}_result`,
+            status: "error",
+            error: result.error || "generation_request_failed",
+            response_status: result.response_status || 0,
+            response_text: result.response_text || "",
+            response_json: result.response_json || null,
+        }));
+    }
+}
+
 async function connectWS() {
     if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
 
@@ -914,6 +1053,18 @@ async function connectWS() {
         if (data.type === "get_token") {
             tokenQueue = tokenQueue.then(() => handleGetToken(data)).catch(err => {
                 console.error("[Flow2API] Queue Error:", err);
+            });
+            return;
+        }
+        if (data.type === "submit_generation") {
+            tokenQueue = tokenQueue.then(() => handleGenerationRequest(data, "submit_generation")).catch(err => {
+                console.error("[Flow2API] submit_generation queue error:", err);
+            });
+            return;
+        }
+        if (data.type === "poll_generation") {
+            tokenQueue = tokenQueue.then(() => handleGenerationRequest(data, "poll_generation")).catch(err => {
+                console.error("[Flow2API] poll_generation queue error:", err);
             });
             return;
         }

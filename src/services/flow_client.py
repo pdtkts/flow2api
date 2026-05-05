@@ -15,6 +15,7 @@ import urllib.request
 from curl_cffi.requests import AsyncSession
 from ..core.logger import debug_logger
 from ..core.config import config
+from .extension_generation_service import ExtensionGenerationService
 
 try:
     import httpx
@@ -122,6 +123,11 @@ class FlowClient:
             default=None,
         )
         self._remote_browser_prefill_last_sent: Dict[str, float] = {}
+        self.extension_generation_service = ExtensionGenerationService(db=db)
+        self._force_local_http_ctx: contextvars.ContextVar[bool] = contextvars.ContextVar(
+            "flow_force_local_http",
+            default=False,
+        )
         # Last reCAPTCHA action for narrative logs (IMAGE_GENERATION vs VIDEO_GENERATION, etc.)
         self._last_recaptcha_action: Optional[str] = None
 
@@ -209,6 +215,12 @@ class FlowClient:
     def clear_managed_api_key_id(self) -> None:
         self._managed_api_key_id_ctx.set(None)
 
+    def set_force_local_http(self, enabled: bool) -> None:
+        self._force_local_http_ctx.set(bool(enabled))
+
+    def clear_force_local_http(self) -> None:
+        self._force_local_http_ctx.set(False)
+
     def _is_headed_docker_runtime(self) -> bool:
         raw = str(os.environ.get("ALLOW_DOCKER_HEADED_CAPTCHA", "")).strip().lower()
         return raw in {"1", "true", "yes", "on"}
@@ -230,6 +242,17 @@ class FlowClient:
 
     def _can_use_browser_gateway_fallback(self) -> bool:
         return bool(config.browser_fallback_to_remote_browser) and self._is_headed_docker_runtime()
+
+    def _should_submit_generation_via_extension(self, method: str, url: str, json_data: Optional[Dict[str, Any]]) -> bool:
+        if bool(self._force_local_http_ctx.get()):
+            return False
+        if not bool(config.extension_generation_enabled):
+            return False
+        if str(config.captcha_method).strip().lower() != "extension":
+            return False
+        if str(method or "").upper() != "POST":
+            return False
+        return self._is_generation_request_with_recaptcha(url, json_data)
 
     async def _make_request(
         self,
@@ -367,6 +390,24 @@ class FlowClient:
             )
 
         start_time = time.time()
+
+        if self._should_submit_generation_via_extension(method, url, json_data):
+            managed_api_key_id = self.get_managed_api_key_id()
+            try:
+                debug_logger.log_info(
+                    f"[EXT-GEN] submit dispatch via extension: method={method.upper()}, managed_api_key_id={managed_api_key_id}"
+                )
+                return await self.extension_generation_service.submit_generation(
+                    url=url,
+                    method=method.upper(),
+                    headers=headers,
+                    json_data=json_data if isinstance(json_data, dict) else {},
+                    timeout_seconds=int(request_timeout),
+                    managed_api_key_id=managed_api_key_id,
+                )
+            except Exception as ext_err:
+                debug_logger.log_error(f"[EXT-GEN] extension submit failed: {ext_err}")
+                raise Exception(f"Flow API request failed: {ext_err}")
 
         try:
             async with AsyncSession(trust_env=False) as session:
@@ -2680,6 +2721,25 @@ class FlowClient:
         if last_error is not None:
             raise last_error
         raise RuntimeError("视频状态查询失败")
+
+    async def check_video_status_via_extension_poll(self, at: str, operations: List[Dict]) -> dict:
+        """Fallback video poll path using extension browser context."""
+        url = f"{self.api_base_url}/video:batchCheckAsyncVideoGenerationStatus"
+        headers = {
+            "Authorization": f"Bearer {at}",
+            "Content-Type": "application/json;charset=utf-8",
+            "Origin": self.labs_base_url,
+            "Referer": f"{self.labs_base_url}/",
+        }
+        managed_api_key_id = self.get_managed_api_key_id()
+        return await self.extension_generation_service.poll_generation(
+            url=url,
+            method="POST",
+            headers=headers,
+            json_data={"operations": operations},
+            timeout_seconds=self._get_video_poll_timeout(),
+            managed_api_key_id=managed_api_key_id,
+        )
 
     # ========== 媒体删除 (使用ST) ==========
 
