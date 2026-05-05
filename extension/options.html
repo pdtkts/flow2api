@@ -347,6 +347,61 @@
       padding-top: 16px;
       border-top: 1px solid #e5e7eb;
     }
+    :root {
+      --bg: #0b1020;
+      --panel: #11182b;
+      --panel-soft: #0f172a;
+      --muted: #94a3b8;
+      --text: #e2e8f0;
+      --accent: #60a5fa;
+      --border: #24324a;
+      --ok: #34d399;
+      --bad: #f87171;
+    }
+    body {
+      background: radial-gradient(circle at 20% 0%, #1a2442 0%, #0b1020 45%, #070b16 100%);
+      color: var(--text);
+    }
+    .panel {
+      background: linear-gradient(180deg, rgba(17, 24, 43, 0.98) 0%, rgba(11, 16, 32, 0.98) 100%);
+      border: 1px solid var(--border);
+      box-shadow: 0 18px 44px rgba(2, 6, 23, 0.45);
+    }
+    p, .hint, .status-meta, .status-label, .metric-label, .event-time { color: var(--muted); }
+    h1, h2, .status-value, .metric-value, .event-item, .event-head { color: var(--text); }
+    input[type="text"], input[type="password"], input[type="number"], .event-head select {
+      background: #0b1327;
+      color: var(--text);
+      border-color: var(--border);
+    }
+    .metric-card, .status-card, .event-wrap {
+      background: var(--panel-soft);
+      border-color: var(--border);
+    }
+    .event-head, .job-table th, .tab { background: #0b1327; border-color: var(--border); color: var(--muted); }
+    .job-table td, .job-table th, .event-item { border-bottom-color: rgba(148, 163, 184, 0.15); }
+    .metric-value.ok, .job-ok { color: var(--ok); }
+    .metric-value.bad, .job-fail, .status-value.error { color: var(--bad); }
+    code {
+      background: #0b1327;
+      color: #bfdbfe;
+    }
+    button {
+      background: linear-gradient(180deg, #2563eb 0%, #1d4ed8 100%);
+      color: #eff6ff;
+    }
+    button.secondary { background: #1e293b; }
+    button.danger { background: #7f1d1d; }
+    .tabs { border-bottom-color: var(--border); }
+    .tab[aria-selected="true"] {
+      color: #dbeafe;
+      background: #11182b;
+      border-bottom-color: #11182b;
+    }
+    .shared-block, .section-border {
+      border-top-color: var(--border);
+      border-bottom-color: var(--border);
+    }
   </style>
 </head>
 <body>
@@ -376,6 +431,28 @@
               </tr>
             </thead>
             <tbody id="jobHistoryBody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <h2>Generation jobs</h2>
+      <div class="metrics-grid" id="generationMetricsGrid"></div>
+      <div class="event-wrap">
+        <div class="event-head">Recent generation submit/poll jobs (newest first)</div>
+        <div style="overflow-x: auto;">
+          <table class="job-table" id="generationHistoryTable">
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Command</th>
+                <th>Method</th>
+                <th>Result</th>
+                <th>Status</th>
+                <th>URL</th>
+                <th>Error</th>
+              </tr>
+            </thead>
+            <tbody id="generationHistoryBody"></tbody>
           </table>
         </div>
       </div>

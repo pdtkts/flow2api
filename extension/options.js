@@ -304,6 +304,70 @@ function renderMetrics(state) {
   `;
 }
 
+function renderGenerationMetrics(state) {
+  const el = $("generationMetricsGrid");
+  if (!el) return;
+  if (!state) {
+    el.innerHTML = "";
+    return;
+  }
+  const ok = Number(state.generationJobsSucceeded) || 0;
+  const fail = Number(state.generationJobsFailed) || 0;
+  const total = ok + fail;
+  const inFlight = !!state.generationInFlight;
+  const fallbackReason = String(state.generationLastPollFallbackReason || "").trim();
+  el.innerHTML = `
+    <div class="metric-card">
+      <span class="metric-label">Generation success</span>
+      <span class="metric-value ok">${escapeHtml(String(ok))}</span>
+    </div>
+    <div class="metric-card">
+      <span class="metric-label">Generation failed</span>
+      <span class="metric-value bad">${escapeHtml(String(fail))}</span>
+    </div>
+    <div class="metric-card">
+      <span class="metric-label">Generation total</span>
+      <span class="metric-value">${escapeHtml(String(total))}</span>
+      <div class="metric-sub">Success rate: ${escapeHtml(formatPercent(ok, total))}</div>
+    </div>
+    <div class="metric-card">
+      <span class="metric-label">Generation state</span>
+      <span class="metric-value">${inFlight ? "Running" : "Idle"}</span>
+      <div class="metric-sub">${escapeHtml(fallbackReason || "No poll fallback error")}</div>
+    </div>
+  `;
+}
+
+function renderGenerationHistory(state) {
+  const body = $("generationHistoryBody");
+  if (!body) return;
+  const list = Array.isArray(state.recentGenerationJobs) ? [...state.recentGenerationJobs].reverse() : [];
+  if (!list.length) {
+    body.innerHTML = `<tr><td colspan="7" class="event-item" style="border:0;">No generation jobs yet</td></tr>`;
+    return;
+  }
+  body.innerHTML = list.map((row) => {
+    const ts = row && row.ts ? Number(row.ts) : 0;
+    const timeStr = ts ? escapeHtml(new Date(ts).toLocaleString()) : "—";
+    const cmd = escapeHtml(String((row && row.command) || ""));
+    const method = escapeHtml(String((row && row.method) || ""));
+    const status = escapeHtml(String((row && row.status) || "—"));
+    const ok = !!(row && row.ok);
+    const result = ok ? `<span class="job-ok">OK</span>` : `<span class="job-fail">FAIL</span>`;
+    const url = escapeHtml(String((row && row.url) || ""));
+    const err = escapeHtml(String((row && row.error) || ""));
+    return `<tr>
+      <td>${timeStr}</td>
+      <td><code>${cmd}</code></td>
+      <td><code>${method}</code></td>
+      <td>${result}</td>
+      <td>${status}</td>
+      <td><code style="word-break:break-all;">${url || "—"}</code></td>
+      <td>${err || "—"}</td>
+    </tr>`;
+  }).join("");
+}
+
 function renderJobHistory(state) {
   const body = $("jobHistoryBody");
   const list = Array.isArray(state.recentCaptchaJobs) ? [...state.recentCaptchaJobs].reverse() : [];
@@ -371,6 +435,7 @@ function renderStatusCards(state) {
     ["Worker tab ID", workerTabId, false],
     ["Register error", registerError, registerError !== "-"],
     ["Last error", lastError, lastError !== "-"],
+    ["Generation in-flight", state.generationInFlight ? "yes" : "no", false],
   ];
 
   cardsEl.innerHTML = items
@@ -444,13 +509,17 @@ function updateRuntimeStatus(state) {
     $("statusCards").innerHTML = `<div class="status-card"><span class="status-label">Connection</span><span class="status-value">unknown</span></div>`;
     metaEl.textContent = "Last update: no runtime state";
     renderMetrics(null);
+    renderGenerationMetrics(null);
     renderJobHistory({ recentCaptchaJobs: [] });
+    renderGenerationHistory({ recentGenerationJobs: [] });
     renderSessionTokenHistory([]);
     renderEventLog([]);
     return;
   }
   renderMetrics(state);
+  renderGenerationMetrics(state);
   renderJobHistory(state);
+  renderGenerationHistory(state);
   renderStatusCards(state);
   renderSessionTokenHistory(state.flowSessionTokenHistory);
   renderEventLog(state.events);

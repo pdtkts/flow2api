@@ -66,6 +66,11 @@ const runtimeState = {
     sessionRefreshSucceeded: 0,
     sessionRefreshFailed: 0,
     workerTabId: null,
+    generationJobsSucceeded: 0,
+    generationJobsFailed: 0,
+    recentGenerationJobs: [],
+    generationInFlight: false,
+    generationLastPollFallbackReason: "",
 };
 
 function inferConnectionMode(stored) {
@@ -181,6 +186,29 @@ function recordSessionRefreshOutcome(success) {
         runtimeState.sessionRefreshFailed = (runtimeState.sessionRefreshFailed || 0) + 1;
     }
     persistCaptchaPersistence();
+}
+
+function recordGenerationJob(commandType, request, result) {
+    const ok = !!(result && result.success);
+    if (ok) {
+        runtimeState.generationJobsSucceeded = (runtimeState.generationJobsSucceeded || 0) + 1;
+    } else {
+        runtimeState.generationJobsFailed = (runtimeState.generationJobsFailed || 0) + 1;
+    }
+    const list = Array.isArray(runtimeState.recentGenerationJobs) ? runtimeState.recentGenerationJobs : [];
+    list.push({
+        ts: Date.now(),
+        command: String(commandType || ""),
+        method: String((request && request.method) || ""),
+        url: String((request && request.url) || ""),
+        ok,
+        status: Number((result && result.response_status) || 0),
+        error: String((result && result.error) || "").slice(0, 500),
+    });
+    if (list.length > RECENT_CAPTCHA_JOBS_MAX) {
+        list.splice(0, list.length - RECENT_CAPTCHA_JOBS_MAX);
+    }
+    runtimeState.recentGenerationJobs = list;
 }
 
 function loadExtensionJobAndWorkerState() {
@@ -438,6 +466,11 @@ function resetRuntimeStatePartial() {
     runtimeState.sessionRefreshSucceeded = 0;
     runtimeState.sessionRefreshFailed = 0;
     runtimeState.workerTabId = null;
+    runtimeState.generationJobsSucceeded = 0;
+    runtimeState.generationJobsFailed = 0;
+    runtimeState.recentGenerationJobs = [];
+    runtimeState.generationInFlight = false;
+    runtimeState.generationLastPollFallbackReason = "";
 }
 
 async function closeWorkerTabIfAny() {
@@ -917,7 +950,16 @@ async function handleGenerationRequest(data, commandType) {
         }
         return;
     }
+    runtimeState.generationInFlight = true;
     const result = await executeGenerationHttpRequest(request);
+    recordGenerationJob(commandType, request, result);
+    if (commandType === "poll_generation" && !result.success) {
+        runtimeState.generationLastPollFallbackReason = String(result.error || "poll_generation_failed");
+    }
+    if (commandType === "poll_generation" && result.success) {
+        runtimeState.generationLastPollFallbackReason = "";
+    }
+    runtimeState.generationInFlight = false;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     if (result.success) {
         ws.send(JSON.stringify({
