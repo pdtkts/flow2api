@@ -1605,7 +1605,8 @@ class FlowClient:
                     json_data=json_data,
                     use_at=True,
                     at_token=at,
-                    timeout=config.upsample_timeout
+                    timeout=config.upsample_timeout,
+                    token_id=token_id,
                 )
 
                 # 返回 base64 编码的图片
