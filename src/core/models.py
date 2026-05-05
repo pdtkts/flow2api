@@ -154,6 +154,8 @@ class GenerationConfig(BaseModel):
     image_timeout: int = 300  # seconds
     video_timeout: int = 1500  # seconds
     max_retries: int = 3  # 请求最大重试次数
+    extension_generation_enabled: bool = False
+    extension_generation_fallback_mode: str = "local_http_on_recaptcha"
 
 
 class CallLogicConfig(BaseModel):

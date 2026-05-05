@@ -137,6 +137,10 @@ export function SystemSettings({ active }: { active: boolean }) {
   const [imgTimeout, setImgTimeout] = useState("300")
   const [vidTimeout, setVidTimeout] = useState("1500")
   const [maxRetries, setMaxRetries] = useState("3")
+  const [extensionGenerationEnabled, setExtensionGenerationEnabled] = useState(false)
+  const [extensionGenerationFallbackMode, setExtensionGenerationFallbackMode] = useState<"local_http_on_recaptcha" | "none">(
+    "local_http_on_recaptcha"
+  )
 
   const [callMode, setCallMode] = useState<"default" | "polling">("default")
 
@@ -169,7 +173,16 @@ export function SystemSettings({ active }: { active: boolean }) {
         "/api/proxy/config",
         token
       ),
-      adminJson<{ success?: boolean; config?: { image_timeout?: number; video_timeout?: number; max_retries?: number } }>(
+      adminJson<{
+        success?: boolean
+        config?: {
+          image_timeout?: number
+          video_timeout?: number
+          max_retries?: number
+          extension_generation_enabled?: boolean
+          extension_generation_fallback_mode?: string
+        }
+      }>(
         "/api/generation/timeout",
         token
       ),
@@ -206,6 +219,10 @@ export function SystemSettings({ active }: { active: boolean }) {
       setImgTimeout(String(g.data.config.image_timeout ?? 300))
       setVidTimeout(String(g.data.config.video_timeout ?? 1500))
       setMaxRetries(String(g.data.config.max_retries ?? 3))
+      setExtensionGenerationEnabled(!!g.data.config.extension_generation_enabled)
+      setExtensionGenerationFallbackMode(
+        g.data.config.extension_generation_fallback_mode === "none" ? "none" : "local_http_on_recaptcha"
+      )
     }
     if (c.ok && c.data?.success && c.data.config?.call_mode)
       setCallMode(c.data.config.call_mode === "polling" ? "polling" : "default")
@@ -452,7 +469,13 @@ export function SystemSettings({ active }: { active: boolean }) {
     try {
       const r = await adminFetch("/api/generation/timeout", token, {
         method: "POST",
-        body: JSON.stringify({ image_timeout: it, video_timeout: vt, max_retries: mr }),
+        body: JSON.stringify({
+          image_timeout: it,
+          video_timeout: vt,
+          max_retries: mr,
+          extension_generation_enabled: extensionGenerationEnabled,
+          extension_generation_fallback_mode: extensionGenerationFallbackMode,
+        }),
       })
       if (!r) return
       const d = await r.json()
@@ -815,6 +838,25 @@ export function SystemSettings({ active }: { active: boolean }) {
           <div>
             <Label>Max retries</Label>
             <Input type="number" className="mt-1" value={maxRetries} onChange={(e) => setMaxRetries(e.target.value)} min={1} />
+          </div>
+          <div className="flex items-center gap-2">
+            <Switch checked={extensionGenerationEnabled} onCheckedChange={setExtensionGenerationEnabled} />
+            <Label>Extension-first media generation</Label>
+          </div>
+          <div>
+            <Label>Extension fallback mode</Label>
+            <Select
+              value={extensionGenerationFallbackMode}
+              onValueChange={(v) => setExtensionGenerationFallbackMode(v as "local_http_on_recaptcha" | "none")}
+            >
+              <SelectTrigger className="mt-1">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="local_http_on_recaptcha">Fallback to local HTTP on reCAPTCHA rejection</SelectItem>
+                <SelectItem value="none">No fallback</SelectItem>
+              </SelectContent>
+            </Select>
           </div>
           <Button onClick={saveGeneration} disabled={busy}>
             Save

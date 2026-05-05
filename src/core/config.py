@@ -336,6 +336,34 @@ class Config:
             self._config["generation"] = {}
         self._config["generation"]["upsample_timeout"] = timeout
 
+    @property
+    def extension_generation_enabled(self) -> bool:
+        return bool(self._config.get("generation_routing", {}).get("extension_generation_enabled", False))
+
+    def set_extension_generation_enabled(self, enabled: bool):
+        if "generation_routing" not in self._config:
+            self._config["generation_routing"] = {}
+        self._config["generation_routing"]["extension_generation_enabled"] = bool(enabled)
+
+    @property
+    def extension_generation_fallback_mode(self) -> str:
+        mode = str(
+            self._config.get("generation_routing", {}).get(
+                "extension_generation_fallback_mode",
+                "local_http_on_recaptcha",
+            )
+            or ""
+        ).strip().lower()
+        return mode if mode in {"none", "local_http_on_recaptcha"} else "local_http_on_recaptcha"
+
+    def set_extension_generation_fallback_mode(self, mode: str):
+        if "generation_routing" not in self._config:
+            self._config["generation_routing"] = {}
+        normalized = str(mode or "").strip().lower()
+        if normalized not in {"none", "local_http_on_recaptcha"}:
+            normalized = "local_http_on_recaptcha"
+        self._config["generation_routing"]["extension_generation_fallback_mode"] = normalized
+
     # Cache configuration
     @property
     def cache_enabled(self) -> bool:

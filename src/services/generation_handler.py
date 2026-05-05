@@ -19,6 +19,8 @@ from ..core.account_tiers import (
     supports_model_for_tier,
 )
 from .file_cache import FileCache
+from .extension_generation_service import ExtensionGenerationService
+from .flow_client import classify_recaptcha_upstream_failure
 
 
 # Model configuration
@@ -722,6 +724,7 @@ class GenerationHandler:
             flow_client=flow_client,
             db=db,
         )
+        self.extension_generation_service = ExtensionGenerationService()
 
     def _create_generation_result(self) -> Dict[str, Any]:
         """????????????????"""
@@ -755,6 +758,33 @@ class GenerationHandler:
         if len(text) <= max_length:
             return text
         return f"{text[:max_length - 3]}..."
+
+    def _is_extension_generation_enabled(self) -> bool:
+        return bool(config.extension_generation_enabled)
+
+    def _should_fallback_to_local_http(self, error: Exception) -> bool:
+        if str(config.extension_generation_fallback_mode).strip().lower() != "local_http_on_recaptcha":
+            return False
+        message = str(error or "")
+        return classify_recaptcha_upstream_failure(400, message) == "upstream_rejected"
+
+    async def _execute_with_extension_fallback(
+        self,
+        operation_name: str,
+        extension_operation,
+        local_operation,
+    ):
+        if not self._is_extension_generation_enabled():
+            return await local_operation()
+        try:
+            return await self.extension_generation_service.execute(operation_name, extension_operation)
+        except Exception as exc:
+            if self._should_fallback_to_local_http(exc):
+                debug_logger.log_warning(
+                    f"[EXT-GEN] fallback to local HTTP on reCAPTCHA rejection: op={operation_name}, err={exc}"
+                )
+                return await local_operation()
+            raise
 
     async def _maybe_update_poll_task(self, poll_task_id: Optional[str], **kwargs: Any) -> None:
         """Best-effort `tasks` row updates for `GET /v1/jobs/{job_id}` when async polling is active."""
@@ -1362,17 +1392,24 @@ class GenerationHandler:
 
             poll_hook = self._build_poll_task_progress_hook(poll_task_id)
             generate_started_at = time.time()
-            result, generation_session_id, upstream_trace = await self.flow_client.generate_image(
-                at=token.at,
-                project_id=project_id,
-                prompt=prompt,
-                model_name=model_config["model_name"],
-                aspect_ratio=model_config["aspect_ratio"],
-                image_inputs=image_inputs,
-                token_id=token.id,
-                token_image_concurrency=token.image_concurrency,
-                progress_callback=_image_progress_callback,
-                poll_task_progress=poll_hook,
+            async def _extension_generate_image():
+                return await self.flow_client.generate_image(
+                    at=token.at,
+                    project_id=project_id,
+                    prompt=prompt,
+                    model_name=model_config["model_name"],
+                    aspect_ratio=model_config["aspect_ratio"],
+                    image_inputs=image_inputs,
+                    token_id=token.id,
+                    token_image_concurrency=token.image_concurrency,
+                    progress_callback=_image_progress_callback,
+                    poll_task_progress=poll_hook,
+                )
+
+            result, generation_session_id, upstream_trace = await self._execute_with_extension_fallback(
+                "generate_image",
+                _extension_generate_image,
+                _extension_generate_image,
             )
             if image_trace is not None:
                 image_trace["generate_api_ms"] = int((time.time() - generate_started_at) * 1000)
@@ -1429,15 +1466,22 @@ class GenerationHandler:
                 for retry_attempt in range(max_retries):
                     try:
                         # 调用 upsample API
-                        encoded_image = await self.flow_client.upsample_image(
-                            at=token.at,
-                            project_id=project_id,
-                            media_id=media_id,
-                            target_resolution=upsample_resolution,
-                            user_paygate_tier=normalized_tier,
-                            session_id=generation_session_id,
-                            token_id=token.id,
-                            poll_task_progress=poll_hook,
+                        async def _extension_upsample_image():
+                            return await self.flow_client.upsample_image(
+                                at=token.at,
+                                project_id=project_id,
+                                media_id=media_id,
+                                target_resolution=upsample_resolution,
+                                user_paygate_tier=normalized_tier,
+                                session_id=generation_session_id,
+                                token_id=token.id,
+                                poll_task_progress=poll_hook,
+                            )
+
+                        encoded_image = await self._execute_with_extension_fallback(
+                            "upsample_image",
+                            _extension_upsample_image,
+                            _extension_upsample_image,
                         )
 
                         if encoded_image:
@@ -1756,33 +1800,32 @@ class GenerationHandler:
                 yield self._create_stream_chunk("提交视频生成任务...\n")
             submit_started_at = time.time()
 
-            # I2V: 首尾帧生成
-            if video_type == "i2v" and start_media_id:
-                if end_media_id:
-                    # 有首尾帧
-                    result = await self.flow_client.generate_video_start_end(
-                        at=token.at,
-                        project_id=project_id,
-                        prompt=prompt,
-                        model_key=model_config["model_key"],
-                        aspect_ratio=model_config["aspect_ratio"],
-                        start_media_id=start_media_id,
-                        end_media_id=end_media_id,
-                        use_v2_model_config=use_v2_model_config,
-                        user_paygate_tier=normalized_tier,
-                        token_id=token.id,
-                        token_video_concurrency=token.video_concurrency,
-                        poll_task_progress=poll_hook,
-                    )
-                else:
+            async def _submit_video_operation():
+                # I2V: 首尾帧生成
+                if video_type == "i2v" and start_media_id:
+                    if end_media_id:
+                        return await self.flow_client.generate_video_start_end(
+                            at=token.at,
+                            project_id=project_id,
+                            prompt=prompt,
+                            model_key=model_config["model_key"],
+                            aspect_ratio=model_config["aspect_ratio"],
+                            start_media_id=start_media_id,
+                            end_media_id=end_media_id,
+                            use_v2_model_config=use_v2_model_config,
+                            user_paygate_tier=normalized_tier,
+                            token_id=token.id,
+                            token_video_concurrency=token.video_concurrency,
+                            poll_task_progress=poll_hook,
+                        )
                     # 只有首帧 - 需要去掉 model_key 中的 _fl
-                    # 情况1: _fl_ 在中间 (如 veo_3_1_i2v_s_fast_fl_ultra_relaxed -> veo_3_1_i2v_s_fast_ultra_relaxed)
-                    # 情况2: _fl 在结尾 (如 veo_3_1_i2v_s_fast_ultra_fl -> veo_3_1_i2v_s_fast_ultra)
                     actual_model_key = model_config["model_key"].replace("_fl_", "_")
                     if actual_model_key.endswith("_fl"):
                         actual_model_key = actual_model_key[:-3]
-                    debug_logger.log_info(f"[I2V] 单帧模式，model_key: {model_config['model_key']} -> {actual_model_key}")
-                    result = await self.flow_client.generate_video_start_image(
+                    debug_logger.log_info(
+                        f"[I2V] 单帧模式，model_key: {model_config['model_key']} -> {actual_model_key}"
+                    )
+                    return await self.flow_client.generate_video_start_image(
                         at=token.at,
                         project_id=project_id,
                         prompt=prompt,
@@ -1795,47 +1838,37 @@ class GenerationHandler:
                         token_video_concurrency=token.video_concurrency,
                         poll_task_progress=poll_hook,
                     )
-
-            # R2V: 多图生成
-            elif video_type == "r2v" and reference_images:
-                result = await self.flow_client.generate_video_reference_images(
-                    at=token.at,
-                    project_id=project_id,
-                    prompt=prompt,
-                    model_key=model_config["model_key"],
-                    aspect_ratio=model_config["aspect_ratio"],
-                    reference_images=reference_images,
-                    user_paygate_tier=normalized_tier,
-                    token_id=token.id,
-                    token_video_concurrency=token.video_concurrency,
-                    poll_task_progress=poll_hook,
-                )
-
-            # Extend: 视频续写
-            elif video_type == "extend":
-                if not video_media_id:
-                    error_msg = "❌ 视频续写需要提供源视频的 mediaGenerationId，请在 image_url 中传入 extend://VIDEO_MEDIA_ID"
-                    if stream:
-                        yield self._create_stream_chunk(f"{error_msg}\n")
-                    self._mark_generation_failed(generation_result, error_msg)
-                    yield self._create_error_response(error_msg, status_code=400)
-                    return
-                result = await self.flow_client.generate_video_extend(
-                    at=token.at,
-                    project_id=project_id,
-                    prompt=prompt,
-                    video_media_id=video_media_id,
-                    model_key=model_config["model_key"],
-                    aspect_ratio=model_config["aspect_ratio"],
-                    user_paygate_tier=normalized_tier,
-                    token_id=token.id,
-                    token_video_concurrency=token.video_concurrency,
-                    poll_task_progress=poll_hook,
-                )
-
-            # T2V 或 R2V无图: 纯文本生成
-            else:
-                result = await self.flow_client.generate_video_text(
+                if video_type == "r2v" and reference_images:
+                    return await self.flow_client.generate_video_reference_images(
+                        at=token.at,
+                        project_id=project_id,
+                        prompt=prompt,
+                        model_key=model_config["model_key"],
+                        aspect_ratio=model_config["aspect_ratio"],
+                        reference_images=reference_images,
+                        user_paygate_tier=normalized_tier,
+                        token_id=token.id,
+                        token_video_concurrency=token.video_concurrency,
+                        poll_task_progress=poll_hook,
+                    )
+                if video_type == "extend":
+                    if not video_media_id:
+                        raise ValueError(
+                            "❌ 视频续写需要提供源视频的 mediaGenerationId，请在 image_url 中传入 extend://VIDEO_MEDIA_ID"
+                        )
+                    return await self.flow_client.generate_video_extend(
+                        at=token.at,
+                        project_id=project_id,
+                        prompt=prompt,
+                        video_media_id=video_media_id,
+                        model_key=model_config["model_key"],
+                        aspect_ratio=model_config["aspect_ratio"],
+                        user_paygate_tier=normalized_tier,
+                        token_id=token.id,
+                        token_video_concurrency=token.video_concurrency,
+                        poll_task_progress=poll_hook,
+                    )
+                return await self.flow_client.generate_video_text(
                     at=token.at,
                     project_id=project_id,
                     prompt=prompt,
@@ -1847,6 +1880,20 @@ class GenerationHandler:
                     token_video_concurrency=token.video_concurrency,
                     poll_task_progress=poll_hook,
                 )
+
+            try:
+                result = await self._execute_with_extension_fallback(
+                    "submit_video_generation",
+                    _submit_video_operation,
+                    _submit_video_operation,
+                )
+            except ValueError as e:
+                error_msg = str(e)
+                if stream:
+                    yield self._create_stream_chunk(f"{error_msg}\n")
+                self._mark_generation_failed(generation_result, error_msg)
+                yield self._create_error_response(error_msg, status_code=400)
+                return
             if video_trace is not None:
                 video_trace["submit_generation_ms"] = int((time.time() - submit_started_at) * 1000)
 
@@ -1996,16 +2043,23 @@ class GenerationHandler:
                                 captcha_status="pending",
                             )
                             # 提交放大任务
-                            upsample_result = await self.flow_client.upsample_video(
-                                at=token.at,
-                                project_id=project_id,
-                                video_media_id=video_media_id,
-                                aspect_ratio=aspect_ratio,
-                                resolution=upsample_config["resolution"],
-                                model_key=upsample_config["model_key"],
-                                token_id=token.id,
-                                token_video_concurrency=token.video_concurrency,
-                                poll_task_progress=poll_hook,
+                            async def _submit_video_upsample():
+                                return await self.flow_client.upsample_video(
+                                    at=token.at,
+                                    project_id=project_id,
+                                    video_media_id=video_media_id,
+                                    aspect_ratio=aspect_ratio,
+                                    resolution=upsample_config["resolution"],
+                                    model_key=upsample_config["model_key"],
+                                    token_id=token.id,
+                                    token_video_concurrency=token.video_concurrency,
+                                    poll_task_progress=poll_hook,
+                                )
+
+                            upsample_result = await self._execute_with_extension_fallback(
+                                "submit_video_upsample",
+                                _submit_video_upsample,
+                                _submit_video_upsample,
                             )
                             
                             upsample_operations = upsample_result.get("operations", [])

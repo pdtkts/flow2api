@@ -135,13 +135,29 @@ class Database:
             image_timeout = 300
             video_timeout = 1500
             max_retries = 3
+            extension_generation_enabled = False
+            extension_generation_fallback_mode = "local_http_on_recaptcha"
 
             if config_dict:
                 generation_config = config_dict.get("generation", {})
                 flow_config = config_dict.get("flow", {})
+                generation_routing_config = config_dict.get("generation_routing", {})
                 image_timeout = generation_config.get("image_timeout", 300)
                 video_timeout = generation_config.get("video_timeout", 1500)
                 max_retries = flow_config.get("max_retries", 3)
+                extension_generation_enabled = bool(
+                    generation_routing_config.get("extension_generation_enabled", False)
+                )
+                mode = str(
+                    generation_routing_config.get(
+                        "extension_generation_fallback_mode",
+                        "local_http_on_recaptcha",
+                    )
+                    or ""
+                ).strip().lower()
+                extension_generation_fallback_mode = (
+                    mode if mode in {"none", "local_http_on_recaptcha"} else "local_http_on_recaptcha"
+                )
 
             try:
                 max_retries = max(1, int(max_retries))
@@ -149,9 +165,22 @@ class Database:
                 max_retries = 3
 
             await db.execute("""
-                INSERT INTO generation_config (id, image_timeout, video_timeout, max_retries)
-                VALUES (1, ?, ?, ?)
-            """, (image_timeout, video_timeout, max_retries))
+                INSERT INTO generation_config (
+                    id,
+                    image_timeout,
+                    video_timeout,
+                    max_retries,
+                    extension_generation_enabled,
+                    extension_generation_fallback_mode
+                )
+                VALUES (1, ?, ?, ?, ?, ?)
+            """, (
+                image_timeout,
+                video_timeout,
+                max_retries,
+                extension_generation_enabled,
+                extension_generation_fallback_mode,
+            ))
 
         # Ensure call_logic_config has a row
         cursor = await db.execute("SELECT COUNT(*) FROM call_logic_config")
@@ -666,6 +695,8 @@ class Database:
             if await self._table_exists(db, "generation_config"):
                 generation_columns_to_add = [
                     ("max_retries", "INTEGER DEFAULT 3"),
+                    ("extension_generation_enabled", "BOOLEAN DEFAULT 0"),
+                    ("extension_generation_fallback_mode", "TEXT DEFAULT 'local_http_on_recaptcha'"),
                 ]
 
                 for col_name, col_type in generation_columns_to_add:
@@ -1006,6 +1037,8 @@ class Database:
                     image_timeout INTEGER DEFAULT 300,
                     video_timeout INTEGER DEFAULT 1500,
                     max_retries INTEGER DEFAULT 3,
+                    extension_generation_enabled BOOLEAN DEFAULT 0,
+                    extension_generation_fallback_mode TEXT DEFAULT 'local_http_on_recaptcha',
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
@@ -2025,6 +2058,8 @@ class Database:
         image_timeout: Optional[int] = None,
         video_timeout: Optional[int] = None,
         max_retries: Optional[int] = None,
+        extension_generation_enabled: Optional[bool] = None,
+        extension_generation_fallback_mode: Optional[str] = None,
     ):
         """Update generation configuration"""
         async with self._connect(write=True) as db:
@@ -2051,18 +2086,54 @@ class Database:
                 )
             except Exception:
                 normalized_max_retries = 3
+            normalized_extension_generation_enabled = (
+                bool(extension_generation_enabled)
+                if extension_generation_enabled is not None
+                else bool(current.get("extension_generation_enabled", False))
+            )
+            normalized_extension_generation_fallback_mode = str(
+                extension_generation_fallback_mode
+                if extension_generation_fallback_mode is not None
+                else current.get("extension_generation_fallback_mode", "local_http_on_recaptcha")
+            ).strip().lower()
+            if normalized_extension_generation_fallback_mode not in {"none", "local_http_on_recaptcha"}:
+                normalized_extension_generation_fallback_mode = "local_http_on_recaptcha"
 
             if row:
                 await db.execute("""
                     UPDATE generation_config
-                    SET image_timeout = ?, video_timeout = ?, max_retries = ?, updated_at = CURRENT_TIMESTAMP
+                    SET image_timeout = ?,
+                        video_timeout = ?,
+                        max_retries = ?,
+                        extension_generation_enabled = ?,
+                        extension_generation_fallback_mode = ?,
+                        updated_at = CURRENT_TIMESTAMP
                     WHERE id = 1
-                """, (normalized_image_timeout, normalized_video_timeout, normalized_max_retries))
+                """, (
+                    normalized_image_timeout,
+                    normalized_video_timeout,
+                    normalized_max_retries,
+                    normalized_extension_generation_enabled,
+                    normalized_extension_generation_fallback_mode,
+                ))
             else:
                 await db.execute("""
-                    INSERT INTO generation_config (id, image_timeout, video_timeout, max_retries)
-                    VALUES (1, ?, ?, ?)
-                """, (normalized_image_timeout, normalized_video_timeout, normalized_max_retries))
+                    INSERT INTO generation_config (
+                        id,
+                        image_timeout,
+                        video_timeout,
+                        max_retries,
+                        extension_generation_enabled,
+                        extension_generation_fallback_mode
+                    )
+                    VALUES (1, ?, ?, ?, ?, ?)
+                """, (
+                    normalized_image_timeout,
+                    normalized_video_timeout,
+                    normalized_max_retries,
+                    normalized_extension_generation_enabled,
+                    normalized_extension_generation_fallback_mode,
+                ))
             await db.commit()
 
     async def get_call_logic_config(self) -> CallLogicConfig:
@@ -2498,6 +2569,12 @@ class Database:
             config.set_image_timeout(generation_config.image_timeout)
             config.set_video_timeout(generation_config.video_timeout)
             config.set_flow_max_retries(generation_config.max_retries)
+            config.set_extension_generation_enabled(
+                bool(getattr(generation_config, "extension_generation_enabled", False))
+            )
+            config.set_extension_generation_fallback_mode(
+                str(getattr(generation_config, "extension_generation_fallback_mode", "local_http_on_recaptcha"))
+            )
 
         # Reload call logic config
         call_logic_config = await self.get_call_logic_config()

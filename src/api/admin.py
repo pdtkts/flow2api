@@ -625,6 +625,8 @@ class GenerationConfigRequest(BaseModel):
     image_timeout: Optional[int] = None
     video_timeout: Optional[int] = None
     max_retries: Optional[int] = None
+    extension_generation_enabled: Optional[bool] = None
+    extension_generation_fallback_mode: Optional[str] = None
 
 
 class CallLogicConfigRequest(BaseModel):
@@ -1503,6 +1505,13 @@ async def get_generation_config(token: str = Depends(verify_admin_token)):
             "image_timeout": config.image_timeout,
             "video_timeout": config.video_timeout,
             "max_retries": config.max_retries,
+            "extension_generation_enabled": bool(
+                getattr(config, "extension_generation_enabled", False)
+            ),
+            "extension_generation_fallback_mode": str(
+                getattr(config, "extension_generation_fallback_mode", "local_http_on_recaptcha")
+                or "local_http_on_recaptcha"
+            ),
         }
     }
 
@@ -1517,6 +1526,8 @@ async def update_generation_config(
         image_timeout=request.image_timeout,
         video_timeout=request.video_timeout,
         max_retries=request.max_retries,
+        extension_generation_enabled=request.extension_generation_enabled,
+        extension_generation_fallback_mode=request.extension_generation_fallback_mode,
     )
 
     # 🔥 Hot reload: sync database config to memory
@@ -2174,6 +2185,8 @@ async def update_generation_timeout(
         image_timeout=request.image_timeout,
         video_timeout=request.video_timeout,
         max_retries=request.max_retries,
+        extension_generation_enabled=request.extension_generation_enabled,
+        extension_generation_fallback_mode=request.extension_generation_fallback_mode,
     )
 
     # 🔥 Hot reload: sync database config to memory
