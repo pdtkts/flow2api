@@ -5,8 +5,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: flow2api:local
-    container_name: flow2api
+    image: flow2api-local:latest
+    container_name: flow2api-local
     ports:
       - "38000:8000"
     volumes:
@@ -15,16 +15,56 @@ services:
       - ./config/setting.toml:/app/config/setting.toml
     environment:
       - PYTHONUNBUFFERED=1
+      - FLOW2API_DB_URL=${FLOW2API_DB_URL:-postgresql://flow2api:flow2api@postgres:5432/flow2api}
+      - FLOW2API_REDIS_URL=${FLOW2API_REDIS_URL:-redis://redis:6379/0}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     restart: unless-stopped
 
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
-    image: flow2api-frontend:local
-    container_name: flow2api-frontend
+    image: flow2api-frontend-local:latest
+    container_name: flow2api-frontend-local
     ports:
       - "38080:80"
     depends_on:
       - flow2api
     restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: flow2api-local-postgres
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-flow2api}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-flow2api}
+      - POSTGRES_DB=${POSTGRES_DB:-flow2api}
+    volumes:
+      - flow2api-local-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-flow2api} -d ${POSTGRES_DB:-flow2api}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: flow2api-local-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - flow2api-local-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  flow2api-local-postgres-data:
+  flow2api-local-redis-data:
