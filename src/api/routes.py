@@ -16,7 +16,7 @@ from curl_cffi.requests import AsyncSession
 from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 
 from ..core import auth as auth_core
 from ..core.auth import verify_api_key_flexible
@@ -33,6 +33,7 @@ from ..core.models import (
     Project,
     Task,
 )
+from ..core.config import config as app_config
 from ..services.browser_captcha_extension import ExtensionCaptchaService
 from ..services.generation_handler import MODEL_CONFIG, GenerationHandler
 
@@ -1584,6 +1585,23 @@ async def create_flow_project(
         "total": len(created_projects),
         "failed_accounts": failed_accounts,
     }
+
+
+@router.post("/api/extension/generation-upload")
+async def extension_generation_upload(
+    request: Request,
+    upload_id: str = Query(..., description="Slot id from submit_generation message"),
+    upload_secret: str = Query(..., description="One-time secret for this upload"),
+):
+    """Receive large extension generation HTTP response bodies (side-channel for captcha_ws)."""
+    body = await request.body()
+    if len(body) > int(app_config.extension_generation_upload_max_bytes):
+        raise HTTPException(status_code=413, detail="body_too_large")
+    svc = await ExtensionCaptchaService.get_instance()
+    ok, err = await svc.ingest_generation_upload_body(upload_id, upload_secret, body)
+    if not ok:
+        raise HTTPException(status_code=400, detail=err)
+    return Response(status_code=204)
 
 
 @router.get("/api/cache/file")

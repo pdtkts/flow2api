@@ -76,6 +76,8 @@ def _path_allowed_on_api_only_host(path: str) -> bool:
         return True
     if path.startswith("/api/cache/"):
         return True
+    if path.startswith("/api/extension/"):
+        return True
     return False
 
 

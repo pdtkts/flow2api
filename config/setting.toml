@@ -49,6 +49,12 @@ video_timeout = 1500
 [generation_routing]
 extension_generation_enabled = false
 extension_generation_fallback_mode = "local_http_on_recaptcha"  # none/local_http_on_recaptcha
+# Large Flow JSON (e.g. upsampleImage encodedImage): POST body to /api/extension/generation-upload, small WS ack
+extension_generation_large_upload_enabled = true
+extension_generation_upload_threshold_bytes = 524288
+extension_generation_upload_max_bytes = 67108864
+extension_generation_upload_ttl_seconds = 600
+extension_generation_upload_force_upsample_image = true
 
 [call_logic]
 call_mode = "default"  # default=随机轮询策略, polling=顺序轮询策略

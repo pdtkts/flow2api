@@ -254,6 +254,25 @@ function validateStoredWorkerTab() {
     });
 }
 
+/** Build http(s) base URL from captcha WebSocket URL for same-host REST uploads. */
+function serverWebSocketToHttpBase(wsUrl) {
+    const raw = String(wsUrl || "").trim();
+    if (!raw) return "";
+    try {
+        const u = new URL(raw);
+        const proto = u.protocol === "wss:" ? "https:" : "http:";
+        let path = u.pathname || "";
+        if (path.endsWith("/captcha_ws")) {
+            path = path.slice(0, -"/captcha_ws".length) || "";
+        }
+        const origin = `${proto}//${u.host}`;
+        if (!path || path === "/") return origin;
+        return origin + (path.endsWith("/") ? path.slice(0, -1) : path);
+    } catch {
+        return "";
+    }
+}
+
 /** Public hosts should use wss://; keep ws:// for localhost-style hosts. */
 function normalizeWebSocketUrl(raw) {
     const trimmed = String(raw || "").trim();
@@ -1001,15 +1020,91 @@ async function handleGenerationRequest(data, commandType) {
     }
     runtimeState.generationInFlight = false;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    const lr = data.large_response_upload && typeof data.large_response_upload === "object"
+        ? data.large_response_upload
+        : null;
     if (result.success) {
-        ws.send(JSON.stringify({
+        const rt = String(result.response_text || "");
+        const threshold =
+            lr && lr.threshold_bytes != null ? Number(lr.threshold_bytes) : 524288;
+        const force = lr && !!lr.force_http_upload;
+        const shouldHttp =
+            lr &&
+            rt &&
+            (force || (Number.isFinite(threshold) && rt.length >= threshold));
+        let successPayload = {
             req_id: data.req_id,
             type: `${commandType}_result`,
             status: "success",
             response_status: result.response_status,
             response_text: result.response_text,
             response_json: result.response_json,
-        }));
+        };
+        if (shouldHttp) {
+            const settings = await getSettings();
+            const base = serverWebSocketToHttpBase(settings.serverUrl || DEFAULT_SETTINGS.serverUrl);
+            const path = String(lr.upload_path || "/api/extension/generation-upload").trim() || "/api/extension/generation-upload";
+            let uploadTarget = "";
+            try {
+                uploadTarget = new URL(path.startsWith("/") ? path : `/${path}`, `${base}/`).toString();
+            } catch (e) {
+                uploadTarget = "";
+            }
+            if (!uploadTarget || !lr.upload_id || !lr.upload_secret) {
+                pushEvent("generation_upload_bad_config", "large_response_upload missing fields or bad URL base", "error");
+                successPayload = {
+                    req_id: data.req_id,
+                    type: `${commandType}_result`,
+                    status: "error",
+                    error: "generation_upload_bad_target",
+                    response_status: result.response_status || 0,
+                    response_text: "",
+                    response_json: null,
+                };
+            } else {
+                const u = new URL(uploadTarget);
+                u.searchParams.set("upload_id", String(lr.upload_id));
+                u.searchParams.set("upload_secret", String(lr.upload_secret));
+                try {
+                    const up = await fetch(u.toString(), {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: rt,
+                    });
+                    if (!up.ok) {
+                        const errText = await up.text().catch(() => "");
+                        successPayload = {
+                            req_id: data.req_id,
+                            type: `${commandType}_result`,
+                            status: "error",
+                            error: `generation_upload_http_failed:${up.status}:${(errText || "").slice(0, 200)}`,
+                            response_status: result.response_status || 0,
+                            response_text: "",
+                            response_json: null,
+                        };
+                    } else {
+                        successPayload = {
+                            req_id: data.req_id,
+                            type: `${commandType}_result`,
+                            status: "success",
+                            response_status: result.response_status,
+                            large_response_upload_id: String(lr.upload_id),
+                        };
+                    }
+                } catch (e) {
+                    successPayload = {
+                        req_id: data.req_id,
+                        type: `${commandType}_result`,
+                        status: "error",
+                        error: `generation_upload_fetch_error:${String((e && e.message) || e || "err")}`.slice(0, 400),
+                        response_status: result.response_status || 0,
+                        response_text: "",
+                        response_json: null,
+                    };
+                }
+            }
+        }
+        ws.send(JSON.stringify(successPayload));
     } else {
         ws.send(JSON.stringify({
             req_id: data.req_id,

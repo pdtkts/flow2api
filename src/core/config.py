@@ -364,6 +364,36 @@ class Config:
             normalized = "local_http_on_recaptcha"
         self._config["generation_routing"]["extension_generation_fallback_mode"] = normalized
 
+    @property
+    def extension_generation_large_upload_enabled(self) -> bool:
+        """POST large generation responses to flow2api HTTP instead of embedding in captcha_ws."""
+        return bool(
+            self._config.get("generation_routing", {}).get("extension_generation_large_upload_enabled", True)
+        )
+
+    @property
+    def extension_generation_upload_threshold_bytes(self) -> int:
+        v = int(self._config.get("generation_routing", {}).get("extension_generation_upload_threshold_bytes", 524288) or 524288)
+        return max(0, min(v, 256 * 1024 * 1024))
+
+    @property
+    def extension_generation_upload_max_bytes(self) -> int:
+        v = int(self._config.get("generation_routing", {}).get("extension_generation_upload_max_bytes", 67108864) or 67108864)
+        return max(1024 * 1024, min(v, 256 * 1024 * 1024))
+
+    @property
+    def extension_generation_upload_ttl_seconds(self) -> int:
+        v = int(self._config.get("generation_routing", {}).get("extension_generation_upload_ttl_seconds", 600) or 600)
+        return max(30, min(v, 3600))
+
+    @property
+    def extension_generation_upload_force_upsample_image(self) -> bool:
+        return bool(
+            self._config.get("generation_routing", {}).get(
+                "extension_generation_upload_force_upsample_image", True
+            )
+        )
+
     # Cache configuration
     @property
     def cache_enabled(self) -> bool:

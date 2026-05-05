@@ -1,5 +1,6 @@
 import asyncio
 import json
+import secrets
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -7,6 +8,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from fastapi import WebSocket
 
+from ..core.config import config
 from ..core.logger import debug_logger
 
 # Dedicated-worker hybrid routing (health + score + RR tie-break)
@@ -75,6 +77,100 @@ class ExtensionCaptchaService:
         # RR cursor among top-scoring dedicated workers per token_id (string key dedicated:{id})
         self._dedicated_hybrid_rr: dict[str, int] = {}
         self._dedicated_stats_lock = asyncio.Lock()
+        # upload_id -> slot for extension HTTP side-channel (large generation responses)
+        self._generation_upload_slots: dict[str, dict[str, Any]] = {}
+        self._generation_upload_lock = asyncio.Lock()
+
+    def _prune_generation_upload_slots_unlocked(self) -> None:
+        now = time.time()
+        expired = [k for k, v in self._generation_upload_slots.items() if float(v.get("expires_at") or 0) < now]
+        for k in expired:
+            self._generation_upload_slots.pop(k, None)
+
+    async def register_generation_upload_slot(
+        self, *, req_id: str, max_body_bytes: int, ttl_seconds: int
+    ) -> tuple[str, str]:
+        async with self._generation_upload_lock:
+            self._prune_generation_upload_slots_unlocked()
+            upload_id = uuid.uuid4().hex
+            upload_secret = secrets.token_urlsafe(48)
+            self._generation_upload_slots[upload_id] = {
+                "req_id": req_id,
+                "secret": upload_secret,
+                "body": None,
+                "expires_at": time.time() + float(ttl_seconds),
+                "max_body_bytes": int(max_body_bytes),
+            }
+            return upload_id, upload_secret
+
+    async def ingest_generation_upload_body(
+        self, upload_id: str, upload_secret: str, body: bytes
+    ) -> tuple[bool, str]:
+        async with self._generation_upload_lock:
+            self._prune_generation_upload_slots_unlocked()
+            slot = self._generation_upload_slots.get(upload_id)
+            if not slot:
+                return False, "unknown_or_expired_upload_id"
+            if slot.get("secret") != upload_secret:
+                return False, "invalid_upload_secret"
+            if slot.get("body") is not None:
+                return False, "duplicate_upload"
+            max_b = int(slot.get("max_body_bytes") or 0)
+            if len(body) > max_b:
+                return False, "body_too_large"
+            slot["body"] = body
+            debug_logger.log_info(
+                f"[EXT-GEN] generation upload ingested: upload_id={upload_id}, bytes={len(body)}"
+            )
+            return True, ""
+
+    async def resolve_generation_upload_for_ws(
+        self, *, req_id: str, upload_id: str, base_payload: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Wait for HTTP POST body then merge into extension result dict for ExtensionGenerationService."""
+        deadline = time.time() + 8.0
+        while time.time() < deadline:
+            async with self._generation_upload_lock:
+                self._prune_generation_upload_slots_unlocked()
+                slot = self._generation_upload_slots.get(upload_id)
+                if slot is None:
+                    return {
+                        **base_payload,
+                        "status": "error",
+                        "error": "unknown_or_expired_upload_id",
+                    }
+                if str(slot.get("req_id") or "") != str(req_id):
+                    return {**base_payload, "status": "error", "error": "upload_req_mismatch"}
+                body = slot.get("body")
+                if body is not None:
+                    text = body.decode("utf-8", errors="replace")
+                    parsed: Any = None
+                    try:
+                        parsed = json.loads(text) if text else None
+                    except Exception:
+                        parsed = None
+                    self._generation_upload_slots.pop(upload_id, None)
+                    out = {
+                        **base_payload,
+                        "response_text": text,
+                        "response_json": parsed if isinstance(parsed, dict) else None,
+                    }
+                    if not isinstance(out.get("response_json"), dict) and text:
+                        debug_logger.log_warning(
+                            f"[EXT-GEN] upload JSON parse failed for upload_id={upload_id}, text_len={len(text)}"
+                        )
+                        return {
+                            **base_payload,
+                            "status": "error",
+                            "error": "upload_invalid_json",
+                            "response_text": text[:500],
+                        }
+                    return out
+            await asyncio.sleep(0.05)
+        debug_logger.log_warning(
+            f"[EXT-GEN] upload body wait timeout: req_id={req_id}, upload_id={upload_id}"
+        )
+        return {**base_payload, "status": "error", "error": "upload_body_missing_or_timeout"}
 
     def _dedicated_stats(self, worker_session_id: str) -> DedicatedWorkerStats:
         sid = (worker_session_id or "").strip()
@@ -703,7 +799,19 @@ class ExtensionCaptchaService:
                     )
                     return
                 if not future.done():
-                    future.set_result(payload)
+                    if (
+                        str(payload.get("status") or "") == "success"
+                        and payload.get("large_response_upload_id")
+                    ):
+                        upload_id = str(payload.get("large_response_upload_id") or "").strip()
+                        merged = await self.resolve_generation_upload_for_ws(
+                            req_id=req_id,
+                            upload_id=upload_id,
+                            base_payload=payload,
+                        )
+                        future.set_result(merged)
+                    else:
+                        future.set_result(payload)
                 return
         except Exception as e:
             debug_logger.log_error(f"[Extension Captcha] Error handling message: {e}")
@@ -719,7 +827,26 @@ class ExtensionCaptchaService:
         req_id = f"gen_req_{uuid.uuid4().hex}"
         future = asyncio.get_running_loop().create_future()
         self.pending_generation_requests[req_id] = (future, conn.websocket)
-        message = {"type": message_type, "req_id": req_id, **request_payload}
+        message: Dict[str, Any] = {"type": message_type, "req_id": req_id, **request_payload}
+        if config.extension_generation_large_upload_enabled:
+            ttl = int(config.extension_generation_upload_ttl_seconds)
+            max_b = int(config.extension_generation_upload_max_bytes)
+            upload_id, upload_secret = await self.register_generation_upload_slot(
+                req_id=req_id, max_body_bytes=max_b, ttl_seconds=ttl
+            )
+            url_lower = str(request_payload.get("url") or "").lower()
+            force = bool(
+                config.extension_generation_upload_force_upsample_image
+                and "upsampleimage" in url_lower
+            )
+            thr = 0 if force else int(config.extension_generation_upload_threshold_bytes)
+            message["large_response_upload"] = {
+                "upload_id": upload_id,
+                "upload_secret": upload_secret,
+                "upload_path": "/api/extension/generation-upload",
+                "threshold_bytes": thr,
+                "force_http_upload": force,
+            }
         try:
             await conn.websocket.send_text(json.dumps(message))
             result = await asyncio.wait_for(future, timeout=max(5, int(timeout or 30)))
