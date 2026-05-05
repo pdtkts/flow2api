@@ -465,6 +465,7 @@ export function SystemSettings({ active }: { active: boolean }) {
     if (it < 60 || it > 3600) return toast.error("Image timeout 60–3600s")
     if (vt < 60 || vt > 7200) return toast.error("Video timeout 60–7200s")
     if (mr < 1) return toast.error("Max retries ≥ 1")
+    const extensionModeActive = captcha.captcha_method === "extension"
     setBusy(true)
     try {
       const r = await adminFetch("/api/generation/timeout", token, {
@@ -473,8 +474,8 @@ export function SystemSettings({ active }: { active: boolean }) {
           image_timeout: it,
           video_timeout: vt,
           max_retries: mr,
-          extension_generation_enabled: extensionGenerationEnabled,
-          extension_generation_fallback_mode: extensionGenerationFallbackMode,
+          extension_generation_enabled: extensionModeActive ? extensionGenerationEnabled : false,
+          extension_generation_fallback_mode: extensionModeActive ? extensionGenerationFallbackMode : "none",
         }),
       })
       if (!r) return
@@ -702,6 +703,7 @@ export function SystemSettings({ active }: { active: boolean }) {
   if (!active) return null
 
   const m = captcha.captcha_method
+  const extensionModeActive = m === "extension"
   const supportsAtRefreshMode = ["extension", "browser", "personal", "remote_browser"].includes(m)
   const endUserWorkers = extensionWorkers.filter((w) => w.managed_api_key_id !== null)
   const dedicatedWorkers = extensionWorkers.filter(
@@ -839,25 +841,34 @@ export function SystemSettings({ active }: { active: boolean }) {
             <Label>Max retries</Label>
             <Input type="number" className="mt-1" value={maxRetries} onChange={(e) => setMaxRetries(e.target.value)} min={1} />
           </div>
-          <div className="flex items-center gap-2">
-            <Switch checked={extensionGenerationEnabled} onCheckedChange={setExtensionGenerationEnabled} />
-            <Label>Extension-first media generation</Label>
-          </div>
-          <div>
-            <Label>Extension fallback mode</Label>
-            <Select
-              value={extensionGenerationFallbackMode}
-              onValueChange={(v) => setExtensionGenerationFallbackMode(v as "local_http_on_recaptcha" | "none")}
-            >
-              <SelectTrigger className="mt-1">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="local_http_on_recaptcha">Fallback to local HTTP on reCAPTCHA rejection</SelectItem>
-                <SelectItem value="none">No fallback</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
+          {extensionModeActive ? (
+            <>
+              <div className="flex items-center gap-2">
+                <Switch checked={extensionGenerationEnabled} onCheckedChange={setExtensionGenerationEnabled} />
+                <Label>Extension-first media generation</Label>
+              </div>
+              <div>
+                <Label>Extension fallback mode</Label>
+                <Select
+                  value={extensionGenerationFallbackMode}
+                  onValueChange={(v) => setExtensionGenerationFallbackMode(v as "local_http_on_recaptcha" | "none")}
+                >
+                  <SelectTrigger className="mt-1">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="local_http_on_recaptcha">Fallback to local HTTP on reCAPTCHA rejection</SelectItem>
+                    <SelectItem value="none">No fallback</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            </>
+          ) : (
+            <p className="text-xs text-muted-foreground">
+              Extension generation settings are available only when captcha method is <code>extension</code>. In headed
+              browser mode, extension path is not used.
+            </p>
+          )}
           <Button onClick={saveGeneration} disabled={busy}>
             Save
           </Button>

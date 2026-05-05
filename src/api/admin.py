@@ -1522,12 +1522,18 @@ async def update_generation_config(
     token: str = Depends(verify_admin_token)
 ):
     """Update generation timeout configuration"""
+    captcha_cfg = await db.get_captcha_config()
+    extension_mode_active = str(getattr(captcha_cfg, "captcha_method", "") or "").strip().lower() == "extension"
+    extension_generation_enabled = bool(request.extension_generation_enabled) if extension_mode_active else False
+    extension_generation_fallback_mode = (
+        request.extension_generation_fallback_mode if extension_mode_active else "none"
+    )
     await db.update_generation_config(
         image_timeout=request.image_timeout,
         video_timeout=request.video_timeout,
         max_retries=request.max_retries,
-        extension_generation_enabled=request.extension_generation_enabled,
-        extension_generation_fallback_mode=request.extension_generation_fallback_mode,
+        extension_generation_enabled=extension_generation_enabled,
+        extension_generation_fallback_mode=extension_generation_fallback_mode,
     )
 
     # 🔥 Hot reload: sync database config to memory
@@ -2181,12 +2187,18 @@ async def update_generation_timeout(
     token: str = Depends(verify_admin_token)
 ):
     """Update generation timeout configuration"""
+    captcha_cfg = await db.get_captcha_config()
+    extension_mode_active = str(getattr(captcha_cfg, "captcha_method", "") or "").strip().lower() == "extension"
+    extension_generation_enabled = bool(request.extension_generation_enabled) if extension_mode_active else False
+    extension_generation_fallback_mode = (
+        request.extension_generation_fallback_mode if extension_mode_active else "none"
+    )
     await db.update_generation_config(
         image_timeout=request.image_timeout,
         video_timeout=request.video_timeout,
         max_retries=request.max_retries,
-        extension_generation_enabled=request.extension_generation_enabled,
-        extension_generation_fallback_mode=request.extension_generation_fallback_mode,
+        extension_generation_enabled=extension_generation_enabled,
+        extension_generation_fallback_mode=extension_generation_fallback_mode,
     )
 
     # 🔥 Hot reload: sync database config to memory
