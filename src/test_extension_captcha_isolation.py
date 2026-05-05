@@ -283,3 +283,110 @@ def test_extension_get_token_serializes_per_connection_fifo():
         assert tok2 == "tok-2"
 
     asyncio.run(_run())
+
+
+def test_dedicated_hybrid_rotates_between_two_workers():
+    """Equal-score dedicated workers should both receive selections over repeated picks."""
+
+    async def _run():
+        ExtensionCaptchaService._instance = None
+        db = FakeDB()
+        db.tokens[100] = SimpleNamespace(id=100, extension_route_key="")
+        service = await ExtensionCaptchaService.get_instance(db=db)
+        ws1 = FakeWebSocket({})
+        await service.connect(ws1, authenticated_worker={"id": 1, "token_id": 100})
+        ws2 = FakeWebSocket({})
+        await service.connect(ws2, authenticated_worker={"id": 2, "token_id": 100})
+        sid1 = next(c.worker_session_id for c in service.active_connections if c.websocket is ws1)
+        sid2 = next(c.worker_session_id for c in service.active_connections if c.websocket is ws2)
+        picked: list[str] = []
+        for _ in range(8):
+            conn = service._select_connection("", None, preferred_token_id=100)
+            assert conn is not None
+            picked.append(conn.worker_session_id)
+            async with service._dedicated_stats_lock:
+                service._dedicated_record_success_locked(
+                    service._dedicated_stats(conn.worker_session_id), 1000.0
+                )
+        assert {sid1, sid2} == set(picked)
+        assert picked.count(sid1) >= 2
+        assert picked.count(sid2) >= 2
+
+    asyncio.run(_run())
+
+
+def test_dedicated_retry_second_worker_after_first_error():
+    """After one dedicated worker returns error, same get_token tries another dedicated worker."""
+
+    async def _run():
+        ExtensionCaptchaService._instance = None
+        db = FakeDB()
+        db.extension_fallback_to_managed_on_dedicated_failure = False
+        db.tokens[100] = SimpleNamespace(id=100, extension_route_key="rk1")
+        db.bindings["rk1"] = 1
+        service = await ExtensionCaptchaService.get_instance(db=db)
+        ws1 = FakeWebSocket({"route_key": "rk1", "managed_api_key_id": "1"})
+        await service.connect(ws1, authenticated_worker={"id": 1, "token_id": 100})
+        ws2 = FakeWebSocket({"route_key": "rk1", "managed_api_key_id": "1"})
+        await service.connect(ws2, authenticated_worker={"id": 2, "token_id": 100})
+
+        token_task = asyncio.create_task(
+            service.get_token(
+                project_id="p1",
+                action="IMAGE_GENERATION",
+                timeout=2,
+                token_id=100,
+                managed_api_key_id=1,
+            )
+        )
+        for _ in range(50):
+            if ws1.sent_payloads or ws2.sent_payloads:
+                break
+            await asyncio.sleep(0.05)
+        assert ws1.sent_payloads or ws2.sent_payloads
+        first_ws = ws1 if ws1.sent_payloads else ws2
+        second_ws = ws2 if first_ws is ws1 else ws1
+        req1 = first_ws.sent_payloads[-1]["req_id"]
+        await service.handle_message(
+            first_ws,
+            json.dumps({"req_id": req1, "status": "error", "error": "dedicated_failed"}),
+        )
+        for _ in range(50):
+            if second_ws.sent_payloads:
+                break
+            await asyncio.sleep(0.05)
+        assert second_ws.sent_payloads
+        req2 = second_ws.sent_payloads[-1]["req_id"]
+        await service.handle_message(
+            second_ws,
+            json.dumps({"req_id": req2, "status": "success", "token": "tok-retry"}),
+        )
+        token, _rid = await asyncio.wait_for(token_task, timeout=2)
+        assert token == "tok-retry"
+
+    asyncio.run(_run())
+
+
+def test_dedicated_cooldown_skips_unhealthy_worker():
+    """Worker in cooldown is skipped when another healthy worker exists."""
+
+    async def _run():
+        ExtensionCaptchaService._instance = None
+        db = FakeDB()
+        db.tokens[100] = SimpleNamespace(id=100, extension_route_key="")
+        service = await ExtensionCaptchaService.get_instance(db=db)
+        ws_slow = FakeWebSocket({})
+        await service.connect(ws_slow, authenticated_worker={"id": 1, "token_id": 100})
+        ws_fast = FakeWebSocket({})
+        await service.connect(ws_fast, authenticated_worker={"id": 2, "token_id": 100})
+        sid_slow = next(c.worker_session_id for c in service.active_connections if c.websocket is ws_slow)
+        sid_fast = next(c.worker_session_id for c in service.active_connections if c.websocket is ws_fast)
+        now = __import__("time").time()
+        async with service._dedicated_stats_lock:
+            st = service._dedicated_stats(sid_slow)
+            st.cooldown_until = now + 3600.0
+        conn = service._select_connection("", None, preferred_token_id=100)
+        assert conn is not None
+        assert conn.worker_session_id == sid_fast
+
+    asyncio.run(_run())

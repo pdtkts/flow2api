@@ -3,11 +3,37 @@ import json
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from fastapi import WebSocket
 
 from ..core.logger import debug_logger
+
+# Dedicated-worker hybrid routing (health + score + RR tie-break)
+_DEDICATED_EMA_ALPHA = 0.25
+_DEDICATED_TIE_DELTA = 5.0
+_DEDICATED_FAILURE_WINDOW_SEC = 30.0
+_DEDICATED_COOLDOWN_SEC = 20.0
+_DEDICATED_FAILS_FOR_COOLDOWN = 2
+_DEDICATED_SCORE_WEIGHT_SUCCESS = 100.0
+_DEDICATED_SCORE_WEIGHT_INFLIGHT = 15.0
+_DEDICATED_SCORE_WEIGHT_EMA_DIVISOR = 50.0
+_DEDICATED_SCORE_WEIGHT_TIMEOUT = 20.0
+_DEDICATED_TIMEOUT_WINDOW_SEC = 60.0
+
+
+@dataclass
+class DedicatedWorkerStats:
+    """In-memory health/latency signals per extension worker_session_id (dedicated workers)."""
+
+    inflight_count: int = 0
+    success_count: int = 0
+    fail_count: int = 0
+    ema_latency_ms: float = 0.0
+    has_latency_sample: bool = False
+    fail_timestamps: List[float] = field(default_factory=list)
+    timeout_timestamps: List[float] = field(default_factory=list)
+    cooldown_until: float = 0.0
 
 
 @dataclass
@@ -42,6 +68,116 @@ class ExtensionCaptchaService:
         # Round-robin cursor per managed API key (see _queue_key). Lock-free counter:
         # concurrent picks may occasionally duplicate; modulo on read keeps indices valid.
         self._rr_cursor: dict[str, int] = {}
+        # Hybrid dedicated-worker routing: stats keyed by worker_session_id
+        self._dedicated_worker_stats: dict[str, DedicatedWorkerStats] = {}
+        # RR cursor among top-scoring dedicated workers per token_id (string key dedicated:{id})
+        self._dedicated_hybrid_rr: dict[str, int] = {}
+        self._dedicated_stats_lock = asyncio.Lock()
+
+    def _dedicated_stats(self, worker_session_id: str) -> DedicatedWorkerStats:
+        sid = (worker_session_id or "").strip()
+        if not sid:
+            sid = "_"
+        if sid not in self._dedicated_worker_stats:
+            self._dedicated_worker_stats[sid] = DedicatedWorkerStats()
+        return self._dedicated_worker_stats[sid]
+
+    def _prune_timestamps(self, stamps: List[float], now: float, window: float) -> None:
+        cutoff = now - window
+        stamps[:] = [t for t in stamps if t >= cutoff]
+
+    def _dedicated_worker_score(self, stats: DedicatedWorkerStats, now: float) -> float:
+        self._prune_timestamps(stats.fail_timestamps, now, _DEDICATED_FAILURE_WINDOW_SEC)
+        self._prune_timestamps(stats.timeout_timestamps, now, _DEDICATED_TIMEOUT_WINDOW_SEC)
+        total = stats.success_count + stats.fail_count
+        success_rate = (stats.success_count / total) if total > 0 else 1.0
+        ema = stats.ema_latency_ms if stats.has_latency_sample else 0.0
+        timeouts_recent = len(stats.timeout_timestamps)
+        score = (
+            success_rate * _DEDICATED_SCORE_WEIGHT_SUCCESS
+            - stats.inflight_count * _DEDICATED_SCORE_WEIGHT_INFLIGHT
+            - (ema / _DEDICATED_SCORE_WEIGHT_EMA_DIVISOR)
+            - timeouts_recent * _DEDICATED_SCORE_WEIGHT_TIMEOUT
+        )
+        return float(score)
+
+    def _pick_dedicated_connection_hybrid(
+        self,
+        pool: List[ExtensionConnection],
+        preferred_token_id: int,
+        *,
+        exclude_worker_session_ids: Optional[Set[str]] = None,
+        selection_meta_out: Optional[Dict[str, Any]] = None,
+    ) -> Optional[ExtensionConnection]:
+        tid = int(preferred_token_id)
+        exclude = exclude_worker_session_ids or set()
+        candidates = [
+            c
+            for c in pool
+            if c.dedicated_token_id is not None and int(c.dedicated_token_id) == tid and c.worker_session_id not in exclude
+        ]
+        if not candidates:
+            return None
+        now = time.time()
+        healthy: list[ExtensionConnection] = []
+        for c in candidates:
+            st = self._dedicated_stats(c.worker_session_id)
+            if st.cooldown_until <= now:
+                healthy.append(c)
+        pick_from = healthy if healthy else list(candidates)
+
+        scored: list[tuple[float, ExtensionConnection]] = []
+        for c in pick_from:
+            st = self._dedicated_stats(c.worker_session_id)
+            scored.append((self._dedicated_worker_score(st, now), c))
+        best_score = max(s[0] for s in scored)
+        tied = [c for s, c in scored if abs(s - best_score) <= _DEDICATED_TIE_DELTA]
+        tied_sorted = sorted(tied, key=lambda c: c.worker_session_id)
+        rr_key = f"dedicated:{tid}"
+        n = len(tied_sorted)
+        idx = self._dedicated_hybrid_rr.get(rr_key, 0) % n
+        chosen = tied_sorted[idx]
+        self._dedicated_hybrid_rr[rr_key] = (idx + 1) % n
+
+        if selection_meta_out is not None:
+            selection_meta_out.clear()
+            selection_meta_out["dedicated_hybrid"] = True
+            selection_meta_out["dedicated_token_id"] = tid
+            selection_meta_out["dedicated_score"] = round(best_score, 2)
+            selection_meta_out["dedicated_rr_idx"] = idx
+            selection_meta_out["dedicated_pool_size"] = len(candidates)
+            selection_meta_out["dedicated_pick_from"] = len(pick_from)
+
+        debug_logger.log_info(
+            "[Extension Captcha] Dedicated hybrid pick: "
+            f"token_id={tid}, worker_session_id={chosen.worker_session_id}, score={best_score:.2f}, "
+            f"rr_idx={idx}/{n}, candidates={len(candidates)}, healthy={len(healthy)}"
+        )
+        return chosen
+
+    def _dedicated_record_failure_locked(self, stats: DedicatedWorkerStats, now: float, *, is_timeout: bool) -> None:
+        """Caller must hold ``_dedicated_stats_lock``."""
+        if is_timeout:
+            stats.timeout_timestamps.append(now)
+            self._prune_timestamps(stats.timeout_timestamps, now, _DEDICATED_TIMEOUT_WINDOW_SEC)
+            stats.cooldown_until = max(stats.cooldown_until, now + _DEDICATED_COOLDOWN_SEC)
+            return
+        stats.fail_count += 1
+        stats.fail_timestamps.append(now)
+        self._prune_timestamps(stats.fail_timestamps, now, _DEDICATED_FAILURE_WINDOW_SEC)
+        if len(stats.fail_timestamps) >= _DEDICATED_FAILS_FOR_COOLDOWN:
+            stats.cooldown_until = max(stats.cooldown_until, now + _DEDICATED_COOLDOWN_SEC)
+
+    def _dedicated_record_success_locked(self, stats: DedicatedWorkerStats, latency_ms: float) -> None:
+        """Caller must hold ``_dedicated_stats_lock``."""
+        stats.success_count += 1
+        if stats.has_latency_sample:
+            stats.ema_latency_ms = (
+                _DEDICATED_EMA_ALPHA * latency_ms + (1.0 - _DEDICATED_EMA_ALPHA) * stats.ema_latency_ms
+            )
+        else:
+            stats.ema_latency_ms = latency_ms
+            stats.has_latency_sample = True
 
     @classmethod
     async def get_instance(cls, db=None) -> "ExtensionCaptchaService":
@@ -190,6 +326,7 @@ class ExtensionCaptchaService:
                         for c in self.active_connections
                     ):
                         self._rr_cursor.pop(qk, None)
+                self._dedicated_worker_stats.pop(conn.worker_session_id, None)
                 try:
                     loop = asyncio.get_running_loop()
                     loop.create_task(self._notify_connection_change())
@@ -264,13 +401,27 @@ class ExtensionCaptchaService:
         preferred_token_id: Optional[int] = None,
         *,
         exclude_dedicated_token_id: Optional[int] = None,
+        exclude_worker_session_ids: Optional[Set[str]] = None,
+        use_dedicated_hybrid: bool = True,
         selection_meta_out: Optional[Dict[str, Any]] = None,
     ) -> Optional[ExtensionConnection]:
         pool = self._connection_pool(exclude_dedicated_token_id=exclude_dedicated_token_id)
         if preferred_token_id is not None:
-            for conn in pool:
-                if conn.dedicated_token_id is not None and conn.dedicated_token_id == int(preferred_token_id):
-                    return conn
+            if use_dedicated_hybrid:
+                picked = self._pick_dedicated_connection_hybrid(
+                    pool,
+                    int(preferred_token_id),
+                    exclude_worker_session_ids=exclude_worker_session_ids,
+                    selection_meta_out=selection_meta_out,
+                )
+                if picked is not None:
+                    return picked
+            else:
+                for conn in pool:
+                    if exclude_worker_session_ids and conn.worker_session_id in exclude_worker_session_ids:
+                        continue
+                    if conn.dedicated_token_id is not None and conn.dedicated_token_id == int(preferred_token_id):
+                        return conn
         normalized_key = (route_key or "").strip()
         candidate_connections = pool
         if managed_api_key_id is not None:
@@ -410,6 +561,8 @@ class ExtensionCaptchaService:
         preferred_token_id: Optional[int] = None,
         timeout: float,
         exclude_dedicated_token_id: Optional[int] = None,
+        exclude_worker_session_ids: Optional[Set[str]] = None,
+        use_dedicated_hybrid: bool = True,
         selection_meta_out: Optional[Dict[str, Any]] = None,
     ) -> Optional[ExtensionConnection]:
         deadline = time.time() + max(0.0, float(timeout))
@@ -423,6 +576,8 @@ class ExtensionCaptchaService:
                     managed_api_key_id,
                     preferred_token_id=preferred_token_id,
                     exclude_dedicated_token_id=exclude_dedicated_token_id,
+                    exclude_worker_session_ids=exclude_worker_session_ids,
+                    use_dedicated_hybrid=use_dedicated_hybrid,
                     selection_meta_out=selection_meta_out,
                 )
                 if conn is not None:
@@ -541,6 +696,11 @@ class ExtensionCaptchaService:
         timeout: int,
         selection_meta: Optional[Dict[str, Any]] = None,
     ) -> tuple[Optional[str], Optional[str]]:
+        track_dedicated = conn.dedicated_token_id is not None
+        t0 = time.time()
+        if track_dedicated:
+            async with self._dedicated_stats_lock:
+                self._dedicated_stats(conn.worker_session_id).inflight_count += 1
         req_id = f"req_{uuid.uuid4().hex}"
         future = asyncio.get_running_loop().create_future()
         self.pending_requests[req_id] = (future, conn.websocket)
@@ -566,29 +726,62 @@ class ExtensionCaptchaService:
                     dispatch_parts.append(f"pool_size={selection_meta['pool_size']}")
                 if "rr_idx" in selection_meta:
                     dispatch_parts.append(f"rr_idx={selection_meta['rr_idx']}")
+                if selection_meta.get("dedicated_hybrid"):
+                    dispatch_parts.append(f"dedicated_score={selection_meta.get('dedicated_score', '-')}")
+                    dispatch_parts.append(f"dedicated_rr_idx={selection_meta.get('dedicated_rr_idx', '-')}")
             debug_logger.log_info(
                 "[Extension Captcha] Dispatching token request via "
                 + ", ".join(dispatch_parts)
             )
             await conn.websocket.send_text(json.dumps(request_data))
             result = await asyncio.wait_for(future, timeout=timeout)
+            latency_ms = (time.time() - t0) * 1000.0
             if result.get("status") == "success":
                 tok = result.get("token")
                 if isinstance(tok, str) and tok.strip():
+                    if track_dedicated:
+                        async with self._dedicated_stats_lock:
+                            self._dedicated_record_success_locked(
+                                self._dedicated_stats(conn.worker_session_id), latency_ms
+                            )
                     async with self._state_lock:
                         self._upstream_verdict_targets[req_id] = conn.websocket
                     return tok.strip(), req_id
+                if track_dedicated:
+                    async with self._dedicated_stats_lock:
+                        self._dedicated_record_failure_locked(
+                            self._dedicated_stats(conn.worker_session_id), time.time(), is_timeout=False
+                        )
                 return None, None
             error_msg = result.get("error")
             debug_logger.log_error(f"[Extension Captcha] Error from extension: {error_msg}")
+            if track_dedicated:
+                async with self._dedicated_stats_lock:
+                    self._dedicated_record_failure_locked(
+                        self._dedicated_stats(conn.worker_session_id), time.time(), is_timeout=False
+                    )
             return None, None
         except asyncio.TimeoutError:
             debug_logger.log_error(f"[Extension Captcha] Timeout waiting for token (req_id: {req_id})")
+            if track_dedicated:
+                async with self._dedicated_stats_lock:
+                    self._dedicated_record_failure_locked(
+                        self._dedicated_stats(conn.worker_session_id), time.time(), is_timeout=True
+                    )
             return None, None
         except Exception as e:
             debug_logger.log_error(f"[Extension Captcha] Communication error: {e}")
+            if track_dedicated:
+                async with self._dedicated_stats_lock:
+                    self._dedicated_record_failure_locked(
+                        self._dedicated_stats(conn.worker_session_id), time.time(), is_timeout=False
+                    )
             return None, None
         finally:
+            if track_dedicated:
+                async with self._dedicated_stats_lock:
+                    st = self._dedicated_stats(conn.worker_session_id)
+                    st.inflight_count = max(0, st.inflight_count - 1)
             self.pending_requests.pop(req_id, None)
 
     async def notify_upstream_verdict(
@@ -684,6 +877,36 @@ class ExtensionCaptchaService:
         if token:
             return token, ext_req_id
 
+        # One-shot retry on another dedicated worker for the same token (before managed fallback).
+        if (
+            token_id is not None
+            and conn.dedicated_token_id is not None
+            and int(conn.dedicated_token_id) == int(token_id)
+        ):
+            sel_meta_alt: Dict[str, Any] = {}
+            conn_alt = self._select_connection(
+                route_key,
+                managed_api_key_id,
+                preferred_token_id=token_id,
+                exclude_dedicated_token_id=None,
+                exclude_worker_session_ids={conn.worker_session_id},
+                use_dedicated_hybrid=True,
+                selection_meta_out=sel_meta_alt,
+            )
+            if conn_alt is not None and conn_alt.websocket is not conn.websocket:
+                async with conn_alt.dispatch_lock:
+                    token_alt, ext_req_id_alt = await self._extension_recaptcha_token_once(
+                        conn_alt,
+                        project_id=project_id,
+                        action=action,
+                        route_key=route_key,
+                        managed_api_key_id=managed_api_key_id,
+                        timeout=timeout,
+                        selection_meta=sel_meta_alt if sel_meta_alt else None,
+                    )
+                if token_alt:
+                    return token_alt, ext_req_id_alt
+
         use_fallback = (
             fallback_to_managed
             and managed_api_key_id is not None
@@ -763,7 +986,12 @@ class ExtensionCaptchaService:
         """
         if token_id is None:
             return None
-        conn = self._select_connection(route_key="", managed_api_key_id=None, preferred_token_id=token_id)
+        conn = self._select_connection(
+            route_key="",
+            managed_api_key_id=None,
+            preferred_token_id=token_id,
+            use_dedicated_hybrid=False,
+        )
         if conn is None:
             return None
         async with conn.dispatch_lock:
