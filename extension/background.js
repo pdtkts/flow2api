@@ -36,6 +36,8 @@ const FLOW_SESSION_TOKEN_HISTORY_MAX = 3;
 const STORAGE_CAPTCHA_STATS = "extensionCaptchaJobStats";
 const STORAGE_RECENT_JOBS = "extensionRecentCaptchaJobs";
 const STORAGE_SESSION_REFRESH_STATS = "extensionSessionRefreshStats";
+const STORAGE_GENERATION_STATS = "extensionGenerationJobStats";
+const STORAGE_RECENT_GENERATION_JOBS = "extensionRecentGenerationJobs";
 const STORAGE_WORKER_TAB_ID = "extensionWorkerTabId";
 
 const runtimeState = {
@@ -127,6 +129,24 @@ function normalizeRecentCaptchaJobs(raw) {
     return out.slice(-RECENT_CAPTCHA_JOBS_MAX);
 }
 
+function normalizeRecentGenerationJobs(raw) {
+    if (!Array.isArray(raw)) return [];
+    const out = [];
+    for (const row of raw) {
+        if (!row || typeof row !== "object") continue;
+        out.push({
+            ts: Number(row.ts) || 0,
+            command: String(row.command || ""),
+            method: String(row.method || ""),
+            url: String(row.url || ""),
+            ok: !!row.ok,
+            status: Number(row.status) || 0,
+            error: String(row.error || "").slice(0, 500),
+        });
+    }
+    return out.slice(-RECENT_CAPTCHA_JOBS_MAX);
+}
+
 function persistCaptchaPersistence() {
     chrome.storage.local.set(
         {
@@ -139,6 +159,11 @@ function persistCaptchaPersistence() {
                 succeeded: runtimeState.sessionRefreshSucceeded || 0,
                 failed: runtimeState.sessionRefreshFailed || 0,
             },
+            [STORAGE_GENERATION_STATS]: {
+                succeeded: runtimeState.generationJobsSucceeded || 0,
+                failed: runtimeState.generationJobsFailed || 0,
+            },
+            [STORAGE_RECENT_GENERATION_JOBS]: runtimeState.recentGenerationJobs || [],
         },
         () => {
             if (chrome.runtime.lastError) {
@@ -218,6 +243,8 @@ function loadExtensionJobAndWorkerState() {
                 [STORAGE_CAPTCHA_STATS]: { solved: 0, failed: 0 },
                 [STORAGE_RECENT_JOBS]: [],
                 [STORAGE_SESSION_REFRESH_STATS]: { succeeded: 0, failed: 0 },
+                [STORAGE_GENERATION_STATS]: { succeeded: 0, failed: 0 },
+                [STORAGE_RECENT_GENERATION_JOBS]: [],
                 [STORAGE_WORKER_TAB_ID]: null,
                 workerPageUrl: DEFAULT_WORKER_PAGE_URL,
                 usePersistentWorkerTab: false,
@@ -231,6 +258,12 @@ function loadExtensionJobAndWorkerState() {
                 const sr = stored[STORAGE_SESSION_REFRESH_STATS] || {};
                 runtimeState.sessionRefreshSucceeded = Number(sr.succeeded) || 0;
                 runtimeState.sessionRefreshFailed = Number(sr.failed) || 0;
+                const gen = stored[STORAGE_GENERATION_STATS] || {};
+                runtimeState.generationJobsSucceeded = Number(gen.succeeded) || 0;
+                runtimeState.generationJobsFailed = Number(gen.failed) || 0;
+                runtimeState.recentGenerationJobs = normalizeRecentGenerationJobs(
+                    stored[STORAGE_RECENT_GENERATION_JOBS]
+                );
                 const wid = stored[STORAGE_WORKER_TAB_ID];
                 runtimeState.workerTabId = wid != null && wid !== "" ? Number(wid) : null;
                 if (runtimeState.workerTabId != null && Number.isNaN(runtimeState.workerTabId)) {
@@ -528,6 +561,8 @@ function resetExtensionToDefaults(done) {
                         [STORAGE_CAPTCHA_STATS]: { solved: 0, failed: 0 },
                         [STORAGE_RECENT_JOBS]: [],
                         [STORAGE_SESSION_REFRESH_STATS]: { succeeded: 0, failed: 0 },
+                        [STORAGE_GENERATION_STATS]: { succeeded: 0, failed: 0 },
+                        [STORAGE_RECENT_GENERATION_JOBS]: [],
                     },
                     () => {
                         console.log("[Flow2API] Extension reset to defaults.");
@@ -1039,6 +1074,7 @@ async function handleGenerationRequest(data, commandType) {
             response_status: result.response_status,
             response_text: result.response_text,
             response_json: result.response_json,
+            upload_status: shouldHttp ? "pending" : "not_required",
         };
         if (shouldHttp) {
             const settings = await getSettings();
@@ -1052,15 +1088,13 @@ async function handleGenerationRequest(data, commandType) {
             }
             if (!uploadTarget || !lr.upload_id || !lr.upload_secret) {
                 pushEvent("generation_upload_bad_config", "large_response_upload missing fields or bad URL base", "error");
-                successPayload = {
-                    req_id: data.req_id,
-                    type: `${commandType}_result`,
-                    status: "error",
-                    error: "generation_upload_bad_target",
-                    response_status: result.response_status || 0,
-                    response_text: "",
-                    response_json: null,
-                };
+                successPayload.upload_status = "failed";
+                successPayload.upload_error = "generation_upload_bad_target";
+                pushEvent(
+                    "generation_upload_forwarded_with_warning",
+                    `req_id=${String(data.req_id || "-")} upload_target_invalid upstream_status=${String(result.response_status || 0)}`,
+                    "warning"
+                );
             } else {
                 const u = new URL(uploadTarget);
                 u.searchParams.set("upload_id", String(lr.upload_id));
@@ -1073,15 +1107,13 @@ async function handleGenerationRequest(data, commandType) {
                     });
                     if (!up.ok) {
                         const errText = await up.text().catch(() => "");
-                        successPayload = {
-                            req_id: data.req_id,
-                            type: `${commandType}_result`,
-                            status: "error",
-                            error: `generation_upload_http_failed:${up.status}:${(errText || "").slice(0, 200)}`,
-                            response_status: result.response_status || 0,
-                            response_text: "",
-                            response_json: null,
-                        };
+                        successPayload.upload_status = "failed";
+                        successPayload.upload_error = `generation_upload_http_failed:${up.status}:${(errText || "").slice(0, 200)}`;
+                        pushEvent(
+                            "generation_upload_forwarded_with_warning",
+                            `req_id=${String(data.req_id || "-")} upload_http_failed=${String(up.status)} upstream_status=${String(result.response_status || 0)}`,
+                            "warning"
+                        );
                     } else {
                         successPayload = {
                             req_id: data.req_id,
@@ -1089,20 +1121,29 @@ async function handleGenerationRequest(data, commandType) {
                             status: "success",
                             response_status: result.response_status,
                             large_response_upload_id: String(lr.upload_id),
+                            upload_status: "uploaded",
                         };
+                        pushEvent(
+                            "generation_upload_forwarded",
+                            `req_id=${String(data.req_id || "-")} upload_id=${String(lr.upload_id)} upstream_status=${String(result.response_status || 0)}`
+                        );
                     }
                 } catch (e) {
-                    successPayload = {
-                        req_id: data.req_id,
-                        type: `${commandType}_result`,
-                        status: "error",
-                        error: `generation_upload_fetch_error:${String((e && e.message) || e || "err")}`.slice(0, 400),
-                        response_status: result.response_status || 0,
-                        response_text: "",
-                        response_json: null,
-                    };
+                    successPayload.upload_status = "failed";
+                    successPayload.upload_error = `generation_upload_fetch_error:${String((e && e.message) || e || "err")}`.slice(0, 400);
+                    pushEvent(
+                        "generation_upload_forwarded_with_warning",
+                        `req_id=${String(data.req_id || "-")} upload_fetch_failed upstream_status=${String(result.response_status || 0)}`,
+                        "warning"
+                    );
                 }
             }
+        }
+        if (!shouldHttp) {
+            pushEvent(
+                "generation_forwarded_direct",
+                `req_id=${String(data.req_id || "-")} upstream_status=${String(result.response_status || 0)}`
+            );
         }
         ws.send(JSON.stringify(successPayload));
     } else {

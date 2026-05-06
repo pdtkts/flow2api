@@ -627,6 +627,19 @@ class GenerationConfigRequest(BaseModel):
     max_retries: Optional[int] = None
     extension_generation_enabled: Optional[bool] = None
     extension_generation_fallback_mode: Optional[str] = None
+    flow2api_gemini_api_keys: Optional[str] = None
+    flow2api_openai_api_keys: Optional[str] = None
+    flow2api_third_party_gemini_api_keys: Optional[str] = None
+    flow2api_third_party_gemini_base_url: Optional[str] = None
+    cloudflare_account_id: Optional[str] = None
+    cloudflare_api_token: Optional[str] = None
+    flow2api_csvgen_cookie: Optional[str] = None
+    flow2api_cloning_model: Optional[str] = None
+    flow2api_metadata_backend: Optional[str] = None
+    flow2api_metadata_model: Optional[str] = None
+    metadata_system_prompt: Optional[str] = None
+    cloning_image_system_prompt: Optional[str] = None
+    cloning_video_system_prompt: Optional[str] = None
 
 
 class CallLogicConfigRequest(BaseModel):
@@ -1492,6 +1505,36 @@ async def get_generation_config(token: str = Depends(verify_admin_token)):
                 getattr(config, "extension_generation_fallback_mode", "local_http_on_recaptcha")
                 or "local_http_on_recaptcha"
             ),
+            "flow2api_gemini_api_keys": str(getattr(config, "flow2api_gemini_api_keys", "") or ""),
+            "flow2api_openai_api_keys": str(getattr(config, "flow2api_openai_api_keys", "") or ""),
+            "flow2api_third_party_gemini_api_keys": str(
+                getattr(config, "flow2api_third_party_gemini_api_keys", "") or ""
+            ),
+            "flow2api_third_party_gemini_base_url": str(
+                getattr(config, "flow2api_third_party_gemini_base_url", "") or ""
+            ),
+            "cloudflare_account_id": str(getattr(config, "cloudflare_account_id", "") or ""),
+            "cloudflare_api_token": str(getattr(config, "cloudflare_api_token", "") or ""),
+            "flow2api_csvgen_cookie": str(getattr(config, "flow2api_csvgen_cookie", "") or ""),
+            "flow2api_cloning_model": str(
+                getattr(config, "flow2api_cloning_model", "gemini-2.5-flash")
+                or "gemini-2.5-flash"
+            ),
+            "flow2api_metadata_backend": str(
+                getattr(config, "flow2api_metadata_backend", "gemini_native")
+                or "gemini_native"
+            ),
+            "flow2api_metadata_model": str(
+                getattr(config, "flow2api_metadata_model", "gemini-2.5-flash")
+                or "gemini-2.5-flash"
+            ),
+            "metadata_system_prompt": str(getattr(config, "metadata_system_prompt", "") or ""),
+            "cloning_image_system_prompt": str(
+                getattr(config, "cloning_image_system_prompt", "") or ""
+            ),
+            "cloning_video_system_prompt": str(
+                getattr(config, "cloning_video_system_prompt", "") or ""
+            ),
         }
     }
 
@@ -1514,6 +1557,19 @@ async def update_generation_config(
         max_retries=request.max_retries,
         extension_generation_enabled=extension_generation_enabled,
         extension_generation_fallback_mode=extension_generation_fallback_mode,
+        flow2api_gemini_api_keys=request.flow2api_gemini_api_keys,
+        flow2api_openai_api_keys=request.flow2api_openai_api_keys,
+        flow2api_third_party_gemini_api_keys=request.flow2api_third_party_gemini_api_keys,
+        flow2api_third_party_gemini_base_url=request.flow2api_third_party_gemini_base_url,
+        cloudflare_account_id=request.cloudflare_account_id,
+        cloudflare_api_token=request.cloudflare_api_token,
+        flow2api_csvgen_cookie=request.flow2api_csvgen_cookie,
+        flow2api_cloning_model=request.flow2api_cloning_model,
+        flow2api_metadata_backend=request.flow2api_metadata_backend,
+        flow2api_metadata_model=request.flow2api_metadata_model,
+        metadata_system_prompt=request.metadata_system_prompt,
+        cloning_image_system_prompt=request.cloning_image_system_prompt,
+        cloning_video_system_prompt=request.cloning_video_system_prompt,
     )
 
     # 🔥 Hot reload: sync database config to memory
@@ -2179,6 +2235,19 @@ async def update_generation_timeout(
         max_retries=request.max_retries,
         extension_generation_enabled=extension_generation_enabled,
         extension_generation_fallback_mode=extension_generation_fallback_mode,
+        flow2api_gemini_api_keys=request.flow2api_gemini_api_keys,
+        flow2api_openai_api_keys=request.flow2api_openai_api_keys,
+        flow2api_third_party_gemini_api_keys=request.flow2api_third_party_gemini_api_keys,
+        flow2api_third_party_gemini_base_url=request.flow2api_third_party_gemini_base_url,
+        cloudflare_account_id=request.cloudflare_account_id,
+        cloudflare_api_token=request.cloudflare_api_token,
+        flow2api_csvgen_cookie=request.flow2api_csvgen_cookie,
+        flow2api_cloning_model=request.flow2api_cloning_model,
+        flow2api_metadata_backend=request.flow2api_metadata_backend,
+        flow2api_metadata_model=request.flow2api_metadata_model,
+        metadata_system_prompt=request.metadata_system_prompt,
+        cloning_image_system_prompt=request.cloning_image_system_prompt,
+        cloning_video_system_prompt=request.cloning_video_system_prompt,
     )
 
     # 🔥 Hot reload: sync database config to memory

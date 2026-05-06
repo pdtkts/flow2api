@@ -136,11 +136,15 @@ class ExtensionCaptchaService:
                 if slot is None:
                     return {
                         **base_payload,
-                        "status": "error",
-                        "error": "unknown_or_expired_upload_id",
+                        "upload_status": "failed",
+                        "upload_error": "unknown_or_expired_upload_id",
                     }
                 if str(slot.get("req_id") or "") != str(req_id):
-                    return {**base_payload, "status": "error", "error": "upload_req_mismatch"}
+                    return {
+                        **base_payload,
+                        "upload_status": "failed",
+                        "upload_error": "upload_req_mismatch",
+                    }
                 body = slot.get("body")
                 if body is not None:
                     text = body.decode("utf-8", errors="replace")
@@ -161,16 +165,21 @@ class ExtensionCaptchaService:
                         )
                         return {
                             **base_payload,
-                            "status": "error",
-                            "error": "upload_invalid_json",
+                            "upload_status": "failed",
+                            "upload_error": "upload_invalid_json",
                             "response_text": text[:500],
                         }
+                    out["upload_status"] = "uploaded"
                     return out
             await asyncio.sleep(0.05)
         debug_logger.log_warning(
             f"[EXT-GEN] upload body wait timeout: req_id={req_id}, upload_id={upload_id}"
         )
-        return {**base_payload, "status": "error", "error": "upload_body_missing_or_timeout"}
+        return {
+            **base_payload,
+            "upload_status": "failed",
+            "upload_error": "upload_body_missing_or_timeout",
+        }
 
     def _dedicated_stats(self, worker_session_id: str) -> DedicatedWorkerStats:
         sid = (worker_session_id or "").strip()
@@ -809,8 +818,14 @@ class ExtensionCaptchaService:
                             upload_id=upload_id,
                             base_payload=payload,
                         )
+                        debug_logger.log_info(
+                            f"[EXT-GEN] req_id={req_id} upstream_status={str(payload.get('response_status') or 0)} upload_status={str(merged.get('upload_status') or 'unknown')}"
+                        )
                         future.set_result(merged)
                     else:
+                        debug_logger.log_info(
+                            f"[EXT-GEN] req_id={req_id} forwarded_without_upload upstream_status={str(payload.get('response_status') or 0)}"
+                        )
                         future.set_result(payload)
                 return
         except Exception as e:

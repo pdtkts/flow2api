@@ -28,6 +28,9 @@ from ..core.models import (
     ChatCompletionRequest,
     ChatMessage,
     FlowProjectCreateRequest,
+    GenerateCloningPromptsRequest,
+    GenerateCloningVideoPromptRequest,
+    GenerateMetadataRequest,
     GeminiContent,
     GeminiGenerateContentRequest,
     Project,
@@ -35,6 +38,7 @@ from ..core.models import (
 )
 from ..core.config import config as app_config
 from ..services.browser_captcha_extension import ExtensionCaptchaService
+from ..services.cloning_metadata_service import CloningMetadataService
 from ..services.generation_handler import MODEL_CONFIG, GenerationHandler
 
 router = APIRouter()
@@ -82,6 +86,7 @@ GEMINI_STATUS_MAP = {
 
 # Dependency injection will be set up in main.py
 generation_handler: GenerationHandler = None
+cloning_metadata_service = CloningMetadataService()
 
 
 @dataclass
@@ -1705,6 +1710,83 @@ async def get_cached_blob(
         raise HTTPException(status_code=404, detail="Cache file not found")
     media_type = metadata.get("media_type") or mimetypes.guess_type(safe_name)[0] or "application/octet-stream"
     return FileResponse(path=file_path, media_type=media_type, filename=safe_name)
+
+
+@router.post("/api/generate-cloning-prompts")
+async def generate_cloning_prompts(
+    request: GenerateCloningPromptsRequest,
+    auth_ctx: AuthContext = Depends(verify_api_key_flexible),
+):
+    """Generate cloning image prompts for one or more images."""
+    if auth_ctx.key_id is None:
+        raise HTTPException(status_code=403, detail="Managed API key required")
+
+    image_items = []
+    for item in request.images:
+        image_items.append(
+            {
+                "id": item.id,
+                "title": item.title,
+                "image_url": item.image_url,
+                "image_base64": item.image_base64,
+                "mimeType": item.mimeType,
+            }
+        )
+
+    return await cloning_metadata_service.generate_cloning_prompts(
+        images=image_items,
+        provider=request.provider,
+        model=request.model,
+        fallback_models=request.fallbackModels,
+    )
+
+
+@router.post("/api/generate-cloning-video-prompt")
+async def generate_cloning_video_prompt(
+    request: GenerateCloningVideoPromptRequest,
+    auth_ctx: AuthContext = Depends(verify_api_key_flexible),
+):
+    """Generate a video cloning prompt JSON string from image clone JSON."""
+    if auth_ctx.key_id is None:
+        raise HTTPException(status_code=403, detail="Managed API key required")
+
+    extras = request.model_extra or {}
+    return await cloning_metadata_service.generate_cloning_video_prompt(
+        payload={
+            "imageClonePrompt": request.imageClonePrompt,
+            "cameraMotion": request.cameraMotion,
+            "duration": request.duration,
+            "negativePrompt": request.negativePrompt or "",
+            "title": request.title or "",
+            "image_base64": request.image_base64,
+            "mimeType": request.mimeType,
+        },
+        provider=extras.get("provider"),
+        model=extras.get("model"),
+        fallback_models=extras.get("fallbackModels"),
+    )
+
+
+@router.post("/api/generate-metadata")
+async def generate_metadata(
+    request: GenerateMetadataRequest,
+    auth_ctx: AuthContext = Depends(verify_api_key_flexible),
+):
+    """Generate stock metadata using request-provided metadata settings."""
+    if auth_ctx.key_id is None:
+        raise HTTPException(status_code=403, detail="Managed API key required")
+
+    return await cloning_metadata_service.generate_metadata(
+        {
+            "image_url": request.image_url,
+            "image_base64": request.image_base64,
+            "metadataSettings": request.metadataSettings.model_dump(),
+            "dnaNoBgWorkflowActive": request.dnaNoBgWorkflowActive,
+            "backend": request.backend,
+            "model": request.model,
+            "fallbackModels": request.fallbackModels or [],
+        }
+    )
 
 
 @router.get("/v1/models")

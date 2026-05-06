@@ -1,6 +1,6 @@
 """Data models for Flow2API"""
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from typing import Optional, List, Union, Any, Literal
 from datetime import datetime
 
@@ -156,6 +156,19 @@ class GenerationConfig(BaseModel):
     max_retries: int = 3  # 请求最大重试次数
     extension_generation_enabled: bool = False
     extension_generation_fallback_mode: str = "local_http_on_recaptcha"
+    flow2api_gemini_api_keys: str = ""
+    flow2api_openai_api_keys: str = ""
+    flow2api_third_party_gemini_api_keys: str = ""
+    flow2api_third_party_gemini_base_url: str = ""
+    cloudflare_account_id: str = ""
+    cloudflare_api_token: str = ""
+    flow2api_csvgen_cookie: str = ""
+    flow2api_cloning_model: str = "gemini-2.5-flash"
+    flow2api_metadata_backend: str = "gemini_native"
+    flow2api_metadata_model: str = "gemini-2.5-flash"
+    metadata_system_prompt: str = ""
+    cloning_image_system_prompt: str = ""
+    cloning_video_system_prompt: str = ""
 
 
 class CallLogicConfig(BaseModel):
@@ -377,3 +390,93 @@ class ChatCompletionRequest(BaseModel):
     project_id: Optional[str] = None
 
     model_config = ConfigDict(extra="allow")  # Allow extra fields like extra_body passthrough
+
+
+class KeywordTypesConfig(BaseModel):
+    singleWord: bool = False
+    doubleWord: bool = False
+    mixed: bool = True
+
+
+class CustomPromptConfig(BaseModel):
+    enabled: bool = False
+    text: str = ""
+
+
+class MetadataSettingsRequest(BaseModel):
+    titleMin: int = 50
+    titleMax: int = 80
+    keywordMin: int = 32
+    keywordMax: int = 50
+    descriptionMin: int = 0
+    descriptionMax: int = 0
+    platforms: List[str] = Field(default_factory=lambda: ["adobe-stock"])
+    includeCategory: bool = False
+    includeReleases: bool = False
+    titleStyle: str = "seo-optimized"
+    keywordTypes: KeywordTypesConfig = Field(default_factory=KeywordTypesConfig)
+    transparentBackground: bool = False
+    customPrompt: CustomPromptConfig = Field(default_factory=CustomPromptConfig)
+
+
+class CloneImageItemRequest(BaseModel):
+    id: Optional[str] = None
+    title: Optional[str] = None
+    image_url: Optional[str] = None
+    image_base64: Optional[str] = None
+    mimeType: Optional[str] = None
+
+    model_config = ConfigDict(extra="allow")
+
+    @model_validator(mode="after")
+    def _validate_image_source(self):
+        if bool(self.image_url) == bool(self.image_base64):
+            raise ValueError("Each image item must include exactly one source: image_url or image_base64")
+        return self
+
+
+class GenerateCloningPromptsRequest(BaseModel):
+    images: List[CloneImageItemRequest]
+    provider: Optional[str] = None
+    model: Optional[str] = None
+    fallbackModels: Optional[List[str]] = None
+
+    model_config = ConfigDict(extra="allow")
+
+
+class GenerateCloningVideoPromptRequest(BaseModel):
+    imageClonePrompt: str
+    cameraMotion: str
+    duration: str
+    negativePrompt: Optional[str] = ""
+    title: Optional[str] = ""
+    image_base64: Optional[str] = None
+    mimeType: Optional[str] = None
+
+    model_config = ConfigDict(extra="allow")
+
+    @model_validator(mode="after")
+    def _validate_image_pair(self):
+        has_base64 = bool((self.image_base64 or "").strip())
+        has_mime = bool((self.mimeType or "").strip())
+        if has_base64 != has_mime:
+            raise ValueError("image_base64 and mimeType must both be provided or both omitted")
+        return self
+
+
+class GenerateMetadataRequest(BaseModel):
+    image_url: Optional[str] = None
+    image_base64: Optional[str] = None
+    metadataSettings: MetadataSettingsRequest
+    dnaNoBgWorkflowActive: bool = False
+    backend: Optional[Literal["gemini_native", "openai", "third_party_gemini", "cloudflare"]] = None
+    model: Optional[str] = None
+    fallbackModels: Optional[List[str]] = None
+
+    model_config = ConfigDict(extra="allow")
+
+    @model_validator(mode="after")
+    def _validate_image_source(self):
+        if bool(self.image_url) == bool(self.image_base64):
+            raise ValueError("Request must include exactly one image source: image_url or image_base64")
+        return self
