@@ -5,7 +5,6 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../ui
 import { Button } from "../ui/button"
 import { Input } from "../ui/input"
 import { Label } from "../ui/label"
-import { Textarea } from "../ui/textarea"
 import { Switch } from "../ui/switch"
 import {
   Select,
@@ -17,7 +16,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "../ui/select"
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs"
 import { toast } from "sonner"
 import { Loader2 } from "lucide-react"
 
@@ -151,19 +149,6 @@ export function SystemSettings({ active }: { active: boolean }) {
   const [extensionGenerationFallbackMode, setExtensionGenerationFallbackMode] = useState<"local_http_on_recaptcha" | "none">(
     "local_http_on_recaptcha"
   )
-  const [flow2apiGeminiApiKeys, setFlow2apiGeminiApiKeys] = useState("")
-  const [flow2apiOpenaiApiKeys, setFlow2apiOpenaiApiKeys] = useState("")
-  const [flow2apiThirdPartyGeminiApiKeys, setFlow2apiThirdPartyGeminiApiKeys] = useState("")
-  const [flow2apiThirdPartyGeminiBaseUrl, setFlow2apiThirdPartyGeminiBaseUrl] = useState("")
-  const [cloudflareAccountId, setCloudflareAccountId] = useState("")
-  const [cloudflareApiToken, setCloudflareApiToken] = useState("")
-  const [flow2apiCsvgenCookie, setFlow2apiCsvgenCookie] = useState("")
-  const [flow2apiCloningModel, setFlow2apiCloningModel] = useState("gemini-2.5-flash")
-  const [flow2apiMetadataBackend, setFlow2apiMetadataBackend] = useState("gemini_native")
-  const [flow2apiMetadataModel, setFlow2apiMetadataModel] = useState("gemini-2.5-flash")
-  const [metadataSystemPrompt, setMetadataSystemPrompt] = useState("")
-  const [cloningImageSystemPrompt, setCloningImageSystemPrompt] = useState("")
-  const [cloningVideoSystemPrompt, setCloningVideoSystemPrompt] = useState("")
 
   const [callMode, setCallMode] = useState<"default" | "polling">("default")
 
@@ -204,19 +189,6 @@ export function SystemSettings({ active }: { active: boolean }) {
           max_retries?: number
           extension_generation_enabled?: boolean
           extension_generation_fallback_mode?: string
-          flow2api_gemini_api_keys?: string
-          flow2api_openai_api_keys?: string
-          flow2api_third_party_gemini_api_keys?: string
-          flow2api_third_party_gemini_base_url?: string
-          cloudflare_account_id?: string
-          cloudflare_api_token?: string
-          flow2api_csvgen_cookie?: string
-          flow2api_cloning_model?: string
-          flow2api_metadata_backend?: string
-          flow2api_metadata_model?: string
-          metadata_system_prompt?: string
-          cloning_image_system_prompt?: string
-          cloning_video_system_prompt?: string
         }
       }>(
         "/api/generation/timeout",
@@ -259,19 +231,6 @@ export function SystemSettings({ active }: { active: boolean }) {
       setExtensionGenerationFallbackMode(
         g.data.config.extension_generation_fallback_mode === "none" ? "none" : "local_http_on_recaptcha"
       )
-      setFlow2apiGeminiApiKeys(g.data.config.flow2api_gemini_api_keys || "")
-      setFlow2apiOpenaiApiKeys(g.data.config.flow2api_openai_api_keys || "")
-      setFlow2apiThirdPartyGeminiApiKeys(g.data.config.flow2api_third_party_gemini_api_keys || "")
-      setFlow2apiThirdPartyGeminiBaseUrl(g.data.config.flow2api_third_party_gemini_base_url || "")
-      setCloudflareAccountId(g.data.config.cloudflare_account_id || "")
-      setCloudflareApiToken(g.data.config.cloudflare_api_token || "")
-      setFlow2apiCsvgenCookie(g.data.config.flow2api_csvgen_cookie || "")
-      setFlow2apiCloningModel(g.data.config.flow2api_cloning_model || "gemini-2.5-flash")
-      setFlow2apiMetadataBackend(g.data.config.flow2api_metadata_backend || "gemini_native")
-      setFlow2apiMetadataModel(g.data.config.flow2api_metadata_model || "gemini-2.5-flash")
-      setMetadataSystemPrompt(g.data.config.metadata_system_prompt || "")
-      setCloningImageSystemPrompt(g.data.config.cloning_image_system_prompt || "")
-      setCloningVideoSystemPrompt(g.data.config.cloning_video_system_prompt || "")
     }
     if (c.ok && c.data?.success && c.data.config?.call_mode)
       setCallMode(c.data.config.call_mode === "polling" ? "polling" : "default")
@@ -531,19 +490,6 @@ export function SystemSettings({ active }: { active: boolean }) {
           max_retries: mr,
           extension_generation_enabled: extensionModeActive ? extensionGenerationEnabled : false,
           extension_generation_fallback_mode: extensionModeActive ? extensionGenerationFallbackMode : "none",
-          flow2api_gemini_api_keys: flow2apiGeminiApiKeys,
-          flow2api_openai_api_keys: flow2apiOpenaiApiKeys,
-          flow2api_third_party_gemini_api_keys: flow2apiThirdPartyGeminiApiKeys,
-          flow2api_third_party_gemini_base_url: flow2apiThirdPartyGeminiBaseUrl,
-          cloudflare_account_id: cloudflareAccountId,
-          cloudflare_api_token: cloudflareApiToken,
-          flow2api_csvgen_cookie: flow2apiCsvgenCookie,
-          flow2api_cloning_model: flow2apiCloningModel,
-          flow2api_metadata_backend: flow2apiMetadataBackend,
-          flow2api_metadata_model: flow2apiMetadataModel,
-          metadata_system_prompt: metadataSystemPrompt,
-          cloning_image_system_prompt: cloningImageSystemPrompt,
-          cloning_video_system_prompt: cloningVideoSystemPrompt,
         }),
       })
       if (!r) return
@@ -945,151 +891,6 @@ export function SystemSettings({ active }: { active: boolean }) {
           <Button onClick={saveGeneration} disabled={busy}>
             Save
           </Button>
-        </CardContent>
-      </Card>
-
-      <Card className="lg:col-span-2">
-        <CardHeader>
-          <CardTitle>Metadata & Cloning Providers</CardTitle>
-          <CardDescription>Configure API keys and default routing for metadata and cloning endpoints.</CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <Tabs defaultValue="metadata" className="w-full">
-            <TabsList className="grid w-full grid-cols-2">
-              <TabsTrigger value="metadata">Metadata</TabsTrigger>
-              <TabsTrigger value="cloning">Cloning</TabsTrigger>
-            </TabsList>
-
-            <TabsContent value="metadata" className="space-y-3 pt-3">
-              <div>
-                <Label>Default Metadata Backend</Label>
-                <Select value={flow2apiMetadataBackend} onValueChange={setFlow2apiMetadataBackend}>
-                  <SelectTrigger className="mt-1">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="gemini_native">gemini_native</SelectItem>
-                    <SelectItem value="openai">openai</SelectItem>
-                    <SelectItem value="third_party_gemini">third_party_gemini</SelectItem>
-                    <SelectItem value="cloudflare">cloudflare</SelectItem>
-                    <SelectItem value="csvgen">csvgen</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-              <div>
-                <Label>FLOW2API_METADATA_MODEL</Label>
-                <Input
-                  className="mt-1 font-mono text-sm"
-                  value={flow2apiMetadataModel}
-                  onChange={(e) => setFlow2apiMetadataModel(e.target.value)}
-                  placeholder="gemini-2.5-flash"
-                />
-              </div>
-              <div>
-                <Label>FLOW2API_CSVGEN_COOKIE (for metadata backend csvgen)</Label>
-                <Input
-                  className="mt-1 font-mono text-sm"
-                  value={flow2apiCsvgenCookie}
-                  onChange={(e) => setFlow2apiCsvgenCookie(e.target.value)}
-                  placeholder="__session=..."
-                />
-              </div>
-              <div>
-                <Label>Metadata System Prompt (override/prefix)</Label>
-                <Textarea
-                  className="mt-1 min-h-[140px] font-mono text-xs"
-                  value={metadataSystemPrompt}
-                  onChange={(e) => setMetadataSystemPrompt(e.target.value)}
-                  placeholder="Optional: custom metadata system prompt text"
-                />
-              </div>
-              <div>
-                <Label>FLOW2API_GEMINI_API_KEYS (comma-separated)</Label>
-                <Input
-                  className="mt-1 font-mono text-sm"
-                  value={flow2apiGeminiApiKeys}
-                  onChange={(e) => setFlow2apiGeminiApiKeys(e.target.value)}
-                  placeholder="key1,key2,key3"
-                />
-              </div>
-              <div>
-                <Label>FLOW2API_OPENAI_API_KEYS (comma-separated)</Label>
-                <Input
-                  className="mt-1 font-mono text-sm"
-                  value={flow2apiOpenaiApiKeys}
-                  onChange={(e) => setFlow2apiOpenaiApiKeys(e.target.value)}
-                  placeholder="sk-...,sk-..."
-                />
-              </div>
-              <div>
-                <Label>FLOW2API_THIRD_PARTY_GEMINI_API_KEYS (comma-separated)</Label>
-                <Input
-                  className="mt-1 font-mono text-sm"
-                  value={flow2apiThirdPartyGeminiApiKeys}
-                  onChange={(e) => setFlow2apiThirdPartyGeminiApiKeys(e.target.value)}
-                  placeholder="tp-key1,tp-key2"
-                />
-              </div>
-              <div>
-                <Label>FLOW2API_THIRD_PARTY_GEMINI_BASE_URL</Label>
-                <Input
-                  className="mt-1 font-mono text-sm"
-                  value={flow2apiThirdPartyGeminiBaseUrl}
-                  onChange={(e) => setFlow2apiThirdPartyGeminiBaseUrl(e.target.value)}
-                  placeholder="https://your-provider.example/v1"
-                />
-              </div>
-              <div>
-                <Label>CLOUDFLARE_ACCOUNT_ID</Label>
-                <Input
-                  className="mt-1 font-mono text-sm"
-                  value={cloudflareAccountId}
-                  onChange={(e) => setCloudflareAccountId(e.target.value)}
-                />
-              </div>
-              <div>
-                <Label>CLOUDFLARE_API_TOKEN</Label>
-                <Input
-                  className="mt-1 font-mono text-sm"
-                  value={cloudflareApiToken}
-                  onChange={(e) => setCloudflareApiToken(e.target.value)}
-                />
-              </div>
-            </TabsContent>
-
-            <TabsContent value="cloning" className="space-y-3 pt-3">
-              <div>
-                <Label>FLOW2API_CLONING_MODEL</Label>
-                <Input
-                  className="mt-1 font-mono text-sm"
-                  value={flow2apiCloningModel}
-                  onChange={(e) => setFlow2apiCloningModel(e.target.value)}
-                  placeholder="gemini-2.5-flash"
-                />
-              </div>
-              <div>
-                <Label>Cloning Image System Prompt (override/prefix)</Label>
-                <Textarea
-                  className="mt-1 min-h-[140px] font-mono text-xs"
-                  value={cloningImageSystemPrompt}
-                  onChange={(e) => setCloningImageSystemPrompt(e.target.value)}
-                  placeholder="Optional: custom image cloning system prompt text"
-                />
-              </div>
-              <div>
-                <Label>Cloning Video System Prompt (override/prefix)</Label>
-                <Textarea
-                  className="mt-1 min-h-[140px] font-mono text-xs"
-                  value={cloningVideoSystemPrompt}
-                  onChange={(e) => setCloningVideoSystemPrompt(e.target.value)}
-                  placeholder="Optional: custom video cloning system prompt text"
-                />
-              </div>
-            </TabsContent>
-          </Tabs>
-          <p className="text-xs text-muted-foreground">
-            Save with the Generation card save button. Request-level routing (`provider/backend/model/fallbackModels`) still overrides these defaults.
-          </p>
         </CardContent>
       </Card>
 

@@ -8,11 +8,13 @@ import { RequestLogs } from "../components/manage/RequestLogs"
 import { CacheManagement } from "../components/manage/CacheManagement"
 import { AgentGateway } from "../components/manage/AgentGateway"
 import { ApiKeyManagement } from "../components/manage/ApiKeyManagement"
+import { MetadataSettings } from "../components/manage/MetadataSettings"
+import { CloningSettings } from "../components/manage/CloningSettings"
 import { cn } from "@/lib/utils"
 import { useAuth } from "../contexts/AuthContext"
 import { adminJson } from "../lib/adminApi"
 
-const MANAGE_TABS = ["tokens", "apikeys", "settings", "logs", "cache", "agent"] as const
+const MANAGE_TABS = ["tokens", "apikeys", "settings", "metadata", "cloning", "logs", "cache", "agent"] as const
 type ManageTab = (typeof MANAGE_TABS)[number]
 
 function parseManageTab(raw: string | null): ManageTab {
@@ -100,6 +102,22 @@ export default function Manage() {
               Request logs
             </TabsTrigger>
             <TabsTrigger
+              value="metadata"
+              className={cn(
+                "rounded-none border-b-2 border-transparent px-1 py-3 data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:shadow-none"
+              )}
+            >
+              Metadata
+            </TabsTrigger>
+            <TabsTrigger
+              value="cloning"
+              className={cn(
+                "rounded-none border-b-2 border-transparent px-1 py-3 data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:shadow-none"
+              )}
+            >
+              Cloning
+            </TabsTrigger>
+            <TabsTrigger
               value="cache"
               className={cn(
                 "rounded-none border-b-2 border-transparent px-1 py-3 data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:shadow-none"
@@ -146,6 +164,16 @@ export default function Manage() {
         <TabsContent value="logs" className="mt-0 outline-none focus-visible:ring-0">
           <div className="animate-in fade-in duration-300">
             <RequestLogs />
+          </div>
+        </TabsContent>
+        <TabsContent value="metadata" className="mt-0 outline-none focus-visible:ring-0">
+          <div className="animate-in fade-in duration-300">
+            <MetadataSettings active={true} />
+          </div>
+        </TabsContent>
+        <TabsContent value="cloning" className="mt-0 outline-none focus-visible:ring-0">
+          <div className="animate-in fade-in duration-300">
+            <CloningSettings active={true} />
           </div>
         </TabsContent>
         <TabsContent value="cache" className="mt-0 outline-none focus-visible:ring-0">
