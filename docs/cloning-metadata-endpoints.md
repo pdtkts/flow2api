@@ -77,9 +77,9 @@ Response:
   - `optionB.description`
   - optional `creditsRemaining`
 
-## Environment Variables
+## Admin Configuration Behavior
 
-Provider credentials are read from environment variables:
+Provider credentials and routing defaults are configurable from Admin UI (`/api/generation/timeout`):
 
 - `FLOW2API_GEMINI_API_KEYS` (comma-separated)
 - `FLOW2API_OPENAI_API_KEYS` (comma-separated)
@@ -88,3 +88,18 @@ Provider credentials are read from environment variables:
 - `CLOUDFLARE_ACCOUNT_ID`
 - `CLOUDFLARE_API_TOKEN`
 - `FLOW2API_CSVGEN_COOKIE` (only when backend=`csvgen`)
+- `FLOW2API_METADATA_MODEL` (legacy single default model; still supported)
+- `FLOW2API_METADATA_ENABLED_MODELS` (comma-separated ordered model pool)
+- `FLOW2API_METADATA_PRIMARY_MODEL` (default primary model)
+- `FLOW2API_METADATA_FALLBACK_MODELS` (comma-separated fallback sequence)
+
+Metadata default model resolution when request does **not** pass `model`/`fallbackModels`:
+
+1. Use `FLOW2API_METADATA_PRIMARY_MODEL` if set, otherwise `FLOW2API_METADATA_MODEL`.
+2. Build fallback chain from `FLOW2API_METADATA_FALLBACK_MODELS`.
+3. If fallback list is empty, use enabled models order (`FLOW2API_METADATA_ENABLED_MODELS`) excluding primary.
+
+Request payload overrides always win:
+
+- `model` overrides all configured primary defaults.
+- `fallbackModels` overrides all configured fallback defaults.

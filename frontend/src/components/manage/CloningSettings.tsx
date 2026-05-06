@@ -8,6 +8,14 @@ import { Label } from "../ui/label"
 import { Textarea } from "../ui/textarea"
 import { toast } from "sonner"
 
+const DEFAULT_CLONING_IMAGE_PROMPT = `You are an OCR + structured prompt generator.
+Read the image, extract visible text, and return ONLY valid JSON that follows the Nexus DNA schema.
+No markdown, no analysis text, no extra wrapper.`
+
+const DEFAULT_CLONING_VIDEO_PROMPT = `You are a structured JSON generator for Nexus DNA video cloning.
+Return one JSON object only, matching the same schema as the image cloning template.
+Optimize for temporal motion, timeline actions, and video continuity.`
+
 export function CloningSettings({ active }: { active: boolean }) {
   const { token } = useAuth()
   const [busy, setBusy] = useState(false)
@@ -21,12 +29,17 @@ export function CloningSettings({ active }: { active: boolean }) {
     if (!resp.ok || !resp.data?.success || !resp.data.config) return
     const c = resp.data.config
     setModel(String(c.flow2api_cloning_model || "gemini-2.5-flash"))
-    setImagePrompt(String(c.cloning_image_system_prompt || ""))
-    setVideoPrompt(String(c.cloning_video_system_prompt || ""))
+    const savedImagePrompt = String(c.cloning_image_system_prompt || "").trim()
+    const savedVideoPrompt = String(c.cloning_video_system_prompt || "").trim()
+    setImagePrompt(savedImagePrompt || DEFAULT_CLONING_IMAGE_PROMPT)
+    setVideoPrompt(savedVideoPrompt || DEFAULT_CLONING_VIDEO_PROMPT)
   }, [token, active])
 
   useEffect(() => {
-    void load()
+    const timer = window.setTimeout(() => {
+      void load()
+    }, 0)
+    return () => window.clearTimeout(timer)
   }, [load])
 
   const save = async () => {

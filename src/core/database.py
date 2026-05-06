@@ -707,6 +707,9 @@ class Database:
                     ("flow2api_cloning_model", "TEXT DEFAULT 'gemini-2.5-flash'"),
                     ("flow2api_metadata_backend", "TEXT DEFAULT 'gemini_native'"),
                     ("flow2api_metadata_model", "TEXT DEFAULT 'gemini-2.5-flash'"),
+                    ("flow2api_metadata_enabled_models", "TEXT DEFAULT ''"),
+                    ("flow2api_metadata_primary_model", "TEXT DEFAULT ''"),
+                    ("flow2api_metadata_fallback_models", "TEXT DEFAULT ''"),
                     ("metadata_system_prompt", "TEXT DEFAULT ''"),
                     ("cloning_image_system_prompt", "TEXT DEFAULT ''"),
                     ("cloning_video_system_prompt", "TEXT DEFAULT ''"),
@@ -1066,6 +1069,9 @@ class Database:
                     flow2api_cloning_model TEXT DEFAULT 'gemini-2.5-flash',
                     flow2api_metadata_backend TEXT DEFAULT 'gemini_native',
                     flow2api_metadata_model TEXT DEFAULT 'gemini-2.5-flash',
+                    flow2api_metadata_enabled_models TEXT DEFAULT '',
+                    flow2api_metadata_primary_model TEXT DEFAULT '',
+                    flow2api_metadata_fallback_models TEXT DEFAULT '',
                     metadata_system_prompt TEXT DEFAULT '',
                     cloning_image_system_prompt TEXT DEFAULT '',
                     cloning_video_system_prompt TEXT DEFAULT '',
@@ -2104,6 +2110,9 @@ class Database:
         flow2api_cloning_model: Optional[str] = None,
         flow2api_metadata_backend: Optional[str] = None,
         flow2api_metadata_model: Optional[str] = None,
+        flow2api_metadata_enabled_models: Optional[str] = None,
+        flow2api_metadata_primary_model: Optional[str] = None,
+        flow2api_metadata_fallback_models: Optional[str] = None,
         metadata_system_prompt: Optional[str] = None,
         cloning_image_system_prompt: Optional[str] = None,
         cloning_video_system_prompt: Optional[str] = None,
@@ -2195,6 +2204,33 @@ class Database:
                 if flow2api_metadata_model is not None
                 else str(current.get("flow2api_metadata_model", "gemini-2.5-flash") or "gemini-2.5-flash")
             )
+            normalized_flow2api_metadata_enabled_models = (
+                str(flow2api_metadata_enabled_models)
+                if flow2api_metadata_enabled_models is not None
+                else str(current.get("flow2api_metadata_enabled_models", "") or "")
+            )
+            normalized_flow2api_metadata_primary_model = (
+                str(flow2api_metadata_primary_model)
+                if flow2api_metadata_primary_model is not None
+                else str(current.get("flow2api_metadata_primary_model", "") or "")
+            )
+            normalized_flow2api_metadata_fallback_models = (
+                str(flow2api_metadata_fallback_models)
+                if flow2api_metadata_fallback_models is not None
+                else str(current.get("flow2api_metadata_fallback_models", "") or "")
+            )
+            if flow2api_metadata_model is None and flow2api_metadata_primary_model is not None:
+                normalized_flow2api_metadata_model = str(flow2api_metadata_primary_model or "").strip() or normalized_flow2api_metadata_model
+            if not normalized_flow2api_metadata_primary_model.strip():
+                normalized_flow2api_metadata_primary_model = normalized_flow2api_metadata_model
+            if not normalized_flow2api_metadata_enabled_models.strip():
+                enabled = [normalized_flow2api_metadata_primary_model]
+                enabled.extend(
+                    [m.strip() for m in normalized_flow2api_metadata_fallback_models.split(",") if m.strip()]
+                )
+                normalized_flow2api_metadata_enabled_models = ",".join(
+                    list(dict.fromkeys([m for m in enabled if m]))
+                )
             normalized_metadata_system_prompt = (
                 str(metadata_system_prompt)
                 if metadata_system_prompt is not None
@@ -2229,6 +2265,9 @@ class Database:
                         flow2api_cloning_model = ?,
                         flow2api_metadata_backend = ?,
                         flow2api_metadata_model = ?,
+                        flow2api_metadata_enabled_models = ?,
+                        flow2api_metadata_primary_model = ?,
+                        flow2api_metadata_fallback_models = ?,
                         metadata_system_prompt = ?,
                         cloning_image_system_prompt = ?,
                         cloning_video_system_prompt = ?,
@@ -2250,6 +2289,9 @@ class Database:
                     normalized_flow2api_cloning_model,
                     normalized_flow2api_metadata_backend,
                     normalized_flow2api_metadata_model,
+                    normalized_flow2api_metadata_enabled_models,
+                    normalized_flow2api_metadata_primary_model,
+                    normalized_flow2api_metadata_fallback_models,
                     normalized_metadata_system_prompt,
                     normalized_cloning_image_system_prompt,
                     normalized_cloning_video_system_prompt,
@@ -2273,11 +2315,14 @@ class Database:
                         flow2api_cloning_model,
                         flow2api_metadata_backend,
                         flow2api_metadata_model,
+                        flow2api_metadata_enabled_models,
+                        flow2api_metadata_primary_model,
+                        flow2api_metadata_fallback_models,
                         metadata_system_prompt,
                         cloning_image_system_prompt,
                         cloning_video_system_prompt
                     )
-                    VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     normalized_image_timeout,
                     normalized_video_timeout,
@@ -2294,6 +2339,9 @@ class Database:
                     normalized_flow2api_cloning_model,
                     normalized_flow2api_metadata_backend,
                     normalized_flow2api_metadata_model,
+                    normalized_flow2api_metadata_enabled_models,
+                    normalized_flow2api_metadata_primary_model,
+                    normalized_flow2api_metadata_fallback_models,
                     normalized_metadata_system_prompt,
                     normalized_cloning_image_system_prompt,
                     normalized_cloning_video_system_prompt,
@@ -2768,6 +2816,15 @@ class Database:
             )
             config.set_flow2api_metadata_model(
                 str(getattr(generation_config, "flow2api_metadata_model", "gemini-2.5-flash") or "gemini-2.5-flash")
+            )
+            config.set_flow2api_metadata_enabled_models(
+                str(getattr(generation_config, "flow2api_metadata_enabled_models", "") or "")
+            )
+            config.set_flow2api_metadata_primary_model(
+                str(getattr(generation_config, "flow2api_metadata_primary_model", "") or "")
+            )
+            config.set_flow2api_metadata_fallback_models(
+                str(getattr(generation_config, "flow2api_metadata_fallback_models", "") or "")
             )
             config.set_metadata_system_prompt(
                 str(getattr(generation_config, "metadata_system_prompt", "") or "")

@@ -637,6 +637,9 @@ class GenerationConfigRequest(BaseModel):
     flow2api_cloning_model: Optional[str] = None
     flow2api_metadata_backend: Optional[str] = None
     flow2api_metadata_model: Optional[str] = None
+    flow2api_metadata_enabled_models: Optional[str] = None
+    flow2api_metadata_primary_model: Optional[str] = None
+    flow2api_metadata_fallback_models: Optional[str] = None
     metadata_system_prompt: Optional[str] = None
     cloning_image_system_prompt: Optional[str] = None
     cloning_video_system_prompt: Optional[str] = None
@@ -1528,6 +1531,15 @@ async def get_generation_config(token: str = Depends(verify_admin_token)):
                 getattr(config, "flow2api_metadata_model", "gemini-2.5-flash")
                 or "gemini-2.5-flash"
             ),
+            "flow2api_metadata_enabled_models": str(
+                getattr(config, "flow2api_metadata_enabled_models", "") or ""
+            ),
+            "flow2api_metadata_primary_model": str(
+                getattr(config, "flow2api_metadata_primary_model", "") or ""
+            ),
+            "flow2api_metadata_fallback_models": str(
+                getattr(config, "flow2api_metadata_fallback_models", "") or ""
+            ),
             "metadata_system_prompt": str(getattr(config, "metadata_system_prompt", "") or ""),
             "cloning_image_system_prompt": str(
                 getattr(config, "cloning_image_system_prompt", "") or ""
@@ -1567,6 +1579,9 @@ async def update_generation_config(
         flow2api_cloning_model=request.flow2api_cloning_model,
         flow2api_metadata_backend=request.flow2api_metadata_backend,
         flow2api_metadata_model=request.flow2api_metadata_model,
+        flow2api_metadata_enabled_models=request.flow2api_metadata_enabled_models,
+        flow2api_metadata_primary_model=request.flow2api_metadata_primary_model,
+        flow2api_metadata_fallback_models=request.flow2api_metadata_fallback_models,
         metadata_system_prompt=request.metadata_system_prompt,
         cloning_image_system_prompt=request.cloning_image_system_prompt,
         cloning_video_system_prompt=request.cloning_video_system_prompt,
@@ -2245,6 +2260,9 @@ async def update_generation_timeout(
         flow2api_cloning_model=request.flow2api_cloning_model,
         flow2api_metadata_backend=request.flow2api_metadata_backend,
         flow2api_metadata_model=request.flow2api_metadata_model,
+        flow2api_metadata_enabled_models=request.flow2api_metadata_enabled_models,
+        flow2api_metadata_primary_model=request.flow2api_metadata_primary_model,
+        flow2api_metadata_fallback_models=request.flow2api_metadata_fallback_models,
         metadata_system_prompt=request.metadata_system_prompt,
         cloning_image_system_prompt=request.cloning_image_system_prompt,
         cloning_video_system_prompt=request.cloning_video_system_prompt,

@@ -508,8 +508,26 @@ class CloningMetadataService:
         payload: Dict[str, Any],
     ) -> Dict[str, Any]:
         backend = str(payload.get("backend") or app_config.flow2api_metadata_backend or "gemini_native").strip().lower()
-        model = str(payload.get("model") or app_config.flow2api_metadata_model or "gemini-2.5-flash").strip()
-        fallback_models = payload.get("fallbackModels") or []
+        configured_primary = str(
+            app_config.flow2api_metadata_primary_model
+            or app_config.flow2api_metadata_model
+            or "gemini-2.5-flash"
+        ).strip()
+        configured_enabled = _get_csv(app_config.flow2api_metadata_enabled_models)
+        configured_fallback = _get_csv(app_config.flow2api_metadata_fallback_models)
+        if not configured_enabled:
+            configured_enabled = [configured_primary, *configured_fallback]
+        configured_enabled = list(dict.fromkeys([m for m in configured_enabled if m]))
+        if configured_primary not in configured_enabled:
+            configured_enabled.insert(0, configured_primary)
+        default_fallback_chain = [m for m in configured_enabled if m != configured_primary]
+        if configured_fallback:
+            default_fallback_chain = list(
+                dict.fromkeys([m for m in configured_fallback if m and m != configured_primary] + default_fallback_chain)
+            )
+
+        model = str(payload.get("model") or configured_primary).strip()
+        fallback_models = payload.get("fallbackModels") or default_fallback_chain
         image_bytes, mime_type = await self._fetch_image(payload.get("image_url"), payload.get("image_base64"))
         metadata_settings = payload.get("metadataSettings") or {}
         if backend == "csvgen":

@@ -455,6 +455,33 @@ class Config:
         self._config["generation_routing"]["flow2api_metadata_model"] = str(value or "gemini-2.5-flash")
 
     @property
+    def flow2api_metadata_enabled_models(self) -> str:
+        return str(self._config.get("generation_routing", {}).get("flow2api_metadata_enabled_models", "") or "")
+
+    def set_flow2api_metadata_enabled_models(self, value: str):
+        if "generation_routing" not in self._config:
+            self._config["generation_routing"] = {}
+        self._config["generation_routing"]["flow2api_metadata_enabled_models"] = str(value or "")
+
+    @property
+    def flow2api_metadata_primary_model(self) -> str:
+        return str(self._config.get("generation_routing", {}).get("flow2api_metadata_primary_model", "") or "")
+
+    def set_flow2api_metadata_primary_model(self, value: str):
+        if "generation_routing" not in self._config:
+            self._config["generation_routing"] = {}
+        self._config["generation_routing"]["flow2api_metadata_primary_model"] = str(value or "")
+
+    @property
+    def flow2api_metadata_fallback_models(self) -> str:
+        return str(self._config.get("generation_routing", {}).get("flow2api_metadata_fallback_models", "") or "")
+
+    def set_flow2api_metadata_fallback_models(self, value: str):
+        if "generation_routing" not in self._config:
+            self._config["generation_routing"] = {}
+        self._config["generation_routing"]["flow2api_metadata_fallback_models"] = str(value or "")
+
+    @property
     def metadata_system_prompt(self) -> str:
         return str(self._config.get("generation_routing", {}).get("metadata_system_prompt", "") or "")
 
