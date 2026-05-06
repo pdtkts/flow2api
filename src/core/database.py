@@ -760,6 +760,10 @@ class Database:
                     ("session_refresh_scheduler_interval_minutes", "INTEGER DEFAULT 30"),
                     ("session_refresh_scheduler_batch_size", "INTEGER DEFAULT 10"),
                     ("session_refresh_scheduler_only_expiring_within_minutes", "INTEGER DEFAULT 60"),
+                    ("st_only_refresh_scheduler_enabled", "BOOLEAN DEFAULT 0"),
+                    ("st_only_refresh_scheduler_interval_minutes", "INTEGER DEFAULT 5"),
+                    ("st_only_refresh_scheduler_batch_size", "INTEGER DEFAULT 20"),
+                    ("st_only_refresh_scheduler_expiring_within_minutes", "INTEGER DEFAULT 5"),
                     ("extension_queue_wait_timeout_seconds", "INTEGER DEFAULT 20"),
                     ("dedicated_extension_enabled", "BOOLEAN DEFAULT 0"),
                     ("dedicated_extension_captcha_timeout_seconds", "INTEGER DEFAULT 25"),
@@ -1119,6 +1123,10 @@ class Database:
                     session_refresh_scheduler_interval_minutes INTEGER DEFAULT 30,
                     session_refresh_scheduler_batch_size INTEGER DEFAULT 10,
                     session_refresh_scheduler_only_expiring_within_minutes INTEGER DEFAULT 60,
+                    st_only_refresh_scheduler_enabled BOOLEAN DEFAULT 0,
+                    st_only_refresh_scheduler_interval_minutes INTEGER DEFAULT 5,
+                    st_only_refresh_scheduler_batch_size INTEGER DEFAULT 20,
+                    st_only_refresh_scheduler_expiring_within_minutes INTEGER DEFAULT 5,
                     dedicated_extension_enabled BOOLEAN DEFAULT 0,
                     dedicated_extension_captcha_timeout_seconds INTEGER DEFAULT 25,
                     dedicated_extension_st_refresh_timeout_seconds INTEGER DEFAULT 45,
@@ -2639,6 +2647,18 @@ class Database:
             config.set_session_refresh_scheduler_only_expiring_within_minutes(
                 int(getattr(captcha_config, "session_refresh_scheduler_only_expiring_within_minutes", 60) or 60)
             )
+            config.set_st_only_refresh_scheduler_enabled(
+                bool(getattr(captcha_config, "st_only_refresh_scheduler_enabled", False))
+            )
+            config.set_st_only_refresh_scheduler_interval_minutes(
+                int(getattr(captcha_config, "st_only_refresh_scheduler_interval_minutes", 5) or 5)
+            )
+            config.set_st_only_refresh_scheduler_batch_size(
+                int(getattr(captcha_config, "st_only_refresh_scheduler_batch_size", 20) or 20)
+            )
+            config.set_st_only_refresh_scheduler_expiring_within_minutes(
+                int(getattr(captcha_config, "st_only_refresh_scheduler_expiring_within_minutes", 5) or 5)
+            )
             config.set_dedicated_extension_enabled(
                 bool(getattr(captcha_config, "dedicated_extension_enabled", False))
             )
@@ -2801,6 +2821,10 @@ class Database:
         session_refresh_scheduler_interval_minutes: int = None,
         session_refresh_scheduler_batch_size: int = None,
         session_refresh_scheduler_only_expiring_within_minutes: int = None,
+        st_only_refresh_scheduler_enabled: bool = None,
+        st_only_refresh_scheduler_interval_minutes: int = None,
+        st_only_refresh_scheduler_batch_size: int = None,
+        st_only_refresh_scheduler_expiring_within_minutes: int = None,
         extension_queue_wait_timeout_seconds: int = None,
         dedicated_extension_enabled: bool = None,
         dedicated_extension_captcha_timeout_seconds: int = None,
@@ -2913,6 +2937,26 @@ class Database:
                     if session_refresh_scheduler_only_expiring_within_minutes is not None
                     else current.get("session_refresh_scheduler_only_expiring_within_minutes", 60)
                 )
+                new_st_only_refresh_scheduler_enabled = (
+                    st_only_refresh_scheduler_enabled
+                    if st_only_refresh_scheduler_enabled is not None
+                    else current.get("st_only_refresh_scheduler_enabled", False)
+                )
+                new_st_only_refresh_scheduler_interval_minutes = (
+                    st_only_refresh_scheduler_interval_minutes
+                    if st_only_refresh_scheduler_interval_minutes is not None
+                    else current.get("st_only_refresh_scheduler_interval_minutes", 5)
+                )
+                new_st_only_refresh_scheduler_batch_size = (
+                    st_only_refresh_scheduler_batch_size
+                    if st_only_refresh_scheduler_batch_size is not None
+                    else current.get("st_only_refresh_scheduler_batch_size", 20)
+                )
+                new_st_only_refresh_scheduler_expiring_within_minutes = (
+                    st_only_refresh_scheduler_expiring_within_minutes
+                    if st_only_refresh_scheduler_expiring_within_minutes is not None
+                    else current.get("st_only_refresh_scheduler_expiring_within_minutes", 5)
+                )
                 new_extension_queue_wait_timeout = (
                     extension_queue_wait_timeout_seconds
                     if extension_queue_wait_timeout_seconds is not None
@@ -2943,6 +2987,15 @@ class Database:
                 new_session_refresh_scheduler_batch_size = max(1, min(200, int(new_session_refresh_scheduler_batch_size)))
                 new_session_refresh_scheduler_only_expiring_within_minutes = max(
                     1, min(10080, int(new_session_refresh_scheduler_only_expiring_within_minutes))
+                )
+                new_st_only_refresh_scheduler_interval_minutes = max(
+                    1, min(1440, int(new_st_only_refresh_scheduler_interval_minutes))
+                )
+                new_st_only_refresh_scheduler_batch_size = max(
+                    1, min(200, int(new_st_only_refresh_scheduler_batch_size))
+                )
+                new_st_only_refresh_scheduler_expiring_within_minutes = max(
+                    1, min(10080, int(new_st_only_refresh_scheduler_expiring_within_minutes))
                 )
                 new_extension_queue_wait_timeout = max(1, min(120, int(new_extension_queue_wait_timeout)))
                 new_dedicated_extension_captcha_timeout = max(
@@ -2982,6 +3035,10 @@ class Database:
                         session_refresh_local_only = ?, session_refresh_scheduler_enabled = ?,
                         session_refresh_scheduler_interval_minutes = ?, session_refresh_scheduler_batch_size = ?,
                         session_refresh_scheduler_only_expiring_within_minutes = ?,
+                        st_only_refresh_scheduler_enabled = ?,
+                        st_only_refresh_scheduler_interval_minutes = ?,
+                        st_only_refresh_scheduler_batch_size = ?,
+                        st_only_refresh_scheduler_expiring_within_minutes = ?,
                         extension_queue_wait_timeout_seconds = ?,
                         dedicated_extension_enabled = ?,
                         dedicated_extension_captcha_timeout_seconds = ?,
@@ -3003,6 +3060,10 @@ class Database:
                       bool(new_session_refresh_local_only), bool(new_session_refresh_scheduler_enabled),
                       new_session_refresh_scheduler_interval_minutes, new_session_refresh_scheduler_batch_size,
                       new_session_refresh_scheduler_only_expiring_within_minutes,
+                      bool(new_st_only_refresh_scheduler_enabled),
+                      new_st_only_refresh_scheduler_interval_minutes,
+                      new_st_only_refresh_scheduler_batch_size,
+                      new_st_only_refresh_scheduler_expiring_within_minutes,
                       new_extension_queue_wait_timeout,
                       bool(new_dedicated_extension_enabled),
                       new_dedicated_extension_captcha_timeout,
@@ -3078,6 +3139,44 @@ class Database:
                         ),
                     ),
                 )
+                new_st_only_refresh_scheduler_enabled = (
+                    bool(st_only_refresh_scheduler_enabled)
+                    if st_only_refresh_scheduler_enabled is not None
+                    else False
+                )
+                new_st_only_refresh_scheduler_interval_minutes = max(
+                    1,
+                    min(
+                        1440,
+                        int(
+                            st_only_refresh_scheduler_interval_minutes
+                            if st_only_refresh_scheduler_interval_minutes is not None
+                            else 5
+                        ),
+                    ),
+                )
+                new_st_only_refresh_scheduler_batch_size = max(
+                    1,
+                    min(
+                        200,
+                        int(
+                            st_only_refresh_scheduler_batch_size
+                            if st_only_refresh_scheduler_batch_size is not None
+                            else 20
+                        ),
+                    ),
+                )
+                new_st_only_refresh_scheduler_expiring_within_minutes = max(
+                    1,
+                    min(
+                        10080,
+                        int(
+                            st_only_refresh_scheduler_expiring_within_minutes
+                            if st_only_refresh_scheduler_expiring_within_minutes is not None
+                            else 5
+                        ),
+                    ),
+                )
                 new_extension_queue_wait_timeout = max(
                     1,
                     min(
@@ -3133,11 +3232,15 @@ class Database:
                         session_refresh_local_only, session_refresh_scheduler_enabled,
                         session_refresh_scheduler_interval_minutes, session_refresh_scheduler_batch_size,
                         session_refresh_scheduler_only_expiring_within_minutes,
+                        st_only_refresh_scheduler_enabled,
+                        st_only_refresh_scheduler_interval_minutes,
+                        st_only_refresh_scheduler_batch_size,
+                        st_only_refresh_scheduler_expiring_within_minutes,
                         extension_queue_wait_timeout_seconds,
                         dedicated_extension_enabled, dedicated_extension_captcha_timeout_seconds,
                         dedicated_extension_st_refresh_timeout_seconds,
                         extension_fallback_to_managed_on_dedicated_failure)
-                    VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (new_method, new_yes_key, new_yes_url, new_cap_key, new_cap_url,
                       new_ez_key, new_ez_url, new_cs_key, new_cs_url,
                       (new_remote_base_url or "").strip(), (new_remote_api_key or "").strip(), new_remote_timeout,
@@ -3151,6 +3254,10 @@ class Database:
                       new_session_refresh_local_only, new_session_refresh_scheduler_enabled,
                       new_session_refresh_scheduler_interval_minutes, new_session_refresh_scheduler_batch_size,
                       new_session_refresh_scheduler_only_expiring_within_minutes,
+                      bool(new_st_only_refresh_scheduler_enabled),
+                      new_st_only_refresh_scheduler_interval_minutes,
+                      new_st_only_refresh_scheduler_batch_size,
+                      new_st_only_refresh_scheduler_expiring_within_minutes,
                       new_extension_queue_wait_timeout, new_dedicated_extension_enabled,
                       new_dedicated_extension_captcha_timeout, new_dedicated_extension_st_refresh_timeout,
                       bool(new_extension_fallback_to_managed_on_dedicated_failure)))

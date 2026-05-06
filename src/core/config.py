@@ -820,6 +820,54 @@ class Config:
         self._config["captcha"]["session_refresh_scheduler_only_expiring_within_minutes"] = max(1, min(10080, int(minutes)))
 
     @property
+    def st_only_refresh_scheduler_enabled(self) -> bool:
+        return bool(self._config.get("captcha", {}).get("st_only_refresh_scheduler_enabled", False))
+
+    def set_st_only_refresh_scheduler_enabled(self, enabled: bool):
+        if "captcha" not in self._config:
+            self._config["captcha"] = {}
+        self._config["captcha"]["st_only_refresh_scheduler_enabled"] = bool(enabled)
+
+    @property
+    def st_only_refresh_scheduler_interval_minutes(self) -> int:
+        value = self._config.get("captcha", {}).get("st_only_refresh_scheduler_interval_minutes", 5)
+        try:
+            return max(1, min(1440, int(value)))
+        except Exception:
+            return 5
+
+    def set_st_only_refresh_scheduler_interval_minutes(self, minutes: int):
+        if "captcha" not in self._config:
+            self._config["captcha"] = {}
+        self._config["captcha"]["st_only_refresh_scheduler_interval_minutes"] = max(1, min(1440, int(minutes)))
+
+    @property
+    def st_only_refresh_scheduler_batch_size(self) -> int:
+        value = self._config.get("captcha", {}).get("st_only_refresh_scheduler_batch_size", 20)
+        try:
+            return max(1, min(200, int(value)))
+        except Exception:
+            return 20
+
+    def set_st_only_refresh_scheduler_batch_size(self, size: int):
+        if "captcha" not in self._config:
+            self._config["captcha"] = {}
+        self._config["captcha"]["st_only_refresh_scheduler_batch_size"] = max(1, min(200, int(size)))
+
+    @property
+    def st_only_refresh_scheduler_expiring_within_minutes(self) -> int:
+        value = self._config.get("captcha", {}).get("st_only_refresh_scheduler_expiring_within_minutes", 5)
+        try:
+            return max(1, min(10080, int(value)))
+        except Exception:
+            return 5
+
+    def set_st_only_refresh_scheduler_expiring_within_minutes(self, minutes: int):
+        if "captcha" not in self._config:
+            self._config["captcha"] = {}
+        self._config["captcha"]["st_only_refresh_scheduler_expiring_within_minutes"] = max(1, min(10080, int(minutes)))
+
+    @property
     def dedicated_extension_enabled(self) -> bool:
         return bool(self._config.get("captcha", {}).get("dedicated_extension_enabled", False))
 

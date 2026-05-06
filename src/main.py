@@ -20,9 +20,11 @@ from .services.token_manager import TokenManager
 from .services.load_balancer import LoadBalancer
 from .services.concurrency_manager import ConcurrencyManager
 from .services.generation_handler import GenerationHandler
+from .services.st_refresh_reasons import describe_st_refresh_reason
 from .api import routes, admin
 from .core.api_key_manager import ApiKeyManager
 from .core.auth import set_api_key_manager
+from .core.logger import debug_logger
 
 
 def _normalize_host(host: str) -> str:
@@ -255,6 +257,80 @@ async def lifespan(app: FastAPI):
 
     scheduled_token_refresh_handle = asyncio.create_task(scheduled_token_refresh_task())
 
+    async def scheduled_st_only_refresh_task():
+        """ST-only refresh scheduler.
+
+        For each active token whose at_expires is within X minutes (or already
+        expired / unknown), pull a fresh __Secure-next-auth.session-token from
+        the bound extension worker (or local headed browser fallback) without
+        minting a new AT. Per-token in-memory debounce of X minutes prevents
+        re-attacking the same token within a single window. Failures are logged
+        with the friendly hint from describe_st_refresh_reason; tokens are NOT
+        disabled by this scheduler.
+        """
+        last_attempt: dict[int, float] = {}
+        while True:
+            try:
+                interval_minutes = max(1, int(config.st_only_refresh_scheduler_interval_minutes))
+                await asyncio.sleep(interval_minutes * 60)
+                if not config.st_only_refresh_scheduler_enabled:
+                    continue
+
+                all_tokens = await token_manager.get_active_tokens()
+                if not all_tokens:
+                    continue
+
+                window_minutes = max(1, int(config.st_only_refresh_scheduler_expiring_within_minutes))
+                window_seconds = window_minutes * 60
+                now = datetime.now(timezone.utc)
+                tokens_due = []
+                for tk in all_tokens:
+                    if not tk:
+                        continue
+                    exp = tk.at_expires
+                    if exp is None:
+                        tokens_due.append(tk)
+                        continue
+                    if exp.tzinfo is None:
+                        exp = exp.replace(tzinfo=timezone.utc)
+                    if (exp - now).total_seconds() <= window_seconds:
+                        tokens_due.append(tk)
+
+                debounce_seconds = window_seconds
+                now_ts = now.timestamp()
+                tokens_due = [
+                    t for t in tokens_due
+                    if (now_ts - last_attempt.get(t.id or 0, 0.0)) >= debounce_seconds
+                ]
+
+                batch_size = max(1, int(config.st_only_refresh_scheduler_batch_size))
+                for tk in tokens_due[:batch_size]:
+                    if tk.id is None:
+                        continue
+                    last_attempt[tk.id] = now_ts
+                    try:
+                        ok = await token_manager.refresh_st_only(tk.id)
+                        reason = token_manager.consume_st_refresh_reason(tk.id)
+                        if ok:
+                            debug_logger.log_info(
+                                f"[ST_SCHEDULER] Token {tk.id}: ST refreshed "
+                                f"(reason={reason or 'success'})"
+                            )
+                        else:
+                            hint = describe_st_refresh_reason(reason)
+                            debug_logger.log_warning(
+                                f"[ST_SCHEDULER] Token {tk.id}: ST refresh failed "
+                                f"(reason={reason or 'unknown'}; {hint or 'no hint'})"
+                            )
+                    except Exception as refresh_err:
+                        debug_logger.log_warning(
+                            f"[ST_SCHEDULER] Token {tk.id}: scheduled ST refresh raised: {refresh_err}"
+                        )
+            except Exception as e:
+                debug_logger.log_error(f"[ST_SCHEDULER] task error: {e}")
+
+    scheduled_st_only_refresh_handle = asyncio.create_task(scheduled_st_only_refresh_task())
+
     print(f"✓ Database initialized")
     print(f"✓ Total tokens: {len(tokens)}")
     ct = config.cache_timeout
@@ -266,6 +342,7 @@ async def lifespan(app: FastAPI):
         print("✓ File cache cleanup task disabled (timeout <= 0)")
     print(f"✓ 429 auto-unban task started (runs every hour)")
     print("✓ Scheduled token refresh task started")
+    print("✓ Scheduled ST-only refresh task started")
     print(f"✓ Server running on http://{config.server_host}:{config.server_port}")
     print("=" * 60)
 
@@ -287,6 +364,12 @@ async def lifespan(app: FastAPI):
         await scheduled_token_refresh_handle
     except asyncio.CancelledError:
         pass
+    # Stop scheduled ST-only refresh task
+    scheduled_st_only_refresh_handle.cancel()
+    try:
+        await scheduled_st_only_refresh_handle
+    except asyncio.CancelledError:
+        pass
     # Close browser if initialized
     if browser_service:
         await browser_service.close()
@@ -294,6 +377,7 @@ async def lifespan(app: FastAPI):
     print("✓ File cache cleanup task stopped")
     print("✓ 429 auto-unban task stopped")
     print("✓ Scheduled token refresh task stopped")
+    print("✓ Scheduled ST-only refresh task stopped")
 
 
 # Initialize components

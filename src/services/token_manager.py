@@ -540,6 +540,29 @@ class TokenManager:
         self._refresh_futures[token_id] = task
         return await task
 
+    async def refresh_st_only(self, token_id: int) -> bool:
+        """Refresh only the session-token cookie (no AT mint).
+
+        Pulls the latest __Secure-next-auth.session-token from the bound extension
+        worker (or local headed browser as fallback) and persists it on the token.
+        Does NOT call st_to_at and does NOT touch token.at / token.at_expires.
+        Reuses the per-token refresh_lock so this cannot race with _refresh_at_inner.
+        Returns True iff a NEW (different) session token was persisted.
+        """
+        refresh_lock = await self._get_token_lock(
+            self._refresh_locks,
+            self._refresh_lock_guard,
+            token_id,
+        )
+        async with refresh_lock:
+            self._set_st_refresh_reason(token_id, "not_attempted")
+            token = await self.db.get_token(token_id)
+            if not token:
+                self._set_st_refresh_reason(token_id, "token_not_found")
+                return False
+            new_st = await self._try_refresh_st(token_id, token)
+            return bool(new_st)
+
     async def _do_refresh_at(
         self,
         token_id: int,

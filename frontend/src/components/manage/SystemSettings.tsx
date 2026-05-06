@@ -53,6 +53,10 @@ type CaptchaForm = {
   session_refresh_scheduler_interval_minutes: number
   session_refresh_scheduler_batch_size: number
   session_refresh_scheduler_only_expiring_within_minutes: number
+  st_only_refresh_scheduler_enabled: boolean
+  st_only_refresh_scheduler_interval_minutes: number
+  st_only_refresh_scheduler_batch_size: number
+  st_only_refresh_scheduler_expiring_within_minutes: number
   extension_queue_wait_timeout_seconds: number
   extension_fallback_to_managed_on_dedicated_failure: boolean
   personal_proxy_enabled: boolean
@@ -93,6 +97,10 @@ const defaultCaptcha: CaptchaForm = {
   session_refresh_scheduler_interval_minutes: 30,
   session_refresh_scheduler_batch_size: 10,
   session_refresh_scheduler_only_expiring_within_minutes: 60,
+  st_only_refresh_scheduler_enabled: false,
+  st_only_refresh_scheduler_interval_minutes: 5,
+  st_only_refresh_scheduler_batch_size: 20,
+  st_only_refresh_scheduler_expiring_within_minutes: 5,
   extension_queue_wait_timeout_seconds: 20,
   extension_fallback_to_managed_on_dedicated_failure: false,
   personal_proxy_enabled: false,
@@ -273,6 +281,12 @@ export function SystemSettings({ active }: { active: boolean }) {
         session_refresh_scheduler_batch_size: Number(raw.session_refresh_scheduler_batch_size ?? 10),
         session_refresh_scheduler_only_expiring_within_minutes: Number(
           raw.session_refresh_scheduler_only_expiring_within_minutes ?? 60
+        ),
+        st_only_refresh_scheduler_enabled: !!raw.st_only_refresh_scheduler_enabled,
+        st_only_refresh_scheduler_interval_minutes: Number(raw.st_only_refresh_scheduler_interval_minutes ?? 5),
+        st_only_refresh_scheduler_batch_size: Number(raw.st_only_refresh_scheduler_batch_size ?? 20),
+        st_only_refresh_scheduler_expiring_within_minutes: Number(
+          raw.st_only_refresh_scheduler_expiring_within_minutes ?? 5
         ),
         extension_queue_wait_timeout_seconds: Number(raw.extension_queue_wait_timeout_seconds ?? 20),
         extension_fallback_to_managed_on_dedicated_failure: !!raw.extension_fallback_to_managed_on_dedicated_failure,
@@ -574,6 +588,11 @@ export function SystemSettings({ active }: { active: boolean }) {
           session_refresh_scheduler_batch_size: captcha.session_refresh_scheduler_batch_size,
           session_refresh_scheduler_only_expiring_within_minutes:
             captcha.session_refresh_scheduler_only_expiring_within_minutes,
+          st_only_refresh_scheduler_enabled: captcha.st_only_refresh_scheduler_enabled,
+          st_only_refresh_scheduler_interval_minutes: captcha.st_only_refresh_scheduler_interval_minutes,
+          st_only_refresh_scheduler_batch_size: captcha.st_only_refresh_scheduler_batch_size,
+          st_only_refresh_scheduler_expiring_within_minutes:
+            captcha.st_only_refresh_scheduler_expiring_within_minutes,
           extension_queue_wait_timeout_seconds: captcha.extension_queue_wait_timeout_seconds,
           extension_fallback_to_managed_on_dedicated_failure:
             captcha.extension_fallback_to_managed_on_dedicated_failure,
@@ -1285,6 +1304,83 @@ export function SystemSettings({ active }: { active: boolean }) {
           <div>
             <Button onClick={saveCaptcha} disabled={busy}>
               Save refresh scheduler settings
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card className="lg:col-span-2">
+        <CardHeader>
+          <CardTitle>ST-only refresh scheduler</CardTitle>
+          <CardDescription>
+            Pulls the latest session-token cookie from the bound extension worker (or local headed browser fallback)
+            for any token whose AT is within the expiring window or already expired. Does NOT mint a new AT. Useful
+            when AT auto refresh is intentionally off but the worker may have a fresh rotated cookie. Failures are
+            retried on the next tick and never disable tokens.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <div className="flex items-center gap-2">
+            <Switch
+              checked={captcha.st_only_refresh_scheduler_enabled}
+              onCheckedChange={(v) => setCaptcha((c) => ({ ...c, st_only_refresh_scheduler_enabled: v }))}
+            />
+            <Label>Enable ST-only scheduled refresh</Label>
+          </div>
+          {captcha.st_only_refresh_scheduler_enabled ? (
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+              <div>
+                <Label>Interval (min)</Label>
+                <Input
+                  type="number"
+                  min={1}
+                  value={captcha.st_only_refresh_scheduler_interval_minutes}
+                  onChange={(e) =>
+                    setCaptcha((c) => ({
+                      ...c,
+                      st_only_refresh_scheduler_interval_minutes: parseInt(e.target.value, 10) || 5,
+                    }))
+                  }
+                />
+              </div>
+              <div>
+                <Label>Batch size</Label>
+                <Input
+                  type="number"
+                  min={1}
+                  value={captcha.st_only_refresh_scheduler_batch_size}
+                  onChange={(e) =>
+                    setCaptcha((c) => ({
+                      ...c,
+                      st_only_refresh_scheduler_batch_size: parseInt(e.target.value, 10) || 20,
+                    }))
+                  }
+                />
+              </div>
+              <div>
+                <Label>Expiring window (min)</Label>
+                <Input
+                  type="number"
+                  min={1}
+                  value={captcha.st_only_refresh_scheduler_expiring_within_minutes}
+                  onChange={(e) =>
+                    setCaptcha((c) => ({
+                      ...c,
+                      st_only_refresh_scheduler_expiring_within_minutes: parseInt(e.target.value, 10) || 5,
+                    }))
+                  }
+                />
+              </div>
+            </div>
+          ) : (
+            <p className="text-xs text-muted-foreground">
+              Disabled. Enable to periodically pull a fresh session-token cookie for tokens whose AT is near or past
+              expiry, without minting a new AT.
+            </p>
+          )}
+          <div>
+            <Button onClick={saveCaptcha} disabled={busy}>
+              Save ST-only scheduler settings
             </Button>
           </div>
         </CardContent>

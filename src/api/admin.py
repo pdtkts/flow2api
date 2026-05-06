@@ -1029,7 +1029,8 @@ async def refresh_at(
     """
     from ..core.logger import debug_logger
     from ..core.config import config
-    
+    from ..services.st_refresh_reasons import describe_st_refresh_reason
+
     debug_logger.log_info(f"[API] 手动刷新 AT 请求: token_id={token_id}, captcha_method={config.captcha_method}")
     
     try:
@@ -1040,27 +1041,6 @@ async def refresh_at(
         supports_st_refresh = captcha_mode in {"personal", "browser", "extension"} or bool(
             getattr(config, "dedicated_extension_enabled", False)
         )
-
-        st_reason_hints = {
-            "not_attempted": "ST refresh was not attempted",
-            "policy_skipped": "ST refresh skipped by policy",
-            "disabled": "ST auto refresh is disabled",
-            "extension_disabled": "extension ST refresh feature is disabled",
-            "project_id_missing": "token has no project_id for ST refresh",
-            "extension_no_worker_or_empty": "extension worker not connected or session unavailable",
-            "extension_timeout": "extension refresh timed out",
-            "extension_error": "extension refresh encountered an internal error",
-            "local_timeout": "local browser ST refresh timed out",
-            "local_error": "local browser ST refresh failed",
-            "local_timeout_after_extension": "local browser refresh timed out after extension attempt",
-            "local_error_after_extension": "local browser refresh failed after extension attempt",
-            "extension_and_local_failed": "both extension and local browser ST refresh failed",
-            "extension_enabled_but_no_success": "extension refresh enabled but did not return a usable session",
-            "same_st": "session token did not rotate (possibly expired login)",
-            "st_refresh_exception": "unexpected ST refresh exception",
-            "failed_without_reason": "ST refresh failed without detailed reason",
-            "token_not_found": "token not found during refresh",
-        }
 
         if success:
             # 获取更新后的token信息
@@ -1089,7 +1069,7 @@ async def refresh_at(
                 error_detail += (
                     f"（当前打码模式: {captcha_mode or '-'}，已尝试 ST 自动刷新后重试 AT）"
                 )
-                reason_hint = st_reason_hints.get(st_refresh_reason, st_refresh_reason or "")
+                reason_hint = describe_st_refresh_reason(st_refresh_reason)
                 if reason_hint:
                     error_detail += f"；原因: {reason_hint}"
             else:
@@ -2434,6 +2414,10 @@ async def update_captcha_config(
     session_refresh_scheduler_interval_minutes = request.get("session_refresh_scheduler_interval_minutes")
     session_refresh_scheduler_batch_size = request.get("session_refresh_scheduler_batch_size")
     session_refresh_scheduler_only_expiring_within_minutes = request.get("session_refresh_scheduler_only_expiring_within_minutes")
+    st_only_refresh_scheduler_enabled = request.get("st_only_refresh_scheduler_enabled")
+    st_only_refresh_scheduler_interval_minutes = request.get("st_only_refresh_scheduler_interval_minutes")
+    st_only_refresh_scheduler_batch_size = request.get("st_only_refresh_scheduler_batch_size")
+    st_only_refresh_scheduler_expiring_within_minutes = request.get("st_only_refresh_scheduler_expiring_within_minutes")
     extension_queue_wait_timeout_seconds = request.get("extension_queue_wait_timeout_seconds")
     dedicated_extension_enabled = request.get("dedicated_extension_enabled")
     dedicated_extension_captcha_timeout_seconds = request.get("dedicated_extension_captcha_timeout_seconds")
@@ -2537,6 +2521,10 @@ async def update_captcha_config(
         session_refresh_scheduler_interval_minutes=session_refresh_scheduler_interval_minutes,
         session_refresh_scheduler_batch_size=session_refresh_scheduler_batch_size,
         session_refresh_scheduler_only_expiring_within_minutes=session_refresh_scheduler_only_expiring_within_minutes,
+        st_only_refresh_scheduler_enabled=st_only_refresh_scheduler_enabled,
+        st_only_refresh_scheduler_interval_minutes=st_only_refresh_scheduler_interval_minutes,
+        st_only_refresh_scheduler_batch_size=st_only_refresh_scheduler_batch_size,
+        st_only_refresh_scheduler_expiring_within_minutes=st_only_refresh_scheduler_expiring_within_minutes,
         extension_queue_wait_timeout_seconds=extension_queue_wait_timeout_seconds,
         dedicated_extension_enabled=dedicated_extension_enabled,
         dedicated_extension_captcha_timeout_seconds=dedicated_extension_captcha_timeout_seconds,
@@ -2637,6 +2625,18 @@ async def get_captcha_config(token: str = Depends(verify_admin_token)):
         ),
         "session_refresh_scheduler_only_expiring_within_minutes": int(
             getattr(captcha_config, "session_refresh_scheduler_only_expiring_within_minutes", 60) or 60
+        ),
+        "st_only_refresh_scheduler_enabled": bool(
+            getattr(captcha_config, "st_only_refresh_scheduler_enabled", False)
+        ),
+        "st_only_refresh_scheduler_interval_minutes": int(
+            getattr(captcha_config, "st_only_refresh_scheduler_interval_minutes", 5) or 5
+        ),
+        "st_only_refresh_scheduler_batch_size": int(
+            getattr(captcha_config, "st_only_refresh_scheduler_batch_size", 20) or 20
+        ),
+        "st_only_refresh_scheduler_expiring_within_minutes": int(
+            getattr(captcha_config, "st_only_refresh_scheduler_expiring_within_minutes", 5) or 5
         ),
         "dedicated_extension_enabled": bool(getattr(captcha_config, "dedicated_extension_enabled", False)),
         "dedicated_extension_captcha_timeout_seconds": int(
