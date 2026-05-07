@@ -1533,6 +1533,27 @@ async def get_generation_config(token: str = Depends(verify_admin_token)):
                 getattr(config, "flow2api_cloning_model", "gemini-2.5-flash")
                 or "gemini-2.5-flash"
             ),
+            "flow2api_cloning_backend": str(
+                getattr(config, "flow2api_cloning_backend", "gemini_native") or "gemini_native"
+            ),
+            "flow2api_cloning_gemini_api_keys": str(
+                getattr(config, "flow2api_cloning_gemini_api_keys", "") or ""
+            ),
+            "flow2api_cloning_openai_api_keys": str(
+                getattr(config, "flow2api_cloning_openai_api_keys", "") or ""
+            ),
+            "flow2api_cloning_third_party_gemini_api_keys": str(
+                getattr(config, "flow2api_cloning_third_party_gemini_api_keys", "") or ""
+            ),
+            "flow2api_cloning_third_party_gemini_base_url": str(
+                getattr(config, "flow2api_cloning_third_party_gemini_base_url", "") or ""
+            ),
+            "flow2api_cloning_cloudflare_account_id": str(
+                getattr(config, "flow2api_cloning_cloudflare_account_id", "") or ""
+            ),
+            "flow2api_cloning_cloudflare_api_token": str(
+                getattr(config, "flow2api_cloning_cloudflare_api_token", "") or ""
+            ),
             "flow2api_metadata_backend": str(
                 getattr(config, "flow2api_metadata_backend", "gemini_native")
                 or "gemini_native"
@@ -1587,6 +1608,13 @@ async def update_generation_config(
         cloudflare_api_token=request.cloudflare_api_token,
         flow2api_csvgen_cookie=request.flow2api_csvgen_cookie,
         flow2api_cloning_model=request.flow2api_cloning_model,
+        flow2api_cloning_backend=request.flow2api_cloning_backend,
+        flow2api_cloning_gemini_api_keys=request.flow2api_cloning_gemini_api_keys,
+        flow2api_cloning_openai_api_keys=request.flow2api_cloning_openai_api_keys,
+        flow2api_cloning_third_party_gemini_api_keys=request.flow2api_cloning_third_party_gemini_api_keys,
+        flow2api_cloning_third_party_gemini_base_url=request.flow2api_cloning_third_party_gemini_base_url,
+        flow2api_cloning_cloudflare_account_id=request.flow2api_cloning_cloudflare_account_id,
+        flow2api_cloning_cloudflare_api_token=request.flow2api_cloning_cloudflare_api_token,
         flow2api_metadata_backend=request.flow2api_metadata_backend,
         flow2api_metadata_model=request.flow2api_metadata_model,
         flow2api_metadata_enabled_models=request.flow2api_metadata_enabled_models,
@@ -2268,6 +2296,13 @@ async def update_generation_timeout(
         cloudflare_api_token=request.cloudflare_api_token,
         flow2api_csvgen_cookie=request.flow2api_csvgen_cookie,
         flow2api_cloning_model=request.flow2api_cloning_model,
+        flow2api_cloning_backend=request.flow2api_cloning_backend,
+        flow2api_cloning_gemini_api_keys=request.flow2api_cloning_gemini_api_keys,
+        flow2api_cloning_openai_api_keys=request.flow2api_cloning_openai_api_keys,
+        flow2api_cloning_third_party_gemini_api_keys=request.flow2api_cloning_third_party_gemini_api_keys,
+        flow2api_cloning_third_party_gemini_base_url=request.flow2api_cloning_third_party_gemini_base_url,
+        flow2api_cloning_cloudflare_account_id=request.flow2api_cloning_cloudflare_account_id,
+        flow2api_cloning_cloudflare_api_token=request.flow2api_cloning_cloudflare_api_token,
         flow2api_metadata_backend=request.flow2api_metadata_backend,
         flow2api_metadata_model=request.flow2api_metadata_model,
         flow2api_metadata_enabled_models=request.flow2api_metadata_enabled_models,

@@ -2121,6 +2121,13 @@ class Database:
         cloudflare_api_token: Optional[str] = None,
         flow2api_csvgen_cookie: Optional[str] = None,
         flow2api_cloning_model: Optional[str] = None,
+        flow2api_cloning_backend: Optional[str] = None,
+        flow2api_cloning_gemini_api_keys: Optional[str] = None,
+        flow2api_cloning_openai_api_keys: Optional[str] = None,
+        flow2api_cloning_third_party_gemini_api_keys: Optional[str] = None,
+        flow2api_cloning_third_party_gemini_base_url: Optional[str] = None,
+        flow2api_cloning_cloudflare_account_id: Optional[str] = None,
+        flow2api_cloning_cloudflare_api_token: Optional[str] = None,
         flow2api_metadata_backend: Optional[str] = None,
         flow2api_metadata_model: Optional[str] = None,
         flow2api_metadata_enabled_models: Optional[str] = None,
@@ -2210,6 +2217,41 @@ class Database:
                 if flow2api_cloning_model is not None
                 else str(current.get("flow2api_cloning_model", "gemini-2.5-flash") or "gemini-2.5-flash")
             )
+            normalized_flow2api_cloning_backend = (
+                str(flow2api_cloning_backend)
+                if flow2api_cloning_backend is not None
+                else str(current.get("flow2api_cloning_backend", "gemini_native") or "gemini_native")
+            )
+            normalized_flow2api_cloning_gemini_api_keys = (
+                str(flow2api_cloning_gemini_api_keys)
+                if flow2api_cloning_gemini_api_keys is not None
+                else str(current.get("flow2api_cloning_gemini_api_keys", "") or "")
+            )
+            normalized_flow2api_cloning_openai_api_keys = (
+                str(flow2api_cloning_openai_api_keys)
+                if flow2api_cloning_openai_api_keys is not None
+                else str(current.get("flow2api_cloning_openai_api_keys", "") or "")
+            )
+            normalized_flow2api_cloning_third_party_gemini_api_keys = (
+                str(flow2api_cloning_third_party_gemini_api_keys)
+                if flow2api_cloning_third_party_gemini_api_keys is not None
+                else str(current.get("flow2api_cloning_third_party_gemini_api_keys", "") or "")
+            )
+            normalized_flow2api_cloning_third_party_gemini_base_url = (
+                str(flow2api_cloning_third_party_gemini_base_url)
+                if flow2api_cloning_third_party_gemini_base_url is not None
+                else str(current.get("flow2api_cloning_third_party_gemini_base_url", "") or "")
+            )
+            normalized_flow2api_cloning_cloudflare_account_id = (
+                str(flow2api_cloning_cloudflare_account_id)
+                if flow2api_cloning_cloudflare_account_id is not None
+                else str(current.get("flow2api_cloning_cloudflare_account_id", "") or "")
+            )
+            normalized_flow2api_cloning_cloudflare_api_token = (
+                str(flow2api_cloning_cloudflare_api_token)
+                if flow2api_cloning_cloudflare_api_token is not None
+                else str(current.get("flow2api_cloning_cloudflare_api_token", "") or "")
+            )
             normalized_flow2api_metadata_backend = (
                 str(flow2api_metadata_backend)
                 if flow2api_metadata_backend is not None
@@ -2294,6 +2336,13 @@ class Database:
                         cloudflare_api_token = ?,
                         flow2api_csvgen_cookie = ?,
                         flow2api_cloning_model = ?,
+                        flow2api_cloning_backend = ?,
+                        flow2api_cloning_gemini_api_keys = ?,
+                        flow2api_cloning_openai_api_keys = ?,
+                        flow2api_cloning_third_party_gemini_api_keys = ?,
+                        flow2api_cloning_third_party_gemini_base_url = ?,
+                        flow2api_cloning_cloudflare_account_id = ?,
+                        flow2api_cloning_cloudflare_api_token = ?,
                         flow2api_metadata_backend = ?,
                         flow2api_metadata_model = ?,
                         flow2api_metadata_enabled_models = ?,
@@ -2321,6 +2370,13 @@ class Database:
                     normalized_cloudflare_api_token,
                     normalized_flow2api_csvgen_cookie,
                     normalized_flow2api_cloning_model,
+                    normalized_flow2api_cloning_backend,
+                    normalized_flow2api_cloning_gemini_api_keys,
+                    normalized_flow2api_cloning_openai_api_keys,
+                    normalized_flow2api_cloning_third_party_gemini_api_keys,
+                    normalized_flow2api_cloning_third_party_gemini_base_url,
+                    normalized_flow2api_cloning_cloudflare_account_id,
+                    normalized_flow2api_cloning_cloudflare_api_token,
                     normalized_flow2api_metadata_backend,
                     normalized_flow2api_metadata_model,
                     normalized_flow2api_metadata_enabled_models,
@@ -2350,6 +2406,13 @@ class Database:
                         cloudflare_api_token,
                         flow2api_csvgen_cookie,
                         flow2api_cloning_model,
+                        flow2api_cloning_backend,
+                        flow2api_cloning_gemini_api_keys,
+                        flow2api_cloning_openai_api_keys,
+                        flow2api_cloning_third_party_gemini_api_keys,
+                        flow2api_cloning_third_party_gemini_base_url,
+                        flow2api_cloning_cloudflare_account_id,
+                        flow2api_cloning_cloudflare_api_token,
                         flow2api_metadata_backend,
                         flow2api_metadata_model,
                         flow2api_metadata_enabled_models,
@@ -2362,7 +2425,7 @@ class Database:
                         task_tracker_device_name,
                         task_tracker_cookies
                     )
-                    VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     normalized_image_timeout,
                     normalized_video_timeout,
@@ -2377,6 +2440,13 @@ class Database:
                     normalized_cloudflare_api_token,
                     normalized_flow2api_csvgen_cookie,
                     normalized_flow2api_cloning_model,
+                    normalized_flow2api_cloning_backend,
+                    normalized_flow2api_cloning_gemini_api_keys,
+                    normalized_flow2api_cloning_openai_api_keys,
+                    normalized_flow2api_cloning_third_party_gemini_api_keys,
+                    normalized_flow2api_cloning_third_party_gemini_base_url,
+                    normalized_flow2api_cloning_cloudflare_account_id,
+                    normalized_flow2api_cloning_cloudflare_api_token,
                     normalized_flow2api_metadata_backend,
                     normalized_flow2api_metadata_model,
                     normalized_flow2api_metadata_enabled_models,
@@ -2853,6 +2923,27 @@ class Database:
             )
             config.set_flow2api_cloning_model(
                 str(getattr(generation_config, "flow2api_cloning_model", "gemini-2.5-flash") or "gemini-2.5-flash")
+            )
+            config.set_flow2api_cloning_backend(
+                str(getattr(generation_config, "flow2api_cloning_backend", "gemini_native") or "gemini_native")
+            )
+            config.set_flow2api_cloning_gemini_api_keys(
+                str(getattr(generation_config, "flow2api_cloning_gemini_api_keys", "") or "")
+            )
+            config.set_flow2api_cloning_openai_api_keys(
+                str(getattr(generation_config, "flow2api_cloning_openai_api_keys", "") or "")
+            )
+            config.set_flow2api_cloning_third_party_gemini_api_keys(
+                str(getattr(generation_config, "flow2api_cloning_third_party_gemini_api_keys", "") or "")
+            )
+            config.set_flow2api_cloning_third_party_gemini_base_url(
+                str(getattr(generation_config, "flow2api_cloning_third_party_gemini_base_url", "") or "")
+            )
+            config.set_flow2api_cloning_cloudflare_account_id(
+                str(getattr(generation_config, "flow2api_cloning_cloudflare_account_id", "") or "")
+            )
+            config.set_flow2api_cloning_cloudflare_api_token(
+                str(getattr(generation_config, "flow2api_cloning_cloudflare_api_token", "") or "")
             )
             config.set_flow2api_metadata_backend(
                 str(getattr(generation_config, "flow2api_metadata_backend", "gemini_native") or "gemini_native")

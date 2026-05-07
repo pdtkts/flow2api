@@ -437,6 +437,69 @@ class Config:
         self._config["generation_routing"]["flow2api_cloning_model"] = str(value or "gemini-2.5-flash")
 
     @property
+    def flow2api_cloning_backend(self) -> str:
+        return str(self._config.get("generation_routing", {}).get("flow2api_cloning_backend", "gemini_native") or "gemini_native")
+
+    def set_flow2api_cloning_backend(self, value: str):
+        if "generation_routing" not in self._config:
+            self._config["generation_routing"] = {}
+        self._config["generation_routing"]["flow2api_cloning_backend"] = str(value or "gemini_native")
+
+    @property
+    def flow2api_cloning_gemini_api_keys(self) -> str:
+        return str(self._config.get("generation_routing", {}).get("flow2api_cloning_gemini_api_keys", "") or "")
+
+    def set_flow2api_cloning_gemini_api_keys(self, value: str):
+        if "generation_routing" not in self._config:
+            self._config["generation_routing"] = {}
+        self._config["generation_routing"]["flow2api_cloning_gemini_api_keys"] = str(value or "")
+
+    @property
+    def flow2api_cloning_openai_api_keys(self) -> str:
+        return str(self._config.get("generation_routing", {}).get("flow2api_cloning_openai_api_keys", "") or "")
+
+    def set_flow2api_cloning_openai_api_keys(self, value: str):
+        if "generation_routing" not in self._config:
+            self._config["generation_routing"] = {}
+        self._config["generation_routing"]["flow2api_cloning_openai_api_keys"] = str(value or "")
+
+    @property
+    def flow2api_cloning_third_party_gemini_api_keys(self) -> str:
+        return str(self._config.get("generation_routing", {}).get("flow2api_cloning_third_party_gemini_api_keys", "") or "")
+
+    def set_flow2api_cloning_third_party_gemini_api_keys(self, value: str):
+        if "generation_routing" not in self._config:
+            self._config["generation_routing"] = {}
+        self._config["generation_routing"]["flow2api_cloning_third_party_gemini_api_keys"] = str(value or "")
+
+    @property
+    def flow2api_cloning_third_party_gemini_base_url(self) -> str:
+        return str(self._config.get("generation_routing", {}).get("flow2api_cloning_third_party_gemini_base_url", "") or "")
+
+    def set_flow2api_cloning_third_party_gemini_base_url(self, value: str):
+        if "generation_routing" not in self._config:
+            self._config["generation_routing"] = {}
+        self._config["generation_routing"]["flow2api_cloning_third_party_gemini_base_url"] = str(value or "")
+
+    @property
+    def flow2api_cloning_cloudflare_account_id(self) -> str:
+        return str(self._config.get("generation_routing", {}).get("flow2api_cloning_cloudflare_account_id", "") or "")
+
+    def set_flow2api_cloning_cloudflare_account_id(self, value: str):
+        if "generation_routing" not in self._config:
+            self._config["generation_routing"] = {}
+        self._config["generation_routing"]["flow2api_cloning_cloudflare_account_id"] = str(value or "")
+
+    @property
+    def flow2api_cloning_cloudflare_api_token(self) -> str:
+        return str(self._config.get("generation_routing", {}).get("flow2api_cloning_cloudflare_api_token", "") or "")
+
+    def set_flow2api_cloning_cloudflare_api_token(self, value: str):
+        if "generation_routing" not in self._config:
+            self._config["generation_routing"] = {}
+        self._config["generation_routing"]["flow2api_cloning_cloudflare_api_token"] = str(value or "")
+
+    @property
     def flow2api_metadata_backend(self) -> str:
         return str(self._config.get("generation_routing", {}).get("flow2api_metadata_backend", "gemini_native") or "gemini_native")
 

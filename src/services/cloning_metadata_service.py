@@ -157,6 +157,7 @@ class CloningMetadataService:
         prompt_text: str,
         image_bytes: Optional[bytes] = None,
         mime_type: str = "image/jpeg",
+        use_cloning_credentials: bool = False,
     ) -> Dict[str, Any]:
         providers = [provider]
         if provider == "gemini_native":
@@ -166,12 +167,20 @@ class CloningMetadataService:
         for candidate in models:
             try:
                 if provider == "openai":
-                    return await self._invoke_openai(candidate, prompt_text, image_bytes, mime_type)
+                    return await self._invoke_openai(
+                        candidate, prompt_text, image_bytes, mime_type, use_cloning_credentials
+                    )
                 if provider == "third_party_gemini":
-                    return await self._invoke_third_party(candidate, prompt_text, image_bytes, mime_type)
+                    return await self._invoke_third_party(
+                        candidate, prompt_text, image_bytes, mime_type, use_cloning_credentials
+                    )
                 if provider == "cloudflare":
-                    return await self._invoke_cloudflare(candidate, prompt_text, image_bytes, mime_type)
-                return await self._invoke_gemini(candidate, prompt_text, image_bytes, mime_type)
+                    return await self._invoke_cloudflare(
+                        candidate, prompt_text, image_bytes, mime_type, use_cloning_credentials
+                    )
+                return await self._invoke_gemini(
+                    candidate, prompt_text, image_bytes, mime_type, use_cloning_credentials
+                )
             except Exception as exc:
                 last_err = exc
                 continue
@@ -183,8 +192,13 @@ class CloningMetadataService:
         prompt_text: str,
         image_bytes: Optional[bytes],
         mime_type: str,
+        use_cloning_credentials: bool = False,
     ) -> Dict[str, Any]:
         keys = _get_csv(app_config.flow2api_openai_api_keys)
+        if use_cloning_credentials:
+            alt = _get_csv(app_config.flow2api_cloning_openai_api_keys)
+            if alt:
+                keys = alt
         if not keys:
             raise HTTPException(status_code=503, detail="OpenAI API key not configured")
         content: Any = prompt_text
@@ -219,8 +233,13 @@ class CloningMetadataService:
         prompt_text: str,
         image_bytes: Optional[bytes],
         mime_type: str,
+        use_cloning_credentials: bool = False,
     ) -> Dict[str, Any]:
         keys = _get_csv(app_config.flow2api_gemini_api_keys)
+        if use_cloning_credentials:
+            alt = _get_csv(app_config.flow2api_cloning_gemini_api_keys)
+            if alt:
+                keys = alt
         if not keys:
             raise HTTPException(status_code=503, detail="Gemini API key not configured")
         for key in keys:
@@ -240,9 +259,23 @@ class CloningMetadataService:
                 return _extract_json_object(text or "{}")
         raise HTTPException(status_code=500, detail="Gemini request failed")
 
-    async def _invoke_third_party(self, model: str, prompt_text: str, image_bytes: Optional[bytes], mime_type: str) -> Dict[str, Any]:
+    async def _invoke_third_party(
+        self,
+        model: str,
+        prompt_text: str,
+        image_bytes: Optional[bytes],
+        mime_type: str,
+        use_cloning_credentials: bool = False,
+    ) -> Dict[str, Any]:
         endpoint = str(app_config.flow2api_third_party_gemini_base_url or "").strip().rstrip("/")
         keys = _get_csv(app_config.flow2api_third_party_gemini_api_keys)
+        if use_cloning_credentials:
+            ce = str(app_config.flow2api_cloning_third_party_gemini_base_url or "").strip().rstrip("/")
+            if ce:
+                endpoint = ce
+            alt = _get_csv(app_config.flow2api_cloning_third_party_gemini_api_keys)
+            if alt:
+                keys = alt
         if not endpoint or not keys:
             raise HTTPException(status_code=503, detail="Third-party Gemini is not configured")
         content: Any = prompt_text
@@ -267,9 +300,22 @@ class CloningMetadataService:
                 return _extract_json_object(text)
         raise HTTPException(status_code=500, detail="Third-party Gemini request failed")
 
-    async def _invoke_cloudflare(self, model: str, prompt_text: str, image_bytes: Optional[bytes], mime_type: str) -> Dict[str, Any]:
+    async def _invoke_cloudflare(
+        self,
+        model: str,
+        prompt_text: str,
+        image_bytes: Optional[bytes],
+        mime_type: str,
+        use_cloning_credentials: bool = False,
+    ) -> Dict[str, Any]:
         account_id = str(app_config.cloudflare_account_id or "").strip()
         api_token = str(app_config.cloudflare_api_token or "").strip()
+        if use_cloning_credentials:
+            c_aid = str(app_config.flow2api_cloning_cloudflare_account_id or "").strip()
+            c_tok = str(app_config.flow2api_cloning_cloudflare_api_token or "").strip()
+            if c_aid or c_tok:
+                account_id = c_aid or account_id
+                api_token = c_tok or api_token
         if not account_id or not api_token:
             raise HTTPException(status_code=503, detail="Cloudflare Workers AI is not configured")
         content: Any = prompt_text
@@ -426,7 +472,7 @@ class CloningMetadataService:
         model: Optional[str],
         fallback_models: Optional[List[str]],
     ) -> Dict[str, Any]:
-        selected_provider = (provider or "gemini_native").strip().lower()
+        selected_provider = (provider or app_config.flow2api_cloning_backend or "gemini_native").strip().lower()
         selected_model = (model or app_config.flow2api_cloning_model or "gemini-2.5-flash").strip()
         out: List[Dict[str, Any]] = []
         for image in images:
@@ -439,6 +485,7 @@ class CloningMetadataService:
                 prompt_text=prompt,
                 image_bytes=image_bytes,
                 mime_type=str(image.get("mimeType") or mime_type),
+                use_cloning_credentials=True,
             )
             out.append(_normalize_image_prompt(response_json))
         return {"prompts": out}
@@ -450,7 +497,7 @@ class CloningMetadataService:
         model: Optional[str],
         fallback_models: Optional[List[str]],
     ) -> Dict[str, Any]:
-        selected_provider = (provider or "gemini_native").strip().lower()
+        selected_provider = (provider or app_config.flow2api_cloning_backend or "gemini_native").strip().lower()
         selected_model = (model or app_config.flow2api_cloning_model or "gemini-2.5-flash").strip()
         clone_prompt_raw = payload.get("imageClonePrompt") or ""
         try:
@@ -475,6 +522,7 @@ class CloningMetadataService:
             prompt_text=instruction,
             image_bytes=image_bytes,
             mime_type=str(payload.get("mimeType") or mime_type),
+            use_cloning_credentials=True,
         )
         merged = deepcopy(DEFAULT_TEMPLATE)
         merged.update({k: v for k, v in response_json.items() if k in merged and not isinstance(v, dict)})
