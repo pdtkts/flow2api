@@ -538,6 +538,33 @@ class Config:
             )
         )
 
+    @property
+    def task_tracker_device_id(self) -> str:
+        return str(self._config.get("generation_routing", {}).get("task_tracker_device_id", "") or "")
+
+    def set_task_tracker_device_id(self, value: str):
+        if "generation_routing" not in self._config:
+            self._config["generation_routing"] = {}
+        self._config["generation_routing"]["task_tracker_device_id"] = str(value or "")
+
+    @property
+    def task_tracker_device_name(self) -> str:
+        return str(self._config.get("generation_routing", {}).get("task_tracker_device_name", "") or "")
+
+    def set_task_tracker_device_name(self, value: str):
+        if "generation_routing" not in self._config:
+            self._config["generation_routing"] = {}
+        self._config["generation_routing"]["task_tracker_device_name"] = str(value or "")
+
+    @property
+    def task_tracker_cookies(self) -> str:
+        return str(self._config.get("generation_routing", {}).get("task_tracker_cookies", "") or "")
+
+    def set_task_tracker_cookies(self, value: str):
+        if "generation_routing" not in self._config:
+            self._config["generation_routing"] = {}
+        self._config["generation_routing"]["task_tracker_cookies"] = str(value or "")
+
     # Cache configuration
     @property
     def cache_enabled(self) -> bool:

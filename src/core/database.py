@@ -720,6 +720,9 @@ class Database:
                     ("flow2api_cloning_cloudflare_api_token", "TEXT DEFAULT ''"),
                     ("cloning_image_system_prompt", "TEXT DEFAULT ''"),
                     ("cloning_video_system_prompt", "TEXT DEFAULT ''"),
+                    ("task_tracker_device_id", "TEXT DEFAULT ''"),
+                    ("task_tracker_device_name", "TEXT DEFAULT ''"),
+                    ("task_tracker_cookies", "TEXT DEFAULT ''"),
                 ]
 
                 for col_name, col_type in generation_columns_to_add:
@@ -1082,6 +1085,9 @@ class Database:
                     metadata_system_prompt TEXT DEFAULT '',
                     cloning_image_system_prompt TEXT DEFAULT '',
                     cloning_video_system_prompt TEXT DEFAULT '',
+                    task_tracker_device_id TEXT DEFAULT '',
+                    task_tracker_device_name TEXT DEFAULT '',
+                    task_tracker_cookies TEXT DEFAULT '',
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
@@ -2123,6 +2129,9 @@ class Database:
         metadata_system_prompt: Optional[str] = None,
         cloning_image_system_prompt: Optional[str] = None,
         cloning_video_system_prompt: Optional[str] = None,
+        task_tracker_device_id: Optional[str] = None,
+        task_tracker_device_name: Optional[str] = None,
+        task_tracker_cookies: Optional[str] = None,
     ):
         """Update generation configuration"""
         async with self._connect(write=True) as db:
@@ -2253,6 +2262,21 @@ class Database:
                 if cloning_video_system_prompt is not None
                 else str(current.get("cloning_video_system_prompt", "") or "")
             )
+            normalized_task_tracker_device_id = (
+                str(task_tracker_device_id)
+                if task_tracker_device_id is not None
+                else str(current.get("task_tracker_device_id", "") or "")
+            )
+            normalized_task_tracker_device_name = (
+                str(task_tracker_device_name)
+                if task_tracker_device_name is not None
+                else str(current.get("task_tracker_device_name", "") or "")
+            )
+            normalized_task_tracker_cookies = (
+                str(task_tracker_cookies)
+                if task_tracker_cookies is not None
+                else str(current.get("task_tracker_cookies", "") or "")
+            )
 
             if row:
                 await db.execute("""
@@ -2278,6 +2302,9 @@ class Database:
                         metadata_system_prompt = ?,
                         cloning_image_system_prompt = ?,
                         cloning_video_system_prompt = ?,
+                        task_tracker_device_id = ?,
+                        task_tracker_device_name = ?,
+                        task_tracker_cookies = ?,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = 1
                 """, (
@@ -2302,6 +2329,9 @@ class Database:
                     normalized_metadata_system_prompt,
                     normalized_cloning_image_system_prompt,
                     normalized_cloning_video_system_prompt,
+                    normalized_task_tracker_device_id,
+                    normalized_task_tracker_device_name,
+                    normalized_task_tracker_cookies,
                 ))
             else:
                 await db.execute("""
@@ -2327,9 +2357,12 @@ class Database:
                         flow2api_metadata_fallback_models,
                         metadata_system_prompt,
                         cloning_image_system_prompt,
-                        cloning_video_system_prompt
+                        cloning_video_system_prompt,
+                        task_tracker_device_id,
+                        task_tracker_device_name,
+                        task_tracker_cookies
                     )
-                    VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     normalized_image_timeout,
                     normalized_video_timeout,
@@ -2352,6 +2385,9 @@ class Database:
                     normalized_metadata_system_prompt,
                     normalized_cloning_image_system_prompt,
                     normalized_cloning_video_system_prompt,
+                    normalized_task_tracker_device_id,
+                    normalized_task_tracker_device_name,
+                    normalized_task_tracker_cookies,
                 ))
             await db.commit()
 

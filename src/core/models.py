@@ -179,6 +179,9 @@ class GenerationConfig(BaseModel):
     flow2api_cloning_cloudflare_api_token: str = ""
     cloning_image_system_prompt: str = ""
     cloning_video_system_prompt: str = ""
+    task_tracker_device_id: str = ""
+    task_tracker_device_name: str = ""
+    task_tracker_cookies: str = ""
 
 
 class CallLogicConfig(BaseModel):
@@ -490,3 +493,10 @@ class GenerateMetadataRequest(BaseModel):
         if bool(self.image_url) == bool(self.image_base64):
             raise ValueError("Request must include exactly one image source: image_url or image_base64")
         return self
+
+
+class TaskTrackerFetchRequest(BaseModel):
+    search_id: str
+    order: Optional[str] = "creation"
+    pages: Optional[List[int]] = None
+    title_filter: Optional[str] = ""

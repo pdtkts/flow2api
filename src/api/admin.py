@@ -650,6 +650,9 @@ class GenerationConfigRequest(BaseModel):
     flow2api_cloning_cloudflare_api_token: Optional[str] = None
     cloning_image_system_prompt: Optional[str] = None
     cloning_video_system_prompt: Optional[str] = None
+    task_tracker_device_id: Optional[str] = None
+    task_tracker_device_name: Optional[str] = None
+    task_tracker_cookies: Optional[str] = None
 
 
 class CallLogicConfigRequest(BaseModel):

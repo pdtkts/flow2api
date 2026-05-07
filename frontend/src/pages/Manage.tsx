@@ -10,11 +10,12 @@ import { AgentGateway } from "../components/manage/AgentGateway"
 import { ApiKeyManagement } from "../components/manage/ApiKeyManagement"
 import { MetadataSettings } from "../components/manage/MetadataSettings"
 import { CloningSettings } from "../components/manage/CloningSettings"
+import { TaskTrackerSettings } from "../components/manage/TaskTrackerSettings"
 import { cn } from "@/lib/utils"
 import { useAuth } from "../contexts/AuthContext"
 import { adminJson } from "../lib/adminApi"
 
-const MANAGE_TABS = ["tokens", "apikeys", "settings", "metadata", "cloning", "logs", "cache", "agent"] as const
+const MANAGE_TABS = ["tokens", "apikeys", "settings", "metadata", "cloning", "tracker", "logs", "cache", "agent"] as const
 type ManageTab = (typeof MANAGE_TABS)[number]
 
 function parseManageTab(raw: string | null): ManageTab {
@@ -118,6 +119,14 @@ export default function Manage() {
               Cloning
             </TabsTrigger>
             <TabsTrigger
+              value="tracker"
+              className={cn(
+                "rounded-none border-b-2 border-transparent px-1 py-3 data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:shadow-none"
+              )}
+            >
+              Task Tracker
+            </TabsTrigger>
+            <TabsTrigger
               value="cache"
               className={cn(
                 "rounded-none border-b-2 border-transparent px-1 py-3 data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:shadow-none"
@@ -174,6 +183,11 @@ export default function Manage() {
         <TabsContent value="cloning" className="mt-0 outline-none focus-visible:ring-0">
           <div className="animate-in fade-in duration-300">
             <CloningSettings active={true} />
+          </div>
+        </TabsContent>
+        <TabsContent value="tracker" className="mt-0 outline-none focus-visible:ring-0">
+          <div className="animate-in fade-in duration-300">
+            <TaskTrackerSettings active={true} />
           </div>
         </TabsContent>
         <TabsContent value="cache" className="mt-0 outline-none focus-visible:ring-0">

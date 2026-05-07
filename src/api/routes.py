@@ -35,11 +35,13 @@ from ..core.models import (
     GeminiGenerateContentRequest,
     Project,
     Task,
+    TaskTrackerFetchRequest,
 )
 from ..core.config import config as app_config
 from ..services.browser_captcha_extension import ExtensionCaptchaService
 from ..services.cloning_metadata_service import CloningMetadataService
 from ..services.generation_handler import MODEL_CONFIG, GenerationHandler
+from ..services.task_tracker_service import TaskTrackerService
 
 router = APIRouter()
 
@@ -87,6 +89,7 @@ GEMINI_STATUS_MAP = {
 # Dependency injection will be set up in main.py
 generation_handler: GenerationHandler = None
 cloning_metadata_service = CloningMetadataService()
+task_tracker_service = TaskTrackerService()
 
 
 @dataclass
@@ -2265,3 +2268,27 @@ async def get_allowed_tokens(
         "api_key_label": auth_ctx.key_label,
         "allowed_tokens": tokens_info
     }
+
+
+@router.post("/api/tracker/fetch")
+async def fetch_task_tracker_assets(
+    request: TaskTrackerFetchRequest,
+    auth_ctx: AuthContext = Depends(verify_api_key_flexible),
+):
+    """Fetch task tracker assets using Playwright Chromium session."""
+    if auth_ctx.key_id is None:
+        raise HTTPException(status_code=403, detail="Managed API key required")
+        
+    try:
+        results = await task_tracker_service.fetch_contributor_assets(
+            search_id=request.search_id,
+            order=request.order or "creation",
+            pages=request.pages,
+            title_filter=request.title_filter or "",
+        )
+        return results
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        debug_logger.log_error(f"Tracker fetch failed: {exc}")
+        raise HTTPException(status_code=500, detail=f"Internal Error: {str(exc)}")
