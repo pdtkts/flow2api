@@ -154,7 +154,7 @@ export function CloningSettings({ active }: { active: boolean }) {
             <h3 className="font-semibold text-lg flex items-center gap-2">
               <Key className="w-5 h-5 text-primary" /> Provider Credentials
             </h3>
-            <p className="text-xs text-muted-foreground mt-1">Cloning operates independently of Metadata and requires its own API keys.</p>
+            <p className="text-xs text-muted-foreground mt-1">Cloning operates independently of Metadata and requires its own API keys. You can specify <strong>multiple API keys</strong> separated by commas for load balancing.</p>
           </div>
           
           <div className="rounded-md border bg-background overflow-hidden">
@@ -171,21 +171,21 @@ export function CloningSettings({ active }: { active: boolean }) {
                   <TableCell className="font-medium">Google Gemini</TableCell>
                   <TableCell className="text-muted-foreground font-mono text-[11px]">FLOW2API_CLONING_GEMINI_API_KEYS</TableCell>
                   <TableCell>
-                    <Input className="font-mono text-xs h-8 bg-muted/20" placeholder="AIzaSy..." value={geminiKeys} onChange={(e) => setGeminiKeys(e.target.value)} />
+                    <Textarea className="font-mono text-xs min-h-[60px] bg-muted/20 resize-y" placeholder="AIzaSy..., AIzaSy..." value={geminiKeys} onChange={(e) => setGeminiKeys(e.target.value)} />
                   </TableCell>
                 </TableRow>
                 <TableRow>
                   <TableCell className="font-medium">OpenAI</TableCell>
                   <TableCell className="text-muted-foreground font-mono text-[11px]">FLOW2API_CLONING_OPENAI_API_KEYS</TableCell>
                   <TableCell>
-                    <Input className="font-mono text-xs h-8 bg-muted/20" placeholder="sk-proj-..." value={openaiKeys} onChange={(e) => setOpenaiKeys(e.target.value)} />
+                    <Textarea className="font-mono text-xs min-h-[60px] bg-muted/20 resize-y" placeholder="sk-proj-..., sk-proj-..." value={openaiKeys} onChange={(e) => setOpenaiKeys(e.target.value)} />
                   </TableCell>
                 </TableRow>
                 <TableRow>
                   <TableCell className="font-medium">Third-Party Gemini</TableCell>
                   <TableCell className="text-muted-foreground font-mono text-[11px]">FLOW2API_CLONING_THIRD_PARTY_GEMINI_API_KEYS</TableCell>
                   <TableCell>
-                    <Input className="font-mono text-xs h-8 bg-muted/20" placeholder="Keys..." value={thirdPartyKeys} onChange={(e) => setThirdPartyKeys(e.target.value)} />
+                    <Textarea className="font-mono text-xs min-h-[60px] bg-muted/20 resize-y" placeholder="Key1, Key2..." value={thirdPartyKeys} onChange={(e) => setThirdPartyKeys(e.target.value)} />
                   </TableCell>
                 </TableRow>
                 <TableRow>
