@@ -45,7 +45,7 @@ export function TaskTrackerSettings({ active }: { active: boolean }) {
           task_tracker_cookies: cookies.trim(),
         }),
       })
-      if (!resp.ok) {
+      if (!resp || !resp.ok) {
         toast.error("Failed to save Task Tracker settings")
       } else {
         toast.success("Task Tracker settings saved")
