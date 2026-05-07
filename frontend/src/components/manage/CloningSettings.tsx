@@ -46,9 +46,17 @@ export function CloningSettings({ active }: { active: boolean }) {
     const resp = await adminJson<{ success?: boolean; config?: Record<string, unknown> }>("/api/generation/timeout", token)
     if (!resp.ok || !resp.data?.success || !resp.data.config) return
     const c = resp.data.config
-    setBackend(String(c.flow2api_cloning_backend || "gemini_native"))
-    setModel(String(c.flow2api_cloning_model || "gemini-2.5-flash"))
-
+    const backendStr = String(c.flow2api_cloning_backend || "gemini_native")
+    const presets = PRESET_MODELS[backendStr] || []
+    let modelStr = String(c.flow2api_cloning_model || "").trim()
+    if (presets.length && modelStr && !presets.includes(modelStr)) {
+      modelStr = presets[0] || ""
+    }
+    if (!modelStr) {
+      modelStr = presets[0] || "gemini-2.5-flash"
+    }
+    setBackend(backendStr)
+    setModel(modelStr)
 
     setGeminiKeys(String(c.flow2api_cloning_gemini_api_keys || ""))
     setOpenaiKeys(String(c.flow2api_cloning_openai_api_keys || ""))
@@ -85,10 +93,37 @@ export function CloningSettings({ active }: { active: boolean }) {
           flow2api_cloning_cloudflare_api_token: cloudflareApiToken,
         }),
       })
-      if (!r) return
-      const d = await r.json()
+      if (!r) {
+        toast.error("Session expired or unauthorized — please log in again.")
+        return
+      }
+      const d = await r.json().catch(() => null)
+      if (!d) {
+        toast.error(`Save failed (HTTP ${r.status}).`)
+        return
+      }
+      if (!r.ok) {
+        const msg =
+          typeof d.detail === "string"
+            ? d.detail
+            : Array.isArray(d.detail)
+              ? d.detail.map((x: { msg?: string }) => x?.msg).filter(Boolean).join("; ")
+              : String(d.message || `HTTP ${r.status}`)
+        toast.error(msg || `Save failed (HTTP ${r.status}).`)
+        return
+      }
       if (d.success) toast.success("Cloning settings saved")
-      else toast.error(d.message || "Failed")
+      else {
+        const msg =
+          typeof d.detail === "string"
+            ? d.detail
+            : Array.isArray(d.detail)
+              ? d.detail.map((x: { msg?: string }) => x?.msg).filter(Boolean).join("; ")
+              : String(d.message || "Failed to save")
+        toast.error(msg || "Failed to save")
+      }
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Network error while saving")
     } finally {
       setBusy(false)
     }
@@ -102,7 +137,14 @@ export function CloningSettings({ active }: { active: boolean }) {
         <CardTitle>Cloning Settings</CardTitle>
         <CardDescription>Configure cloning backend, model, and credentials.</CardDescription>
       </CardHeader>
-      <CardContent className="space-y-6">
+      <CardContent>
+        <form
+          className="space-y-6"
+          onSubmit={(e) => {
+            e.preventDefault()
+            void save()
+          }}
+        >
         <div className="space-y-2">
           <Label>Cloning Backend</Label>
           <Select value={backend} onValueChange={(v) => {
@@ -204,7 +246,10 @@ export function CloningSettings({ active }: { active: boolean }) {
         </div>
 
 
-        <Button onClick={save} disabled={busy} className="w-full sm:w-auto mt-4">Save cloning settings</Button>
+        <Button type="submit" disabled={busy} className="w-full sm:w-auto mt-4">
+          Save cloning settings
+        </Button>
+        </form>
       </CardContent>
     </Card>
   )
