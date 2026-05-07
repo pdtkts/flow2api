@@ -7,6 +7,7 @@ import { Input } from "../ui/input"
 import { Label } from "../ui/label"
 import { Textarea } from "../ui/textarea"
 import { toast } from "sonner"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select"
 
 const DEFAULT_METADATA_PROMPT = `You are generating agency microstock metadata for exactly ONE image (attached).
 Return ONLY valid JSON with shape:
@@ -19,13 +20,13 @@ Rules:
 - If category is requested by client settings, include categoryId as integer.
 `
 
-const PRESET_MODELS = [
-  "gemini-2.5-flash",
-  "gemini-2.5-flash-lite",
-  "gpt-4.1-mini",
-  "gpt-4.1",
-  "@cf/meta/llama-3.1-8b-instruct",
-]
+const PRESET_MODELS: Record<string, string[]> = {
+  gemini_native: ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro", "gemini-1.5-flash", "gemini-1.5-pro"],
+  openai: ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "gpt-4.1-mini", "gpt-4.1"],
+  third_party_gemini: ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro", "gemini-1.5-flash", "gemini-1.5-pro"],
+  cloudflare: ["@cf/meta/llama-3.1-8b-instruct", "@cf/meta/llama-3-8b-instruct"],
+  csvgen: []
+}
 
 const METADATA_BACKENDS = [
   "gemini_native",
@@ -85,11 +86,13 @@ export function MetadataSettings({ active }: { active: boolean }) {
     setCloudflareApiToken(String(c.cloudflare_api_token || ""))
   }, [token, active])
 
+  const backendModels = useMemo(() => PRESET_MODELS[backend] || [], [backend])
+
   const allModels = useMemo(() => {
     const fromEnabled = enabledModels.map((m) => m.trim()).filter(Boolean)
-    const merged = Array.from(new Set([...PRESET_MODELS, ...fromEnabled]))
+    const merged = Array.from(new Set([...backendModels, ...fromEnabled]))
     return merged
-  }, [enabledModels])
+  }, [enabledModels, backendModels])
 
   const fallbackModels = useMemo(
     () => enabledModels.filter((m) => m !== primaryModel),
@@ -182,116 +185,136 @@ export function MetadataSettings({ active }: { active: boolean }) {
         <CardTitle>Metadata Settings</CardTitle>
         <CardDescription>Configure metadata backend, model, credentials, and metadata system prompt.</CardDescription>
       </CardHeader>
-      <CardContent className="space-y-4">
-        <div>
+      <CardContent className="space-y-6">
+        <div className="space-y-2">
           <Label>Default Metadata Backend</Label>
-          <div className="mt-2 rounded-md border">
-            <div className="grid grid-cols-[1fr_140px] gap-2 border-b bg-muted/40 px-3 py-2 text-xs font-medium">
-              <span>Backend</span>
-              <span>Default</span>
-            </div>
-            {METADATA_BACKENDS.map((entry) => (
-              <div key={entry} className="grid grid-cols-[1fr_140px] items-center gap-2 px-3 py-2 text-sm">
-                <span className="font-mono">{entry}</span>
-                <input
-                  type="radio"
-                  name="metadata-backend"
-                  checked={backend === entry}
-                  onChange={() => setBackend(entry)}
-                />
+          <Select value={backend} onValueChange={setBackend}>
+            <SelectTrigger className="w-full sm:w-[300px]">
+              <SelectValue placeholder="Select backend" />
+            </SelectTrigger>
+            <SelectContent>
+              {METADATA_BACKENDS.map(entry => (
+                <SelectItem key={entry} value={entry} className="font-mono">{entry}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+
+        {backend !== 'csvgen' && (
+          <div className="space-y-2">
+            <Label>Metadata Models (preset + custom)</Label>
+            <div className="rounded-md border overflow-hidden">
+              <div className="grid grid-cols-[1fr_90px_90px_110px] gap-2 border-b bg-muted/40 px-3 py-2 text-xs font-medium">
+                <span>Model</span>
+                <span className="text-center">Enabled</span>
+                <span className="text-center">Primary</span>
+                <span className="text-center">Order</span>
               </div>
-            ))}
-          </div>
-        </div>
-        <div>
-          <Label>Metadata Models (preset + custom)</Label>
-          <div className="mt-2 rounded-md border">
-            <div className="grid grid-cols-[1fr_90px_90px_110px] gap-2 border-b bg-muted/40 px-3 py-2 text-xs font-medium">
-              <span>Model</span>
-              <span>Enabled</span>
-              <span>Primary</span>
-              <span>Order</span>
+              <div className="max-h-[300px] overflow-y-auto">
+                {allModels.map((entry) => {
+                  const enabled = enabledModels.includes(entry)
+                  return (
+                    <div key={entry} className="grid grid-cols-[1fr_90px_90px_110px] items-center gap-2 border-b last:border-0 px-3 py-2 text-sm hover:bg-muted/20 transition-colors">
+                      <span className="font-mono truncate" title={entry}>{entry}</span>
+                      <div className="flex justify-center">
+                        <input
+                          type="checkbox"
+                          className="h-4 w-4 accent-primary rounded cursor-pointer"
+                          checked={enabled}
+                          onChange={(e) => toggleModel(entry, e.target.checked)}
+                        />
+                      </div>
+                      <div className="flex justify-center">
+                        <input
+                          type="radio"
+                          name="primary-model"
+                          className="h-4 w-4 accent-primary"
+                          checked={primaryModel === entry}
+                          disabled={!enabled}
+                          onChange={() => {
+                            setPrimaryModel(entry)
+                            setModel(entry)
+                          }}
+                        />
+                      </div>
+                      <div className="flex gap-1 justify-center">
+                        <Button type="button" size="sm" variant="outline" disabled={!enabled} onClick={() => moveModel(entry, -1)} className="h-7 px-2">Up</Button>
+                        <Button type="button" size="sm" variant="outline" disabled={!enabled} onClick={() => moveModel(entry, 1)} className="h-7 px-2">Down</Button>
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
             </div>
-            {allModels.map((entry) => {
-              const enabled = enabledModels.includes(entry)
-              return (
-                <div key={entry} className="grid grid-cols-[1fr_90px_90px_110px] items-center gap-2 px-3 py-2 text-sm">
-                  <span className="font-mono">{entry}</span>
-                  <input type="checkbox" checked={enabled} onChange={(e) => toggleModel(entry, e.target.checked)} />
-                  <input
-                    type="radio"
-                    name="primary-model"
-                    checked={primaryModel === entry}
-                    disabled={!enabled}
-                    onChange={() => {
-                      setPrimaryModel(entry)
-                      setModel(entry)
-                    }}
-                  />
-                  <div className="flex gap-1">
-                    <Button type="button" size="sm" variant="outline" disabled={!enabled} onClick={() => moveModel(entry, -1)}>Up</Button>
-                    <Button type="button" size="sm" variant="outline" disabled={!enabled} onClick={() => moveModel(entry, 1)}>Down</Button>
-                  </div>
-                </div>
-              )
-            })}
+            <div className="mt-3 flex gap-2 sm:w-[400px]">
+              <Input
+                placeholder="Custom model id"
+                className="font-mono text-sm"
+                value={customModelInput}
+                onChange={(e) => setCustomModelInput(e.target.value)}
+              />
+              <Button type="button" variant="secondary" onClick={addCustomModel}>Add Model</Button>
+            </div>
+            <div className="mt-4 max-w-sm">
+              <Label>Legacy FLOW2API_METADATA_MODEL</Label>
+              <Input
+                className="mt-1 font-mono text-sm"
+                value={model}
+                readOnly
+                title="Automatically set from Primary Model"
+              />
+            </div>
+            <p className="text-xs text-muted-foreground mt-2">
+              Fallback order follows enabled model order excluding primary.
+            </p>
           </div>
-          <div className="mt-2 flex gap-2">
-            <Input
-              placeholder="Custom model id"
-              className="font-mono text-sm"
-              value={customModelInput}
-              onChange={(e) => setCustomModelInput(e.target.value)}
-            />
-            <Button type="button" variant="secondary" onClick={addCustomModel}>Add</Button>
+        )}
+
+        {backend === 'csvgen' && (
+          <div className="space-y-2">
+            <Label>FLOW2API_CSVGEN_COOKIE</Label>
+            <Input className="font-mono text-sm" value={csvgenCookie} onChange={(e) => setCsvgenCookie(e.target.value)} />
           </div>
-          <div className="mt-2">
-            <Label>Legacy FLOW2API_METADATA_MODEL (compatibility)</Label>
-            <Input
-              className="mt-1 font-mono text-sm"
-              value={model}
-              onChange={(e) => setModel(e.target.value)}
-            />
-          </div>
-          <p className="text-xs text-muted-foreground mt-2">
-            Fallback order follows enabled model order excluding primary.
-          </p>
-        </div>
-        <div>
-          <Label>FLOW2API_CSVGEN_COOKIE</Label>
-          <Input className="mt-1 font-mono text-sm" value={csvgenCookie} onChange={(e) => setCsvgenCookie(e.target.value)} />
-        </div>
-        <div>
+        )}
+
+        <div className="space-y-2">
           <Label>Metadata System Prompt</Label>
-          <Textarea className="mt-1 min-h-[160px] font-mono text-xs" value={systemPrompt} onChange={(e) => setSystemPrompt(e.target.value)} />
+          <Textarea className="min-h-[160px] font-mono text-xs resize-y" value={systemPrompt} onChange={(e) => setSystemPrompt(e.target.value)} />
         </div>
-        <div>
-          <Label>FLOW2API_GEMINI_API_KEYS</Label>
-          <Input className="mt-1 font-mono text-sm" value={geminiKeys} onChange={(e) => setGeminiKeys(e.target.value)} />
+
+        <div className="space-y-4 rounded-md border p-4 bg-muted/10">
+          <h3 className="font-semibold text-sm">Provider Credentials</h3>
+          
+          <div className="space-y-2">
+            <Label>FLOW2API_GEMINI_API_KEYS</Label>
+            <Input className="font-mono text-sm" placeholder="AIzaSy..." value={geminiKeys} onChange={(e) => setGeminiKeys(e.target.value)} />
+          </div>
+          <div className="space-y-2">
+            <Label>FLOW2API_OPENAI_API_KEYS</Label>
+            <Input className="font-mono text-sm" placeholder="sk-proj-..." value={openaiKeys} onChange={(e) => setOpenaiKeys(e.target.value)} />
+          </div>
+          <div className="space-y-2">
+            <Label>FLOW2API_THIRD_PARTY_GEMINI_API_KEYS</Label>
+            <Input className="font-mono text-sm" value={thirdPartyKeys} onChange={(e) => setThirdPartyKeys(e.target.value)} />
+          </div>
+          <div className="space-y-2">
+            <Label>FLOW2API_THIRD_PARTY_GEMINI_BASE_URL</Label>
+            <Input className="font-mono text-sm" placeholder="https://..." value={thirdPartyBaseUrl} onChange={(e) => setThirdPartyBaseUrl(e.target.value)} />
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div className="space-y-2">
+              <Label>CLOUDFLARE_ACCOUNT_ID</Label>
+              <Input className="font-mono text-sm" value={cloudflareAccountId} onChange={(e) => setCloudflareAccountId(e.target.value)} />
+            </div>
+            <div className="space-y-2">
+              <Label>CLOUDFLARE_API_TOKEN</Label>
+              <Input className="font-mono text-sm" value={cloudflareApiToken} onChange={(e) => setCloudflareApiToken(e.target.value)} />
+            </div>
+          </div>
         </div>
-        <div>
-          <Label>FLOW2API_OPENAI_API_KEYS</Label>
-          <Input className="mt-1 font-mono text-sm" value={openaiKeys} onChange={(e) => setOpenaiKeys(e.target.value)} />
-        </div>
-        <div>
-          <Label>FLOW2API_THIRD_PARTY_GEMINI_API_KEYS</Label>
-          <Input className="mt-1 font-mono text-sm" value={thirdPartyKeys} onChange={(e) => setThirdPartyKeys(e.target.value)} />
-        </div>
-        <div>
-          <Label>FLOW2API_THIRD_PARTY_GEMINI_BASE_URL</Label>
-          <Input className="mt-1 font-mono text-sm" value={thirdPartyBaseUrl} onChange={(e) => setThirdPartyBaseUrl(e.target.value)} />
-        </div>
-        <div>
-          <Label>CLOUDFLARE_ACCOUNT_ID</Label>
-          <Input className="mt-1 font-mono text-sm" value={cloudflareAccountId} onChange={(e) => setCloudflareAccountId(e.target.value)} />
-        </div>
-        <div>
-          <Label>CLOUDFLARE_API_TOKEN</Label>
-          <Input className="mt-1 font-mono text-sm" value={cloudflareApiToken} onChange={(e) => setCloudflareApiToken(e.target.value)} />
-        </div>
-        <Button onClick={save} disabled={busy}>Save metadata settings</Button>
+        
+        <Button onClick={save} disabled={busy} className="w-full sm:w-auto mt-4">Save metadata settings</Button>
       </CardContent>
     </Card>
   )
 }
-

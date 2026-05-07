@@ -170,6 +170,13 @@ class GenerationConfig(BaseModel):
     flow2api_metadata_primary_model: str = ""
     flow2api_metadata_fallback_models: str = ""
     metadata_system_prompt: str = ""
+    flow2api_cloning_backend: str = "gemini_native"
+    flow2api_cloning_gemini_api_keys: str = ""
+    flow2api_cloning_openai_api_keys: str = ""
+    flow2api_cloning_third_party_gemini_api_keys: str = ""
+    flow2api_cloning_third_party_gemini_base_url: str = ""
+    flow2api_cloning_cloudflare_account_id: str = ""
+    flow2api_cloning_cloudflare_api_token: str = ""
     cloning_image_system_prompt: str = ""
     cloning_video_system_prompt: str = ""
 

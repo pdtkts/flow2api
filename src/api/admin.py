@@ -641,6 +641,13 @@ class GenerationConfigRequest(BaseModel):
     flow2api_metadata_primary_model: Optional[str] = None
     flow2api_metadata_fallback_models: Optional[str] = None
     metadata_system_prompt: Optional[str] = None
+    flow2api_cloning_backend: Optional[str] = None
+    flow2api_cloning_gemini_api_keys: Optional[str] = None
+    flow2api_cloning_openai_api_keys: Optional[str] = None
+    flow2api_cloning_third_party_gemini_api_keys: Optional[str] = None
+    flow2api_cloning_third_party_gemini_base_url: Optional[str] = None
+    flow2api_cloning_cloudflare_account_id: Optional[str] = None
+    flow2api_cloning_cloudflare_api_token: Optional[str] = None
     cloning_image_system_prompt: Optional[str] = None
     cloning_video_system_prompt: Optional[str] = None
 
