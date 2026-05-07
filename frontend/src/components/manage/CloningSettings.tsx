@@ -8,6 +8,8 @@ import { Label } from "../ui/label"
 import { Textarea } from "../ui/textarea"
 import { toast } from "sonner"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select"
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../ui/table"
+import { Key } from "lucide-react"
 
 const DEFAULT_CLONING_IMAGE_PROMPT = `You are an OCR + structured prompt generator.
 Read the image, extract visible text, and return ONLY valid JSON that follows the Nexus DNA schema.
@@ -148,34 +150,67 @@ export function CloningSettings({ active }: { active: boolean }) {
         </div>
 
         <div className="space-y-4 rounded-md border p-4 bg-muted/10">
-          <h3 className="font-semibold text-sm">Cloning Provider Credentials</h3>
-          <p className="text-xs text-muted-foreground">Cloning operates independently of Metadata and requires its own API keys.</p>
+          <div>
+            <h3 className="font-semibold text-lg flex items-center gap-2">
+              <Key className="w-5 h-5 text-primary" /> Provider Credentials
+            </h3>
+            <p className="text-xs text-muted-foreground mt-1">Cloning operates independently of Metadata and requires its own API keys.</p>
+          </div>
           
-          <div className="space-y-2">
-            <Label>FLOW2API_CLONING_GEMINI_API_KEYS</Label>
-            <Input className="font-mono text-sm" placeholder="AIzaSy..." value={geminiKeys} onChange={(e) => setGeminiKeys(e.target.value)} />
-          </div>
-          <div className="space-y-2">
-            <Label>FLOW2API_CLONING_OPENAI_API_KEYS</Label>
-            <Input className="font-mono text-sm" placeholder="sk-proj-..." value={openaiKeys} onChange={(e) => setOpenaiKeys(e.target.value)} />
-          </div>
-          <div className="space-y-2">
-            <Label>FLOW2API_CLONING_THIRD_PARTY_GEMINI_API_KEYS</Label>
-            <Input className="font-mono text-sm" value={thirdPartyKeys} onChange={(e) => setThirdPartyKeys(e.target.value)} />
-          </div>
-          <div className="space-y-2">
-            <Label>FLOW2API_CLONING_THIRD_PARTY_GEMINI_BASE_URL</Label>
-            <Input className="font-mono text-sm" placeholder="https://..." value={thirdPartyBaseUrl} onChange={(e) => setThirdPartyBaseUrl(e.target.value)} />
-          </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div className="space-y-2">
-              <Label>CLONING_CLOUDFLARE_ACCOUNT_ID</Label>
-              <Input className="font-mono text-sm" value={cloudflareAccountId} onChange={(e) => setCloudflareAccountId(e.target.value)} />
-            </div>
-            <div className="space-y-2">
-              <Label>CLONING_CLOUDFLARE_API_TOKEN</Label>
-              <Input className="font-mono text-sm" value={cloudflareApiToken} onChange={(e) => setCloudflareApiToken(e.target.value)} />
-            </div>
+          <div className="rounded-md border bg-background overflow-hidden">
+            <Table>
+              <TableHeader>
+                <TableRow className="bg-muted/50 hover:bg-muted/50">
+                  <TableHead className="w-[200px]">Provider / Service</TableHead>
+                  <TableHead className="w-[380px]">Configuration Key</TableHead>
+                  <TableHead>Value / Token</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                <TableRow>
+                  <TableCell className="font-medium">Google Gemini</TableCell>
+                  <TableCell className="text-muted-foreground font-mono text-[11px]">FLOW2API_CLONING_GEMINI_API_KEYS</TableCell>
+                  <TableCell>
+                    <Input className="font-mono text-xs h-8 bg-muted/20" placeholder="AIzaSy..." value={geminiKeys} onChange={(e) => setGeminiKeys(e.target.value)} />
+                  </TableCell>
+                </TableRow>
+                <TableRow>
+                  <TableCell className="font-medium">OpenAI</TableCell>
+                  <TableCell className="text-muted-foreground font-mono text-[11px]">FLOW2API_CLONING_OPENAI_API_KEYS</TableCell>
+                  <TableCell>
+                    <Input className="font-mono text-xs h-8 bg-muted/20" placeholder="sk-proj-..." value={openaiKeys} onChange={(e) => setOpenaiKeys(e.target.value)} />
+                  </TableCell>
+                </TableRow>
+                <TableRow>
+                  <TableCell className="font-medium">Third-Party Gemini</TableCell>
+                  <TableCell className="text-muted-foreground font-mono text-[11px]">FLOW2API_CLONING_THIRD_PARTY_GEMINI_API_KEYS</TableCell>
+                  <TableCell>
+                    <Input className="font-mono text-xs h-8 bg-muted/20" placeholder="Keys..." value={thirdPartyKeys} onChange={(e) => setThirdPartyKeys(e.target.value)} />
+                  </TableCell>
+                </TableRow>
+                <TableRow>
+                  <TableCell className="font-medium text-muted-foreground text-xs pl-8">↳ Base URL</TableCell>
+                  <TableCell className="text-muted-foreground font-mono text-[11px]">FLOW2API_CLONING_THIRD_PARTY_GEMINI_BASE_URL</TableCell>
+                  <TableCell>
+                    <Input className="font-mono text-xs h-8 bg-muted/20" placeholder="https://..." value={thirdPartyBaseUrl} onChange={(e) => setThirdPartyBaseUrl(e.target.value)} />
+                  </TableCell>
+                </TableRow>
+                <TableRow>
+                  <TableCell className="font-medium">Cloudflare</TableCell>
+                  <TableCell className="text-muted-foreground font-mono text-[11px]">CLONING_CLOUDFLARE_ACCOUNT_ID</TableCell>
+                  <TableCell>
+                    <Input className="font-mono text-xs h-8 bg-muted/20" placeholder="Account ID..." value={cloudflareAccountId} onChange={(e) => setCloudflareAccountId(e.target.value)} />
+                  </TableCell>
+                </TableRow>
+                <TableRow>
+                  <TableCell className="font-medium text-muted-foreground text-xs pl-8">↳ API Token</TableCell>
+                  <TableCell className="text-muted-foreground font-mono text-[11px]">CLONING_CLOUDFLARE_API_TOKEN</TableCell>
+                  <TableCell>
+                    <Input className="font-mono text-xs h-8 bg-muted/20" placeholder="API Token..." value={cloudflareApiToken} onChange={(e) => setCloudflareApiToken(e.target.value)} />
+                  </TableCell>
+                </TableRow>
+              </TableBody>
+            </Table>
           </div>
         </div>
 

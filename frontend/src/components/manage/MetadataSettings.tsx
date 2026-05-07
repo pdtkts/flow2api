@@ -8,6 +8,8 @@ import { Label } from "../ui/label"
 import { Textarea } from "../ui/textarea"
 import { toast } from "sonner"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select"
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../ui/table"
+import { Key } from "lucide-react"
 
 const DEFAULT_METADATA_PROMPT = `You are generating agency microstock metadata for exactly ONE image (attached).
 Return ONLY valid JSON with shape:
@@ -259,12 +261,7 @@ export function MetadataSettings({ active }: { active: boolean }) {
           </div>
         )}
 
-        {backend === 'csvgen' && (
-          <div className="space-y-2">
-            <Label>FLOW2API_CSVGEN_COOKIE</Label>
-            <Input className="font-mono text-sm" value={csvgenCookie} onChange={(e) => setCsvgenCookie(e.target.value)} />
-          </div>
-        )}
+
 
         <div className="space-y-2">
           <Label>Metadata System Prompt</Label>
@@ -272,33 +269,76 @@ export function MetadataSettings({ active }: { active: boolean }) {
         </div>
 
         <div className="space-y-4 rounded-md border p-4 bg-muted/10">
-          <h3 className="font-semibold text-sm">Provider Credentials</h3>
+          <div>
+            <h3 className="font-semibold text-lg flex items-center gap-2">
+              <Key className="w-5 h-5 text-primary" /> Provider Credentials
+            </h3>
+            <p className="text-xs text-muted-foreground mt-1">Configure your metadata generation provider credentials.</p>
+          </div>
           
-          <div className="space-y-2">
-            <Label>FLOW2API_GEMINI_API_KEYS</Label>
-            <Input className="font-mono text-sm" placeholder="AIzaSy..." value={geminiKeys} onChange={(e) => setGeminiKeys(e.target.value)} />
-          </div>
-          <div className="space-y-2">
-            <Label>FLOW2API_OPENAI_API_KEYS</Label>
-            <Input className="font-mono text-sm" placeholder="sk-proj-..." value={openaiKeys} onChange={(e) => setOpenaiKeys(e.target.value)} />
-          </div>
-          <div className="space-y-2">
-            <Label>FLOW2API_THIRD_PARTY_GEMINI_API_KEYS</Label>
-            <Input className="font-mono text-sm" value={thirdPartyKeys} onChange={(e) => setThirdPartyKeys(e.target.value)} />
-          </div>
-          <div className="space-y-2">
-            <Label>FLOW2API_THIRD_PARTY_GEMINI_BASE_URL</Label>
-            <Input className="font-mono text-sm" placeholder="https://..." value={thirdPartyBaseUrl} onChange={(e) => setThirdPartyBaseUrl(e.target.value)} />
-          </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div className="space-y-2">
-              <Label>CLOUDFLARE_ACCOUNT_ID</Label>
-              <Input className="font-mono text-sm" value={cloudflareAccountId} onChange={(e) => setCloudflareAccountId(e.target.value)} />
-            </div>
-            <div className="space-y-2">
-              <Label>CLOUDFLARE_API_TOKEN</Label>
-              <Input className="font-mono text-sm" value={cloudflareApiToken} onChange={(e) => setCloudflareApiToken(e.target.value)} />
-            </div>
+          <div className="rounded-md border bg-background overflow-hidden">
+            <Table>
+              <TableHeader>
+                <TableRow className="bg-muted/50 hover:bg-muted/50">
+                  <TableHead className="w-[200px]">Provider / Service</TableHead>
+                  <TableHead className="w-[380px]">Configuration Key</TableHead>
+                  <TableHead>Value / Token</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                <TableRow>
+                  <TableCell className="font-medium">Google Gemini</TableCell>
+                  <TableCell className="text-muted-foreground font-mono text-[11px]">FLOW2API_GEMINI_API_KEYS</TableCell>
+                  <TableCell>
+                    <Input className="font-mono text-xs h-8 bg-muted/20" placeholder="AIzaSy..." value={geminiKeys} onChange={(e) => setGeminiKeys(e.target.value)} />
+                  </TableCell>
+                </TableRow>
+                <TableRow>
+                  <TableCell className="font-medium">OpenAI</TableCell>
+                  <TableCell className="text-muted-foreground font-mono text-[11px]">FLOW2API_OPENAI_API_KEYS</TableCell>
+                  <TableCell>
+                    <Input className="font-mono text-xs h-8 bg-muted/20" placeholder="sk-proj-..." value={openaiKeys} onChange={(e) => setOpenaiKeys(e.target.value)} />
+                  </TableCell>
+                </TableRow>
+                <TableRow>
+                  <TableCell className="font-medium">Third-Party Gemini</TableCell>
+                  <TableCell className="text-muted-foreground font-mono text-[11px]">FLOW2API_THIRD_PARTY_GEMINI_API_KEYS</TableCell>
+                  <TableCell>
+                    <Input className="font-mono text-xs h-8 bg-muted/20" placeholder="Keys..." value={thirdPartyKeys} onChange={(e) => setThirdPartyKeys(e.target.value)} />
+                  </TableCell>
+                </TableRow>
+                <TableRow>
+                  <TableCell className="font-medium text-muted-foreground text-xs pl-8">↳ Base URL</TableCell>
+                  <TableCell className="text-muted-foreground font-mono text-[11px]">FLOW2API_THIRD_PARTY_GEMINI_BASE_URL</TableCell>
+                  <TableCell>
+                    <Input className="font-mono text-xs h-8 bg-muted/20" placeholder="https://..." value={thirdPartyBaseUrl} onChange={(e) => setThirdPartyBaseUrl(e.target.value)} />
+                  </TableCell>
+                </TableRow>
+                <TableRow>
+                  <TableCell className="font-medium">Cloudflare</TableCell>
+                  <TableCell className="text-muted-foreground font-mono text-[11px]">CLOUDFLARE_ACCOUNT_ID</TableCell>
+                  <TableCell>
+                    <Input className="font-mono text-xs h-8 bg-muted/20" placeholder="Account ID..." value={cloudflareAccountId} onChange={(e) => setCloudflareAccountId(e.target.value)} />
+                  </TableCell>
+                </TableRow>
+                <TableRow>
+                  <TableCell className="font-medium text-muted-foreground text-xs pl-8">↳ API Token</TableCell>
+                  <TableCell className="text-muted-foreground font-mono text-[11px]">CLOUDFLARE_API_TOKEN</TableCell>
+                  <TableCell>
+                    <Input className="font-mono text-xs h-8 bg-muted/20" placeholder="API Token..." value={cloudflareApiToken} onChange={(e) => setCloudflareApiToken(e.target.value)} />
+                  </TableCell>
+                </TableRow>
+                {backend === 'csvgen' && (
+                  <TableRow className="bg-primary/5">
+                    <TableCell className="font-medium text-primary">CSVGEN</TableCell>
+                    <TableCell className="text-muted-foreground font-mono text-[11px]">FLOW2API_CSVGEN_COOKIE</TableCell>
+                    <TableCell>
+                      <Input className="font-mono text-xs h-8 bg-muted/20" placeholder="Cookie string..." value={csvgenCookie} onChange={(e) => setCsvgenCookie(e.target.value)} />
+                    </TableCell>
+                  </TableRow>
+                )}
+              </TableBody>
+            </Table>
           </div>
         </div>
         
