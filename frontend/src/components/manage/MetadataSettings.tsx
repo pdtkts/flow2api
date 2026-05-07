@@ -43,7 +43,7 @@ export function MetadataSettings({ active }: { active: boolean }) {
   const [model, setModel] = useState("gemini-2.5-flash")
   const [enabledModels, setEnabledModels] = useState<string[]>(["gemini-2.5-flash"])
   const [primaryModel, setPrimaryModel] = useState("gemini-2.5-flash")
-  const [customModelInput, setCustomModelInput] = useState("")
+
   const [csvgenCookie, setCsvgenCookie] = useState("")
   const [systemPrompt, setSystemPrompt] = useState("")
   const [geminiKeys, setGeminiKeys] = useState("")
@@ -114,16 +114,7 @@ export function MetadataSettings({ active }: { active: boolean }) {
     })
   }
 
-  const addCustomModel = () => {
-    const value = customModelInput.trim()
-    if (!value) return
-    if (!enabledModels.includes(value)) setEnabledModels((prev) => [...prev, value])
-    if (!primaryModel) {
-      setPrimaryModel(value)
-      setModel(value)
-    }
-    setCustomModelInput("")
-  }
+
 
   const moveModel = (modelName: string, direction: -1 | 1) => {
     setEnabledModels((prev) => {
@@ -208,7 +199,7 @@ export function MetadataSettings({ active }: { active: boolean }) {
 
         {backend !== 'csvgen' && (
           <div className="space-y-2">
-            <Label>Metadata Models (preset + custom)</Label>
+            <Label>Metadata Models (preset)</Label>
             <div className="rounded-md border overflow-hidden">
               <div className="grid grid-cols-[1fr_90px_90px_110px] gap-2 border-b bg-muted/40 px-3 py-2 text-xs font-medium">
                 <span>Model</span>
@@ -252,15 +243,7 @@ export function MetadataSettings({ active }: { active: boolean }) {
                 })}
               </div>
             </div>
-            <div className="mt-3 flex gap-2 sm:w-[400px]">
-              <Input
-                placeholder="Custom model id"
-                className="font-mono text-sm"
-                value={customModelInput}
-                onChange={(e) => setCustomModelInput(e.target.value)}
-              />
-              <Button type="button" variant="secondary" onClick={addCustomModel}>Add Model</Button>
-            </div>
+
             <div className="mt-4 max-w-sm">
               <Label>Legacy FLOW2API_METADATA_MODEL</Label>
               <Input

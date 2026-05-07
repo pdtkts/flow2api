@@ -144,15 +144,7 @@ export function CloningSettings({ active }: { active: boolean }) {
               </SelectContent>
             </Select>
           </div>
-          <div className="mt-2">
-            <Label className="text-xs text-muted-foreground">Custom Model (if not in preset list)</Label>
-            <Input
-              className="mt-1 font-mono text-sm sm:w-[400px]"
-              value={model}
-              onChange={(e) => setModel(e.target.value)}
-              placeholder="e.g. gemini-2.5-flash"
-            />
-          </div>
+
         </div>
 
         <div className="space-y-4 rounded-md border p-4 bg-muted/10">
