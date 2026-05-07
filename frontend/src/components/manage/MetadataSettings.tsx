@@ -188,7 +188,13 @@ export function MetadataSettings({ active }: { active: boolean }) {
       <CardContent className="space-y-6">
         <div className="space-y-2">
           <Label>Default Metadata Backend</Label>
-          <Select value={backend} onValueChange={setBackend}>
+          <Select value={backend} onValueChange={(v) => {
+            setBackend(v)
+            const fallback = PRESET_MODELS[v]?.[0] || ""
+            setModel(fallback)
+            setPrimaryModel(fallback)
+            setEnabledModels(fallback ? [fallback] : [])
+          }}>
             <SelectTrigger className="w-full sm:w-[300px]">
               <SelectValue placeholder="Select backend" />
             </SelectTrigger>

@@ -117,9 +117,7 @@ export function CloningSettings({ active }: { active: boolean }) {
           <Select value={backend} onValueChange={(v) => {
             setBackend(v)
             const fallback = PRESET_MODELS[v]?.[0] || ""
-            if (!PRESET_MODELS[v]?.includes(model)) {
-              setModel(fallback)
-            }
+            setModel(fallback)
           }}>
             <SelectTrigger className="w-full sm:w-[300px]">
               <SelectValue placeholder="Select cloning backend" />
