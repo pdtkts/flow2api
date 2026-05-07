@@ -311,9 +311,6 @@ class CloningMetadataService:
             + '" for this image. Prefer metadata.series "cloning" and metadata.task "clone" when appropriate. '
             + "The scene, style, and related fields you output must describe original stock imagery in the spirit of that title and image-not a pixel-perfect or slavish recreation-so a generated image can be clearly distinct from the reference."
         )
-        custom = str(app_config.cloning_image_system_prompt or "").strip()
-        if custom:
-            return custom + "\n\n" + default_prompt
         return default_prompt
 
     def _build_video_instruction(self, image_clone_prompt: str, camera_motion: str, duration: str, negative_prompt: str, title: str) -> str:
@@ -334,9 +331,6 @@ class CloningMetadataService:
             + "\nReference image-clone JSON:\n"
             + image_clone_prompt
         )
-        custom = str(app_config.cloning_video_system_prompt or "").strip()
-        if custom:
-            return custom + "\n\n" + default_prompt
         return default_prompt
 
     def _build_metadata_prompt(self, metadata_settings: Dict[str, Any], dna_no_bg: bool) -> str:
@@ -423,9 +417,6 @@ class CloningMetadataService:
             + f"Where keywords is a JSON array of strings ({keyword_count}). {optional_instruction}\n\n"
             "REMINDER: Return ONLY the JSON object."
         )
-        custom = str(app_config.metadata_system_prompt or "").strip()
-        if custom:
-            return custom + "\n\n" + default_prompt
         return default_prompt
 
     async def generate_cloning_prompts(

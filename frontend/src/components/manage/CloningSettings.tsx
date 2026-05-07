@@ -11,13 +11,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from ".
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../ui/table"
 import { Key } from "lucide-react"
 
-const DEFAULT_CLONING_IMAGE_PROMPT = `You are an OCR + structured prompt generator.
-Read the image, extract visible text, and return ONLY valid JSON that follows the Nexus DNA schema.
-No markdown, no analysis text, no extra wrapper.`
 
-const DEFAULT_CLONING_VIDEO_PROMPT = `You are a structured JSON generator for Nexus DNA video cloning.
-Return one JSON object only, matching the same schema as the image cloning template.
-Optimize for temporal motion, timeline actions, and video continuity.`
 
 const PRESET_MODELS: Record<string, string[]> = {
   gemini_native: ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro", "gemini-1.5-flash", "gemini-1.5-pro"],
@@ -38,8 +32,7 @@ export function CloningSettings({ active }: { active: boolean }) {
   const [busy, setBusy] = useState(false)
   const [backend, setBackend] = useState("gemini_native")
   const [model, setModel] = useState("gemini-2.5-flash")
-  const [imagePrompt, setImagePrompt] = useState("")
-  const [videoPrompt, setVideoPrompt] = useState("")
+
 
   const [geminiKeys, setGeminiKeys] = useState("")
   const [openaiKeys, setOpenaiKeys] = useState("")
@@ -55,10 +48,7 @@ export function CloningSettings({ active }: { active: boolean }) {
     const c = resp.data.config
     setBackend(String(c.flow2api_cloning_backend || "gemini_native"))
     setModel(String(c.flow2api_cloning_model || "gemini-2.5-flash"))
-    const savedImagePrompt = String(c.cloning_image_system_prompt || "").trim()
-    const savedVideoPrompt = String(c.cloning_video_system_prompt || "").trim()
-    setImagePrompt(savedImagePrompt || DEFAULT_CLONING_IMAGE_PROMPT)
-    setVideoPrompt(savedVideoPrompt || DEFAULT_CLONING_VIDEO_PROMPT)
+
 
     setGeminiKeys(String(c.flow2api_cloning_gemini_api_keys || ""))
     setOpenaiKeys(String(c.flow2api_cloning_openai_api_keys || ""))
@@ -86,8 +76,7 @@ export function CloningSettings({ active }: { active: boolean }) {
         body: JSON.stringify({
           flow2api_cloning_backend: backend,
           flow2api_cloning_model: model,
-          cloning_image_system_prompt: imagePrompt,
-          cloning_video_system_prompt: videoPrompt,
+
           flow2api_cloning_gemini_api_keys: geminiKeys,
           flow2api_cloning_openai_api_keys: openaiKeys,
           flow2api_cloning_third_party_gemini_api_keys: thirdPartyKeys,
@@ -111,7 +100,7 @@ export function CloningSettings({ active }: { active: boolean }) {
     <Card>
       <CardHeader>
         <CardTitle>Cloning Settings</CardTitle>
-        <CardDescription>Configure cloning backend, model, credentials, and custom system prompts.</CardDescription>
+        <CardDescription>Configure cloning backend, model, and credentials.</CardDescription>
       </CardHeader>
       <CardContent className="space-y-6">
         <div className="space-y-2">
@@ -214,16 +203,7 @@ export function CloningSettings({ active }: { active: boolean }) {
           </div>
         </div>
 
-        <div className="space-y-2 mt-4">
-          <Label>Cloning Image System Prompt</Label>
-          <Textarea className="min-h-[180px] font-mono text-xs resize-y" value={imagePrompt} onChange={(e) => setImagePrompt(e.target.value)} />
-        </div>
-        
-        <div className="space-y-2">
-          <Label>Cloning Video System Prompt</Label>
-          <Textarea className="min-h-[180px] font-mono text-xs resize-y" value={videoPrompt} onChange={(e) => setVideoPrompt(e.target.value)} />
-        </div>
-        
+
         <Button onClick={save} disabled={busy} className="w-full sm:w-auto mt-4">Save cloning settings</Button>
       </CardContent>
     </Card>

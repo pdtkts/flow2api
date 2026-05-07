@@ -11,16 +11,6 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from ".
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../ui/table"
 import { Key } from "lucide-react"
 
-const DEFAULT_METADATA_PROMPT = `You are generating agency microstock metadata for exactly ONE image (attached).
-Return ONLY valid JSON with shape:
-{"metadataSets":[{"title":"...","keywords":["word1","word2"],"description":""}]}
-
-Rules:
-- Keep output factual and based only on visible image details.
-- No markdown fences, no commentary, no extra keys.
-- Use concise, searchable title and high-intent keywords.
-- If category is requested by client settings, include categoryId as integer.
-`
 
 const PRESET_MODELS: Record<string, string[]> = {
   gemini_native: ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro", "gemini-1.5-flash", "gemini-1.5-pro"],
@@ -47,7 +37,7 @@ export function MetadataSettings({ active }: { active: boolean }) {
   const [primaryModel, setPrimaryModel] = useState("gemini-2.5-flash")
 
   const [csvgenCookie, setCsvgenCookie] = useState("")
-  const [systemPrompt, setSystemPrompt] = useState("")
+
   const [geminiKeys, setGeminiKeys] = useState("")
   const [openaiKeys, setOpenaiKeys] = useState("")
   const [thirdPartyKeys, setThirdPartyKeys] = useState("")
@@ -78,8 +68,7 @@ export function MetadataSettings({ active }: { active: boolean }) {
     setPrimaryModel(primary)
     setModel(primary)
     setCsvgenCookie(String(c.flow2api_csvgen_cookie || ""))
-    const savedPrompt = String(c.metadata_system_prompt || "").trim()
-    setSystemPrompt(savedPrompt || DEFAULT_METADATA_PROMPT)
+
     setGeminiKeys(String(c.flow2api_gemini_api_keys || ""))
     setOpenaiKeys(String(c.flow2api_openai_api_keys || ""))
     setThirdPartyKeys(String(c.flow2api_third_party_gemini_api_keys || ""))
@@ -152,7 +141,7 @@ export function MetadataSettings({ active }: { active: boolean }) {
           flow2api_metadata_primary_model: primaryModel,
           flow2api_metadata_fallback_models: fallbackModels.join(","),
           flow2api_csvgen_cookie: csvgenCookie,
-          metadata_system_prompt: systemPrompt,
+
           flow2api_gemini_api_keys: geminiKeys,
           flow2api_openai_api_keys: openaiKeys,
           flow2api_third_party_gemini_api_keys: thirdPartyKeys,
@@ -176,7 +165,7 @@ export function MetadataSettings({ active }: { active: boolean }) {
     <Card>
       <CardHeader>
         <CardTitle>Metadata Settings</CardTitle>
-        <CardDescription>Configure metadata backend, model, credentials, and metadata system prompt.</CardDescription>
+        <CardDescription>Configure metadata backend, model, and credentials.</CardDescription>
       </CardHeader>
       <CardContent className="space-y-6">
         <div className="space-y-2">
@@ -263,10 +252,7 @@ export function MetadataSettings({ active }: { active: boolean }) {
 
 
 
-        <div className="space-y-2">
-          <Label>Metadata System Prompt</Label>
-          <Textarea className="min-h-[160px] font-mono text-xs resize-y" value={systemPrompt} onChange={(e) => setSystemPrompt(e.target.value)} />
-        </div>
+
 
         <div className="space-y-4 rounded-md border p-4 bg-muted/10">
           <div>
