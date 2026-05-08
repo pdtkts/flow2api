@@ -76,10 +76,10 @@ export function MetadataSettings({ active }: { active: boolean }) {
       .map((x) => x.trim())
       .filter(Boolean)
       .filter((x) => normalizedOrder.includes(x))
-    const normalizedEnabled = enabledFromConfig.length ? enabledFromConfig : [legacyBackend]
-    const selectedProvider = normalizedOrder.find((p) => normalizedEnabled.includes(p)) || normalizedOrder[0] || "gemini_native"
+    const normalizedEnabledProviders = enabledFromConfig.length ? enabledFromConfig : [legacyBackend]
+    const selectedProvider = normalizedOrder.find((p) => normalizedEnabledProviders.includes(p)) || normalizedOrder[0] || "gemini_native"
     setProviderOrder(normalizedOrder)
-    setEnabledProviders(normalizedEnabled)
+    setEnabledProviders(normalizedEnabledProviders)
     setProviderRetryCount(
       Math.max(0, Math.min(5, Number(c.flow2api_metadata_provider_retry_count ?? 1) || 1))
     )
