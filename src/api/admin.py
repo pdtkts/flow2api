@@ -21,7 +21,7 @@ from curl_cffi.requests import AsyncSession
 from ..core.auth import AuthManager
 from ..core.api_key_manager import ApiKeyManager
 from ..core.database import Database
-from ..core.config import config
+from ..core.config import config, get_yescaptcha_min_score, normalize_yescaptcha_task_type
 from ..core.models import GenerationConfig
 from ..core.monitoring import build_public_health_snapshot
 from ..services.token_manager import TokenManager
@@ -364,19 +364,23 @@ async def _solve_recaptcha_with_api_service(
     if method == "yescaptcha":
         client_key = config.yescaptcha_api_key
         base_url = config.yescaptcha_base_url
-        task_type = "RecaptchaV3TaskProxylessM1"
+        task_type = config.yescaptcha_task_type
+        min_score = get_yescaptcha_min_score(task_type)
     elif method == "capmonster":
         client_key = config.capmonster_api_key
         base_url = config.capmonster_base_url
         task_type = "RecaptchaV3TaskProxyless"
+        min_score = None
     elif method == "ezcaptcha":
         client_key = config.ezcaptcha_api_key
         base_url = config.ezcaptcha_base_url
         task_type = "ReCaptchaV3TaskProxylessS9"
+        min_score = None
     elif method == "capsolver":
         client_key = config.capsolver_api_key
         base_url = config.capsolver_base_url
         task_type = "ReCaptchaV3EnterpriseTaskProxyLess" if enterprise else "ReCaptchaV3TaskProxyLess"
+        min_score = None
     else:
         raise RuntimeError(f"不支持的打码方式: {method}")
 
@@ -389,6 +393,8 @@ async def _solve_recaptcha_with_api_service(
         "type": task_type,
         "pageAction": action,
     }
+    if min_score is not None:
+        task["minScore"] = min_score
 
     if enterprise and method == "capsolver":
         task["isEnterprise"] = True
@@ -2707,6 +2713,7 @@ async def update_captcha_config(
     captcha_method = request.get("captcha_method")
     yescaptcha_api_key = request.get("yescaptcha_api_key")
     yescaptcha_base_url = request.get("yescaptcha_base_url")
+    yescaptcha_task_type = normalize_yescaptcha_task_type(request.get("yescaptcha_task_type"))
     capmonster_api_key = request.get("capmonster_api_key")
     capmonster_base_url = request.get("capmonster_base_url")
     ezcaptcha_api_key = request.get("ezcaptcha_api_key")
@@ -2810,6 +2817,7 @@ async def update_captcha_config(
         captcha_method=captcha_method,
         yescaptcha_api_key=yescaptcha_api_key,
         yescaptcha_base_url=yescaptcha_base_url,
+        yescaptcha_task_type=yescaptcha_task_type,
         capmonster_api_key=capmonster_api_key,
         capmonster_base_url=capmonster_base_url,
         ezcaptcha_api_key=ezcaptcha_api_key,
@@ -2887,6 +2895,7 @@ async def get_captcha_config(token: str = Depends(verify_admin_token)):
         "captcha_method": captcha_config.captcha_method,
         "yescaptcha_api_key": captcha_config.yescaptcha_api_key,
         "yescaptcha_base_url": captcha_config.yescaptcha_base_url,
+        "yescaptcha_task_type": captcha_config.yescaptcha_task_type,
         "capmonster_api_key": captcha_config.capmonster_api_key,
         "capmonster_base_url": captcha_config.capmonster_base_url,
         "ezcaptcha_api_key": captcha_config.ezcaptcha_api_key,

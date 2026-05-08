@@ -14,7 +14,7 @@ import urllib.error
 import urllib.request
 from curl_cffi.requests import AsyncSession
 from ..core.logger import debug_logger
-from ..core.config import config
+from ..core.config import config, get_yescaptcha_min_score
 from .extension_generation_service import ExtensionGenerationService
 
 try:
@@ -3600,19 +3600,23 @@ class FlowClient:
         if method == "yescaptcha":
             client_key = config.yescaptcha_api_key
             base_url = config.yescaptcha_base_url
-            task_type = "RecaptchaV3TaskProxylessM1"
+            task_type = config.yescaptcha_task_type
+            min_score = get_yescaptcha_min_score(task_type)
         elif method == "capmonster":
             client_key = config.capmonster_api_key
             base_url = config.capmonster_base_url
             task_type = "RecaptchaV3TaskProxyless"
+            min_score = None
         elif method == "ezcaptcha":
             client_key = config.ezcaptcha_api_key
             base_url = config.ezcaptcha_base_url
             task_type = "ReCaptchaV3TaskProxylessS9"
+            min_score = None
         elif method == "capsolver":
             client_key = config.capsolver_api_key
             base_url = config.capsolver_base_url
             task_type = "ReCaptchaV3EnterpriseTaskProxyLess"
+            min_score = None
         else:
             debug_logger.log_error(f"[reCAPTCHA] Unknown API method: {method}")
             debug_logger.log_recaptcha_browser_error(f"unknown API method: {method}", {"success": False})
@@ -3655,6 +3659,8 @@ class FlowClient:
                         "pageAction": page_action
                     }
                 }
+                if method == "yescaptcha" and min_score is not None:
+                    create_data["task"]["minScore"] = min_score
 
                 if proxy:
                     result = await session.post(create_url, json=create_data, impersonate="chrome124", proxy=proxy)

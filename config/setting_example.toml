@@ -83,6 +83,7 @@ extension_queue_wait_timeout_seconds = 20  # extension 模式按 managed key 排
 # --- 第三方 API 打码（仅当 captcha_method 设为对应服务时需要填写）---
 yescaptcha_api_key = ""  # YesCaptcha API密钥
 yescaptcha_base_url = "https://api.yescaptcha.com"
+yescaptcha_task_type = "RecaptchaV3TaskProxylessM1"  # 可选: RecaptchaV3TaskProxyless/RecaptchaV3TaskProxylessM1/RecaptchaV3TaskProxylessM1S7/RecaptchaV3TaskProxylessM1S9
 capmonster_api_key = ""
 capmonster_base_url = "https://api.capmonster.cloud"
 ezcaptcha_api_key = ""

@@ -23,6 +23,7 @@ type CaptchaForm = {
   captcha_method: string
   yescaptcha_api_key: string
   yescaptcha_base_url: string
+  yescaptcha_task_type: string
   capmonster_api_key: string
   capmonster_base_url: string
   ezcaptcha_api_key: string
@@ -67,6 +68,7 @@ const defaultCaptcha: CaptchaForm = {
   captcha_method: "yescaptcha",
   yescaptcha_api_key: "",
   yescaptcha_base_url: "https://api.yescaptcha.com",
+  yescaptcha_task_type: "RecaptchaV3TaskProxylessM1",
   capmonster_api_key: "",
   capmonster_base_url: "https://api.capmonster.cloud",
   ezcaptcha_api_key: "",
@@ -246,6 +248,7 @@ export function SystemSettings({ active }: { active: boolean }) {
         captcha_method: String(raw.captcha_method || "yescaptcha"),
         yescaptcha_api_key: String(raw.yescaptcha_api_key ?? ""),
         yescaptcha_base_url: String(raw.yescaptcha_base_url || defaultCaptcha.yescaptcha_base_url),
+        yescaptcha_task_type: String(raw.yescaptcha_task_type || defaultCaptcha.yescaptcha_task_type),
         capmonster_api_key: String(raw.capmonster_api_key ?? ""),
         capmonster_base_url: String(raw.capmonster_base_url || defaultCaptcha.capmonster_base_url),
         ezcaptcha_api_key: String(raw.ezcaptcha_api_key ?? ""),
@@ -554,6 +557,7 @@ export function SystemSettings({ active }: { active: boolean }) {
           captcha_method: method,
           yescaptcha_api_key: captcha.yescaptcha_api_key.trim(),
           yescaptcha_base_url: captcha.yescaptcha_base_url.trim(),
+          yescaptcha_task_type: captcha.yescaptcha_task_type,
           capmonster_api_key: captcha.capmonster_api_key.trim(),
           capmonster_base_url: captcha.capmonster_base_url.trim(),
           ezcaptcha_api_key: captcha.ezcaptcha_api_key.trim(),
@@ -1030,6 +1034,24 @@ export function SystemSettings({ active }: { active: boolean }) {
               <Input value={captcha.yescaptcha_api_key} onChange={(e) => setCaptcha((c) => ({ ...c, yescaptcha_api_key: e.target.value }))} />
               <Label>Base URL</Label>
               <Input value={captcha.yescaptcha_base_url} onChange={(e) => setCaptcha((c) => ({ ...c, yescaptcha_base_url: e.target.value }))} />
+              <Label>YesCaptcha task type</Label>
+              <Select
+                value={captcha.yescaptcha_task_type}
+                onValueChange={(v) => setCaptcha((c) => ({ ...c, yescaptcha_task_type: v }))}
+              >
+                <SelectTrigger>
+                  <SelectValue placeholder="Task type" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="RecaptchaV3TaskProxyless">RecaptchaV3TaskProxyless — 20 points</SelectItem>
+                  <SelectItem value="RecaptchaV3TaskProxylessM1">RecaptchaV3TaskProxylessM1 — 25 points</SelectItem>
+                  <SelectItem value="RecaptchaV3TaskProxylessM1S7">RecaptchaV3TaskProxylessM1S7 — 30 points (minScore 0.7)</SelectItem>
+                  <SelectItem value="RecaptchaV3TaskProxylessM1S9">RecaptchaV3TaskProxylessM1S9 — 35 points (minScore 0.9)</SelectItem>
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                S7/S9 send <code className="text-xs">minScore</code> 0.7 / 0.9 on createTask.
+              </p>
             </div>
           )}
           {m === "capmonster" && (
