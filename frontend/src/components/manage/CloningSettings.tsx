@@ -46,7 +46,7 @@ export function CloningSettings({ active }: { active: boolean }) {
     const resp = await adminJson<{ success?: boolean; config?: Record<string, unknown> }>("/api/config/generation", token)
     if (!resp.ok || !resp.data?.success || !resp.data.config) return
     const c = resp.data.config
-    const backendStr = String(c.flow2api_cloning_backend || "gemini_native")
+    const backendStr = String(c.flow2api_cloning_backend || "gemini_native").trim() || "gemini_native"
     const presets = PRESET_MODELS[backendStr] || []
     let modelStr = String(c.flow2api_cloning_model || "").trim()
     if (presets.length && modelStr && !presets.includes(modelStr)) {
@@ -66,7 +66,13 @@ export function CloningSettings({ active }: { active: boolean }) {
     setCloudflareApiToken(String(c.flow2api_cloning_cloudflare_api_token || ""))
   }, [token, active])
 
-  const backendModels = useMemo(() => PRESET_MODELS[backend] || [], [backend])
+  /** Include the persisted model so Radix Select never gets a value missing from items (fixes blank dropdown after load). */
+  const backendModels = useMemo(() => {
+    const base = [...(PRESET_MODELS[backend] || [])]
+    const cur = model.trim()
+    if (cur && !base.includes(cur)) base.unshift(cur)
+    return base
+  }, [backend, model])
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -159,11 +165,14 @@ export function CloningSettings({ active }: { active: boolean }) {
         >
         <div className="space-y-2">
           <Label>Cloning Backend</Label>
-          <Select value={backend} onValueChange={(v) => {
-            setBackend(v)
-            const fallback = PRESET_MODELS[v]?.[0] || ""
-            setModel(fallback)
-          }}>
+          <Select
+            value={backend}
+            onValueChange={(v) => {
+              setBackend(v)
+              const fallback = PRESET_MODELS[v]?.[0] || ""
+              setModel(fallback)
+            }}
+          >
             <SelectTrigger className="w-full sm:w-[300px]">
               <SelectValue placeholder="Select cloning backend" />
             </SelectTrigger>
@@ -178,7 +187,11 @@ export function CloningSettings({ active }: { active: boolean }) {
         <div className="space-y-2">
           <Label>Cloning Model</Label>
           <div className="flex gap-2 w-full sm:w-[400px]">
-            <Select value={model} onValueChange={setModel}>
+            <Select
+              key={`${backend}:${model}`}
+              value={model}
+              onValueChange={setModel}
+            >
               <SelectTrigger className="w-full">
                 <SelectValue placeholder="Select model" />
               </SelectTrigger>
