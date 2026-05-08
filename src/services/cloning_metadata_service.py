@@ -313,9 +313,11 @@ class CloningMetadataService:
         if use_cloning_credentials:
             c_aid = str(app_config.flow2api_cloning_cloudflare_account_id or "").strip()
             c_tok = str(app_config.flow2api_cloning_cloudflare_api_token or "").strip()
-            if c_aid or c_tok:
-                account_id = c_aid or account_id
-                api_token = c_tok or api_token
+            # Only override when BOTH cloning fields are set; otherwise use main credentials (partial
+            # cloning values used to mix placeholder IDs with real tokens and broke Workers AI calls).
+            if c_aid and c_tok:
+                account_id = c_aid
+                api_token = c_tok
         if not account_id or not api_token:
             raise HTTPException(status_code=503, detail="Cloudflare Workers AI is not configured")
         content: Any = prompt_text
@@ -334,8 +336,17 @@ class CloningMetadataService:
                 timeout=120,
             )
             if resp.status_code >= 400:
-                raise HTTPException(status_code=500, detail="Cloudflare request failed")
+                snippet = (resp.text or "").replace("\r\n", "\n").strip()
+                if len(snippet) > 1200:
+                    snippet = snippet[:1200] + "…"
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Cloudflare Workers AI HTTP {resp.status_code}: {snippet or '(empty body)'}",
+                )
             data = resp.json()
+            if isinstance(data, dict) and data.get("success") is False:
+                snippet = str(data.get("errors") or data)[:1200]
+                raise HTTPException(status_code=502, detail=f"Cloudflare API error: {snippet}")
             text = (((data or {}).get("result") or {}).get("response") or "")
             if not text:
                 text = (((data or {}).get("choices") or [{}])[0].get("message") or {}).get("content") or "{}"
