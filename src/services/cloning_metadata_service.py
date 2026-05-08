@@ -320,13 +320,15 @@ class CloningMetadataService:
                 api_token = c_tok
         if not account_id or not api_token:
             raise HTTPException(status_code=503, detail="Cloudflare Workers AI is not configured")
-        content: Any = prompt_text
+        # Workers AI rejects string user.content; use OpenAI-style parts array (same as vision path).
         if image_bytes:
             b64 = base64.b64encode(image_bytes).decode("ascii")
-            content = [
+            content: Any = [
                 {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{b64}"}},
                 {"type": "text", "text": prompt_text},
             ]
+        else:
+            content = [{"type": "text", "text": prompt_text}]
         url = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1/chat/completions"
         async with AsyncSession() as session:
             resp = await session.post(
