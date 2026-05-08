@@ -3379,12 +3379,32 @@ class FlowClient:
                 debug_logger.log_info(f"[reCAPTCHA] 导入 BrowserCaptchaService 成功")
                 service = await BrowserCaptchaService.get_instance(self.db)
                 debug_logger.log_info(f"[reCAPTCHA] 获取服务实例成功，准备调用 get_token")
-                token = await service.get_token(project_id, action)
+                token = None
+                metadata = {}
+                get_token_with_metadata = getattr(service, "get_token_with_metadata", None)
+                if callable(get_token_with_metadata):
+                    result = await get_token_with_metadata(project_id, action)
+                    if isinstance(result, tuple):
+                        if len(result) >= 1:
+                            token = result[0]
+                        if len(result) >= 2 and isinstance(result[1], dict):
+                            metadata = result[1]
+                    elif isinstance(result, dict):
+                        metadata = result
+                        token = result.get("token")
+                    else:
+                        token = result
+                else:
+                    token = await service.get_token(project_id, action)
                 meta = debug_logger.format_recaptcha_token_meta(token)
                 debug_logger.log_info(f"[reCAPTCHA] get_token 返回: {meta}")
                 print(f"[DEBUG-DEEP] personal token obtained: {bool(token)}, token_prefix={str(token)[:40] if token else 'None'}")
                 print(f"[DEBUG-DEEP] personal fingerprint: {service.get_last_fingerprint()}")
-                fingerprint = service.get_last_fingerprint() if token else None
+                fingerprint = (
+                    metadata.get("fingerprint")
+                    if isinstance(metadata, dict)
+                    else None
+                ) or (service.get_last_fingerprint() if token else None)
                 self._set_request_fingerprint(fingerprint if token else None)
                 if token:
                     debug_logger.log_recaptcha_token_success(token)

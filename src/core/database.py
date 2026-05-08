@@ -259,6 +259,7 @@ class Database:
             remote_browser_timeout = 60
             browser_fallback_to_remote_browser = True
             browser_count = 1
+            browser_personal_fresh_restart_every_n_solves = 10
             personal_project_pool_size = 4
             personal_max_resident_tabs = 5
             personal_idle_tab_ttl_seconds = 600
@@ -294,6 +295,10 @@ class Database:
                     True,
                 )
                 browser_count = captcha_config.get("browser_count", 1)
+                browser_personal_fresh_restart_every_n_solves = captcha_config.get(
+                    "browser_personal_fresh_restart_every_n_solves",
+                    10,
+                )
                 personal_project_pool_size = captcha_config.get("personal_project_pool_size", 4)
                 personal_max_resident_tabs = captcha_config.get("personal_max_resident_tabs", 5)
                 personal_idle_tab_ttl_seconds = captcha_config.get("personal_idle_tab_ttl_seconds", 600)
@@ -338,6 +343,13 @@ class Database:
             except Exception:
                 browser_count = 1
             try:
+                browser_personal_fresh_restart_every_n_solves = max(
+                    0,
+                    int(browser_personal_fresh_restart_every_n_solves),
+                )
+            except Exception:
+                browser_personal_fresh_restart_every_n_solves = 10
+            try:
                 personal_project_pool_size = max(1, min(50, int(personal_project_pool_size)))
             except Exception:
                 personal_project_pool_size = 4
@@ -356,7 +368,7 @@ class Database:
                     yescaptcha_task_type,
                     remote_browser_base_url, remote_browser_api_key, remote_browser_timeout,
                     browser_fallback_to_remote_browser,
-                    browser_count, personal_project_pool_size,
+                    browser_count, browser_personal_fresh_restart_every_n_solves, personal_project_pool_size,
                     personal_max_resident_tabs, personal_idle_tab_ttl_seconds,
                     session_refresh_enabled, session_refresh_browser_first, session_refresh_inject_st_cookie,
                     session_refresh_warmup_urls, session_refresh_wait_seconds_per_url,
@@ -368,7 +380,7 @@ class Database:
                     dedicated_extension_enabled, dedicated_extension_captcha_timeout_seconds,
                     dedicated_extension_st_refresh_timeout_seconds
                 )
-                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 captcha_method,
                 yescaptcha_api_key,
@@ -379,6 +391,7 @@ class Database:
                 remote_browser_timeout,
                 bool(browser_fallback_to_remote_browser),
                 browser_count,
+                browser_personal_fresh_restart_every_n_solves,
                 personal_project_pool_size,
                 personal_max_resident_tabs,
                 personal_idle_tab_ttl_seconds,
@@ -795,6 +808,7 @@ class Database:
                     ("capsolver_api_key", "TEXT DEFAULT ''"),
                     ("capsolver_base_url", "TEXT DEFAULT 'https://api.capsolver.com'"),
                     ("browser_count", "INTEGER DEFAULT 1"),
+                    ("browser_personal_fresh_restart_every_n_solves", "INTEGER DEFAULT 10"),
                     ("remote_browser_base_url", "TEXT DEFAULT ''"),
                     ("remote_browser_api_key", "TEXT DEFAULT ''"),
                     ("remote_browser_timeout", "INTEGER DEFAULT 60"),
@@ -1196,6 +1210,7 @@ class Database:
                     browser_proxy_enabled BOOLEAN DEFAULT 0,
                     browser_proxy_url TEXT,
                     browser_count INTEGER DEFAULT 1,
+                    browser_personal_fresh_restart_every_n_solves INTEGER DEFAULT 10,
                     personal_project_pool_size INTEGER DEFAULT 4,
                     personal_max_resident_tabs INTEGER DEFAULT 5,
                     personal_idle_tab_ttl_seconds INTEGER DEFAULT 600,
@@ -3333,6 +3348,10 @@ class Database:
             config.set_browser_fallback_to_remote_browser(
                 bool(getattr(captcha_config, "browser_fallback_to_remote_browser", True))
             )
+            config.set_browser_count(int(getattr(captcha_config, "browser_count", 1) or 1))
+            config.set_browser_personal_fresh_restart_every_n_solves(
+                int(getattr(captcha_config, "browser_personal_fresh_restart_every_n_solves", 10) or 10)
+            )
             config.set_personal_project_pool_size(captcha_config.personal_project_pool_size)
             config.set_personal_max_resident_tabs(captcha_config.personal_max_resident_tabs)
             config.set_personal_idle_tab_ttl_seconds(captcha_config.personal_idle_tab_ttl_seconds)
@@ -3525,6 +3544,7 @@ class Database:
         browser_proxy_enabled: bool = None,
         browser_proxy_url: str = None,
         browser_count: int = None,
+        browser_personal_fresh_restart_every_n_solves: int = None,
         personal_project_pool_size: int = None,
         personal_max_resident_tabs: int = None,
         personal_idle_tab_ttl_seconds: int = None,
@@ -3583,6 +3603,11 @@ class Database:
                 new_proxy_enabled = browser_proxy_enabled if browser_proxy_enabled is not None else current.get("browser_proxy_enabled", False)
                 new_proxy_url = browser_proxy_url if browser_proxy_url is not None else current.get("browser_proxy_url")
                 new_browser_count = browser_count if browser_count is not None else current.get("browser_count", 1)
+                new_browser_personal_fresh_restart_every_n_solves = (
+                    browser_personal_fresh_restart_every_n_solves
+                    if browser_personal_fresh_restart_every_n_solves is not None
+                    else current.get("browser_personal_fresh_restart_every_n_solves", 10)
+                )
                 new_personal_project_pool_size = personal_project_pool_size if personal_project_pool_size is not None else current.get("personal_project_pool_size", 4)
                 new_personal_max_tabs = personal_max_resident_tabs if personal_max_resident_tabs is not None else current.get("personal_max_resident_tabs", 5)
                 new_personal_idle_ttl = personal_idle_tab_ttl_seconds if personal_idle_tab_ttl_seconds is not None else current.get("personal_idle_tab_ttl_seconds", 600)
@@ -3702,6 +3727,11 @@ class Database:
                     else current.get("dedicated_extension_st_refresh_timeout_seconds", 45)
                 )
                 new_remote_timeout = max(5, int(new_remote_timeout)) if new_remote_timeout is not None else 60
+                new_browser_count = max(1, min(20, int(new_browser_count)))
+                new_browser_personal_fresh_restart_every_n_solves = max(
+                    0,
+                    int(new_browser_personal_fresh_restart_every_n_solves),
+                )
                 new_personal_project_pool_size = max(1, min(50, int(new_personal_project_pool_size)))
                 new_personal_max_tabs = max(1, min(50, int(new_personal_max_tabs)))  # 限制1-50
                 new_personal_idle_ttl = max(60, int(new_personal_idle_ttl))  # 最少60秒
@@ -3750,6 +3780,7 @@ class Database:
                         remote_browser_base_url = ?, remote_browser_api_key = ?, remote_browser_timeout = ?,
                         browser_fallback_to_remote_browser = ?,
                         browser_proxy_enabled = ?, browser_proxy_url = ?, browser_count = ?,
+                        browser_personal_fresh_restart_every_n_solves = ?,
                         personal_project_pool_size = ?,
                         personal_max_resident_tabs = ?, personal_idle_tab_ttl_seconds = ?,
                         browser_captcha_page_url = ?,
@@ -3776,7 +3807,8 @@ class Database:
                       new_ez_key, new_ez_url, new_cs_key, new_cs_url,
                       (new_remote_base_url or "").strip(), (new_remote_api_key or "").strip(), new_remote_timeout,
                       bool(new_browser_fallback),
-                      new_proxy_enabled, new_proxy_url, new_browser_count, new_personal_project_pool_size,
+                      new_proxy_enabled, new_proxy_url, new_browser_count,
+                      new_browser_personal_fresh_restart_every_n_solves, new_personal_project_pool_size,
                       new_personal_max_tabs, new_personal_idle_ttl, new_browser_captcha_page_url,
                       bool(new_session_refresh_enabled), bool(new_session_refresh_browser_first),
                       bool(new_session_refresh_inject_st_cookie), new_session_refresh_warmup_urls,
@@ -3817,6 +3849,11 @@ class Database:
                 new_proxy_enabled = browser_proxy_enabled if browser_proxy_enabled is not None else False
                 new_proxy_url = browser_proxy_url
                 new_browser_count = browser_count if browser_count is not None else 1
+                new_browser_personal_fresh_restart_every_n_solves = (
+                    browser_personal_fresh_restart_every_n_solves
+                    if browser_personal_fresh_restart_every_n_solves is not None
+                    else 10
+                )
                 new_personal_project_pool_size = personal_project_pool_size if personal_project_pool_size is not None else 4
                 new_personal_max_tabs = personal_max_resident_tabs if personal_max_resident_tabs is not None else 5
                 new_personal_idle_ttl = personal_idle_tab_ttl_seconds if personal_idle_tab_ttl_seconds is not None else 600
@@ -3828,6 +3865,11 @@ class Database:
                 )
                 new_browser_captcha_page_url = new_browser_captcha_page_url or default_page_url
                 new_remote_timeout = max(5, int(new_remote_timeout))
+                new_browser_count = max(1, min(20, int(new_browser_count)))
+                new_browser_personal_fresh_restart_every_n_solves = max(
+                    0,
+                    int(new_browser_personal_fresh_restart_every_n_solves),
+                )
                 new_personal_project_pool_size = max(1, min(50, int(new_personal_project_pool_size)))
                 new_personal_max_tabs = max(1, min(50, int(new_personal_max_tabs)))
                 new_personal_idle_ttl = max(60, int(new_personal_idle_ttl))
@@ -3950,6 +3992,7 @@ class Database:
                         remote_browser_base_url, remote_browser_api_key, remote_browser_timeout,
                         browser_fallback_to_remote_browser,
                         browser_proxy_enabled, browser_proxy_url, browser_count,
+                        browser_personal_fresh_restart_every_n_solves,
                         personal_project_pool_size,
                         personal_max_resident_tabs, personal_idle_tab_ttl_seconds,
                         browser_captcha_page_url,
@@ -3968,12 +4011,13 @@ class Database:
                         dedicated_extension_enabled, dedicated_extension_captcha_timeout_seconds,
                         dedicated_extension_st_refresh_timeout_seconds,
                         extension_fallback_to_managed_on_dedicated_failure)
-                    VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (new_method, new_yes_key, new_yes_url, new_yes_task_type, new_cap_key, new_cap_url,
                       new_ez_key, new_ez_url, new_cs_key, new_cs_url,
                       (new_remote_base_url or "").strip(), (new_remote_api_key or "").strip(), new_remote_timeout,
                       new_browser_fallback,
-                      new_proxy_enabled, new_proxy_url, new_browser_count, new_personal_project_pool_size,
+                      new_proxy_enabled, new_proxy_url, new_browser_count,
+                      new_browser_personal_fresh_restart_every_n_solves, new_personal_project_pool_size,
                       new_personal_max_tabs, new_personal_idle_ttl, new_browser_captcha_page_url,
                       new_session_refresh_enabled, new_session_refresh_browser_first,
                       new_session_refresh_inject_st_cookie, new_session_refresh_warmup_urls,

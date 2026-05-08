@@ -1416,6 +1416,7 @@ class BrowserCaptchaService:
         self._resident_error_streaks: dict[str, int] = {}
         self._resident_unavailable_slots: set[str] = set()
         self._resident_warmup_task: Optional[asyncio.Task] = None
+        self._fresh_profile_restart_task: Optional[asyncio.Task] = None
         self._resident_rebuild_tasks: dict[str, asyncio.Task] = {}
         self._resident_recovery_tasks: dict[str, asyncio.Task] = {}
         self._last_runtime_restart_at = 0.0
@@ -2015,6 +2016,39 @@ class BrowserCaptchaService:
             if restarted:
                 self._mark_runtime_restart()
             return restarted
+
+    def _schedule_pending_fresh_profile_restart(
+        self,
+        project_id: str,
+        token_id: Optional[int] = None,
+        *,
+        source: str,
+    ) -> None:
+        if not self._fresh_profile_restart_pending:
+            return
+        existing_task = getattr(self, "_fresh_profile_restart_task", None)
+        if existing_task is not None and not existing_task.done():
+            return
+
+        async def _runner():
+            try:
+                await self._maybe_execute_pending_fresh_profile_restart(
+                    project_id,
+                    token_id=token_id,
+                    source=source,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                debug_logger.log_warning(
+                    f"[BrowserCaptcha] fresh profile 后台重启任务失败 (project_id={project_id}, source={source}): {e}"
+                )
+            finally:
+                current = asyncio.current_task()
+                if getattr(self, "_fresh_profile_restart_task", None) is current:
+                    self._fresh_profile_restart_task = None
+
+        self._fresh_profile_restart_task = asyncio.create_task(_runner())
 
     def _requires_virtual_display(self) -> bool:
         """仅在显式有头模式下要求 Docker/Linux 提供 DISPLAY/虚拟显示。"""
@@ -6521,8 +6555,11 @@ class BrowserCaptchaService:
         async with self._resident_lock:
             candidate_tasks = []
             resident_warmup_task = getattr(self, "_resident_warmup_task", None)
+            fresh_restart_task = getattr(self, "_fresh_profile_restart_task", None)
             if resident_warmup_task is not None:
                 candidate_tasks.append(resident_warmup_task)
+            if fresh_restart_task is not None:
+                candidate_tasks.append(fresh_restart_task)
             candidate_tasks.extend(self._resident_rebuild_tasks.values())
             candidate_tasks.extend(self._resident_recovery_tasks.values())
 
@@ -6534,6 +6571,7 @@ class BrowserCaptchaService:
             self._resident_rebuild_tasks.clear()
             self._resident_recovery_tasks.clear()
             self._resident_warmup_task = None
+            self._fresh_profile_restart_task = None
 
         if not tasks_to_cancel:
             return
@@ -8784,6 +8822,11 @@ class BrowserCaptchaService:
             f"browser_solve_count={browser_solve_count}"
             "）"
         )
+        self._schedule_pending_fresh_profile_restart(
+            project_id,
+            token_id=resident_info.token_id,
+            source="resident_solve_success",
+        )
         return token
 
     # ========== 主要 API ==========
@@ -8824,12 +8867,6 @@ class BrowserCaptchaService:
             f"[BrowserCaptcha] get_token 开始: project_id={project_id}, token_id={token_id}, action={action}, 当前标签页数={len(self._resident_tabs)}/{self._max_resident_tabs}"
         )
         self._mark_runtime_active()
-
-        await self._maybe_execute_pending_fresh_profile_restart(
-            project_id,
-            token_id=token_id,
-            source="get_token",
-        )
 
         # 确保浏览器已初始化
         await self.initialize()
@@ -9367,11 +9404,6 @@ class BrowserCaptchaService:
             reCAPTCHA token字符串，如果获取失败返回None
         """
         max_attempts = 2
-        await self._maybe_execute_pending_fresh_profile_restart(
-            project_id,
-            token_id=token_id,
-            source="legacy_get_token",
-        )
         async with self._legacy_lock:
             for attempt in range(max_attempts):
                 if not self._initialized or not self.browser:
@@ -9437,6 +9469,11 @@ class BrowserCaptchaService:
                         debug_logger.log_info(
                             "[BrowserCaptcha] [Legacy] ✅ Token获取成功"
                             f"（耗时 {duration_ms:.0f}ms, browser_solve_count={browser_solve_count}）"
+                        )
+                        self._schedule_pending_fresh_profile_restart(
+                            project_id,
+                            token_id=token_id,
+                            source="legacy_solve_success",
                         )
                         return token
 

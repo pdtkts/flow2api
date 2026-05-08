@@ -38,6 +38,7 @@ type CaptchaForm = {
   browser_proxy_enabled: boolean
   browser_proxy_url: string
   browser_count: number
+  browser_personal_fresh_restart_every_n_solves: number
   personal_project_pool_size: number
   personal_max_resident_tabs: number
   personal_idle_tab_ttl_seconds: number
@@ -83,6 +84,7 @@ const defaultCaptcha: CaptchaForm = {
   browser_proxy_enabled: false,
   browser_proxy_url: "",
   browser_count: 1,
+  browser_personal_fresh_restart_every_n_solves: 10,
   personal_project_pool_size: 4,
   personal_max_resident_tabs: 5,
   personal_idle_tab_ttl_seconds: 600,
@@ -265,6 +267,10 @@ export function SystemSettings({ active }: { active: boolean }) {
         browser_proxy_enabled: !!raw.browser_proxy_enabled,
         browser_proxy_url: String(raw.browser_proxy_url ?? ""),
         browser_count: Math.max(1, Number(raw.browser_count ?? 1)),
+        browser_personal_fresh_restart_every_n_solves: Math.max(
+          0,
+          Number(raw.browser_personal_fresh_restart_every_n_solves ?? 10)
+        ),
         personal_project_pool_size: Number(raw.personal_project_pool_size ?? 4),
         personal_max_resident_tabs: Number(raw.personal_max_resident_tabs ?? 5),
         personal_idle_tab_ttl_seconds: Number(raw.personal_idle_tab_ttl_seconds ?? 600),
@@ -572,6 +578,8 @@ export function SystemSettings({ active }: { active: boolean }) {
           browser_proxy_enabled: finalProxyEnabled,
           browser_proxy_url: finalProxyUrl,
           browser_count: captcha.browser_count,
+          browser_personal_fresh_restart_every_n_solves:
+            captcha.browser_personal_fresh_restart_every_n_solves,
           personal_project_pool_size: captcha.personal_project_pool_size,
           personal_max_resident_tabs: captcha.personal_max_resident_tabs,
           personal_idle_tab_ttl_seconds: captcha.personal_idle_tab_ttl_seconds,
@@ -1141,6 +1149,21 @@ export function SystemSettings({ active }: { active: boolean }) {
                   />
                 </div>
               </div>
+            <Label>Fresh restart every N solves (0 to disable)</Label>
+            <Input
+              type="number"
+              min={0}
+              value={captcha.browser_personal_fresh_restart_every_n_solves}
+              onChange={(e) =>
+                setCaptcha((c) => ({
+                  ...c,
+                  browser_personal_fresh_restart_every_n_solves: Math.max(
+                    0,
+                    parseInt(e.target.value, 10) || 0
+                  ),
+                }))
+              }
+            />
               <Label>Idle TTL (s)</Label>
               <Input
                 type="number"

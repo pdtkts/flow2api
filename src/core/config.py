@@ -946,6 +946,43 @@ class Config:
             return 600
 
     @property
+    def browser_count(self) -> int:
+        value = self._config.get("captcha", {}).get("browser_count", 1)
+        try:
+            return max(1, min(20, int(value)))
+        except Exception:
+            return 1
+
+    def set_browser_count(self, value: int):
+        if "captcha" not in self._config:
+            self._config["captcha"] = {}
+        try:
+            normalized = max(1, min(20, int(value)))
+        except Exception:
+            normalized = 1
+        self._config["captcha"]["browser_count"] = normalized
+
+    @property
+    def browser_personal_fresh_restart_every_n_solves(self) -> int:
+        value = self._config.get("captcha", {}).get(
+            "browser_personal_fresh_restart_every_n_solves",
+            10,
+        )
+        try:
+            return max(0, int(value))
+        except Exception:
+            return 10
+
+    def set_browser_personal_fresh_restart_every_n_solves(self, value: int):
+        if "captcha" not in self._config:
+            self._config["captcha"] = {}
+        try:
+            normalized = max(0, int(value))
+        except Exception:
+            normalized = 10
+        self._config["captcha"]["browser_personal_fresh_restart_every_n_solves"] = normalized
+
+    @property
     def personal_max_resident_tabs(self) -> int:
         """内置浏览器打码的共享标签页上限"""
         value = self._config.get("captcha", {}).get("personal_max_resident_tabs", 5)

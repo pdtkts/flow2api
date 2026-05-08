@@ -2727,6 +2727,10 @@ async def update_captcha_config(
     browser_proxy_enabled = request.get("browser_proxy_enabled", False)
     browser_proxy_url = request.get("browser_proxy_url", "")
     browser_count = request.get("browser_count", 1)
+    browser_personal_fresh_restart_every_n_solves = request.get(
+        "browser_personal_fresh_restart_every_n_solves",
+        10,
+    )
     personal_project_pool_size = request.get("personal_project_pool_size")
     personal_max_resident_tabs = request.get("personal_max_resident_tabs")
     personal_idle_tab_ttl_seconds = request.get("personal_idle_tab_ttl_seconds")
@@ -2785,6 +2789,20 @@ async def update_captcha_config(
     except Exception:
         return {"success": False, "message": "远程打码超时时间必须是整数秒"}
     browser_fallback_to_remote_browser = bool(browser_fallback_to_remote_browser)
+    try:
+        browser_count = max(1, min(20, int(browser_count or 1)))
+    except Exception:
+        return {"success": False, "message": "browser_count must be an integer between 1 and 20"}
+    try:
+        browser_personal_fresh_restart_every_n_solves = max(
+            0,
+            int(browser_personal_fresh_restart_every_n_solves),
+        )
+    except Exception:
+        return {
+            "success": False,
+            "message": "browser_personal_fresh_restart_every_n_solves must be an integer >= 0",
+        }
     if extension_queue_wait_timeout_seconds is not None:
         try:
             extension_queue_wait_timeout_seconds = int(extension_queue_wait_timeout_seconds)
@@ -2830,7 +2848,8 @@ async def update_captcha_config(
         browser_fallback_to_remote_browser=browser_fallback_to_remote_browser,
         browser_proxy_enabled=browser_proxy_enabled,
         browser_proxy_url=browser_proxy_url if browser_proxy_enabled else None,
-        browser_count=max(1, int(browser_count)) if browser_count else 1,
+        browser_count=browser_count,
+        browser_personal_fresh_restart_every_n_solves=browser_personal_fresh_restart_every_n_solves,
         personal_project_pool_size=personal_project_pool_size,
         personal_max_resident_tabs=personal_max_resident_tabs,
         personal_idle_tab_ttl_seconds=personal_idle_tab_ttl_seconds,
@@ -2911,6 +2930,9 @@ async def get_captcha_config(token: str = Depends(verify_admin_token)):
         "browser_proxy_enabled": captcha_config.browser_proxy_enabled,
         "browser_proxy_url": captcha_config.browser_proxy_url or "",
         "browser_count": captcha_config.browser_count,
+        "browser_personal_fresh_restart_every_n_solves": int(
+            getattr(captcha_config, "browser_personal_fresh_restart_every_n_solves", 10) or 10
+        ),
         "personal_project_pool_size": captcha_config.personal_project_pool_size,
         "personal_max_resident_tabs": captcha_config.personal_max_resident_tabs,
         "personal_idle_tab_ttl_seconds": captcha_config.personal_idle_tab_ttl_seconds,
