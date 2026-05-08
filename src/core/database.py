@@ -725,6 +725,9 @@ class Database:
                     ("task_tracker_device_id", "TEXT DEFAULT ''"),
                     ("task_tracker_device_name", "TEXT DEFAULT ''"),
                     ("task_tracker_cookies", "TEXT DEFAULT ''"),
+                    ("task_tracker_device_token", "TEXT DEFAULT ''"),
+                    ("task_tracker_turnstile_token", "TEXT DEFAULT ''"),
+                    ("task_tracker_tls_profile", "TEXT DEFAULT ''"),
                 ]
 
                 for col_name, col_type in generation_columns_to_add:
@@ -1090,6 +1093,9 @@ class Database:
                     task_tracker_device_id TEXT DEFAULT '',
                     task_tracker_device_name TEXT DEFAULT '',
                     task_tracker_cookies TEXT DEFAULT '',
+                    task_tracker_device_token TEXT DEFAULT '',
+                    task_tracker_turnstile_token TEXT DEFAULT '',
+                    task_tracker_tls_profile TEXT DEFAULT '',
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
@@ -2143,6 +2149,9 @@ class Database:
         task_tracker_device_id: Optional[str] = None,
         task_tracker_device_name: Optional[str] = None,
         task_tracker_cookies: Optional[str] = None,
+        task_tracker_device_token: Optional[str] = None,
+        task_tracker_turnstile_token: Optional[str] = None,
+        task_tracker_tls_profile: Optional[str] = None,
     ):
         """Update generation configuration"""
         async with self._connect(write=True) as db:
@@ -2345,6 +2354,21 @@ class Database:
                 if task_tracker_cookies is not None
                 else str(current.get("task_tracker_cookies", "") or "")
             )
+            normalized_task_tracker_device_token = (
+                str(task_tracker_device_token)
+                if task_tracker_device_token is not None
+                else str(current.get("task_tracker_device_token", "") or "")
+            )
+            normalized_task_tracker_turnstile_token = (
+                str(task_tracker_turnstile_token)
+                if task_tracker_turnstile_token is not None
+                else str(current.get("task_tracker_turnstile_token", "") or "")
+            )
+            normalized_task_tracker_tls_profile = (
+                str(task_tracker_tls_profile)
+                if task_tracker_tls_profile is not None
+                else str(current.get("task_tracker_tls_profile", "") or "")
+            )
 
             if row:
                 await db.execute("""
@@ -2382,6 +2406,9 @@ class Database:
                         task_tracker_device_id = ?,
                         task_tracker_device_name = ?,
                         task_tracker_cookies = ?,
+                        task_tracker_device_token = ?,
+                        task_tracker_turnstile_token = ?,
+                        task_tracker_tls_profile = ?,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = 1
                 """, (
@@ -2418,6 +2445,9 @@ class Database:
                     normalized_task_tracker_device_id,
                     normalized_task_tracker_device_name,
                     normalized_task_tracker_cookies,
+                    normalized_task_tracker_device_token,
+                    normalized_task_tracker_turnstile_token,
+                    normalized_task_tracker_tls_profile,
                 ))
             else:
                 await db.execute("""
@@ -2455,9 +2485,12 @@ class Database:
                         cloning_video_system_prompt,
                         task_tracker_device_id,
                         task_tracker_device_name,
-                        task_tracker_cookies
+                        task_tracker_cookies,
+                        task_tracker_device_token,
+                        task_tracker_turnstile_token,
+                        task_tracker_tls_profile
                     )
-                    VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     normalized_image_timeout,
                     normalized_video_timeout,
@@ -2492,6 +2525,9 @@ class Database:
                     normalized_task_tracker_device_id,
                     normalized_task_tracker_device_name,
                     normalized_task_tracker_cookies,
+                    normalized_task_tracker_device_token,
+                    normalized_task_tracker_turnstile_token,
+                    normalized_task_tracker_tls_profile,
                 ))
             await db.commit()
 
@@ -3008,6 +3044,24 @@ class Database:
             )
             config.set_cloning_video_system_prompt(
                 str(getattr(generation_config, "cloning_video_system_prompt", "") or "")
+            )
+            config.set_task_tracker_device_id(
+                str(getattr(generation_config, "task_tracker_device_id", "") or "")
+            )
+            config.set_task_tracker_device_name(
+                str(getattr(generation_config, "task_tracker_device_name", "") or "")
+            )
+            config.set_task_tracker_cookies(
+                str(getattr(generation_config, "task_tracker_cookies", "") or "")
+            )
+            config.set_task_tracker_device_token(
+                str(getattr(generation_config, "task_tracker_device_token", "") or "")
+            )
+            config.set_task_tracker_turnstile_token(
+                str(getattr(generation_config, "task_tracker_turnstile_token", "") or "")
+            )
+            config.set_task_tracker_tls_profile(
+                str(getattr(generation_config, "task_tracker_tls_profile", "") or "")
             )
 
         # Reload call logic config

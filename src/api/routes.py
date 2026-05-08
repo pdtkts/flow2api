@@ -41,7 +41,7 @@ from ..core.config import config as app_config
 from ..services.browser_captcha_extension import ExtensionCaptchaService
 from ..services.cloning_metadata_service import CloningMetadataService
 from ..services.generation_handler import MODEL_CONFIG, GenerationHandler
-from ..services.task_tracker_service import TaskTrackerService
+from ..services.tas_tracker_service import TaskTrackerService
 
 router = APIRouter()
 
@@ -2275,7 +2275,7 @@ async def fetch_task_tracker_assets(
     request: TaskTrackerFetchRequest,
     auth_ctx: AuthContext = Depends(verify_api_key_flexible),
 ):
-    """Fetch task tracker assets using Playwright Chromium session."""
+    """Fetch task tracker assets via direct HTTPS to tastracker.com (curl-cffi)."""
     if auth_ctx.key_id is None:
         raise HTTPException(status_code=403, detail="Managed API key required")
         

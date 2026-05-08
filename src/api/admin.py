@@ -656,6 +656,9 @@ class GenerationConfigRequest(BaseModel):
     task_tracker_device_id: Optional[str] = None
     task_tracker_device_name: Optional[str] = None
     task_tracker_cookies: Optional[str] = None
+    task_tracker_device_token: Optional[str] = None
+    task_tracker_turnstile_token: Optional[str] = None
+    task_tracker_tls_profile: Optional[str] = None
 
 
 class CallLogicConfigRequest(BaseModel):
@@ -1590,6 +1593,9 @@ async def get_generation_config(token: str = Depends(verify_admin_token)):
             "task_tracker_device_id": str(getattr(config, "task_tracker_device_id", "") or ""),
             "task_tracker_device_name": str(getattr(config, "task_tracker_device_name", "") or ""),
             "task_tracker_cookies": str(getattr(config, "task_tracker_cookies", "") or ""),
+            "task_tracker_device_token": str(getattr(config, "task_tracker_device_token", "") or ""),
+            "task_tracker_turnstile_token": str(getattr(config, "task_tracker_turnstile_token", "") or ""),
+            "task_tracker_tls_profile": str(getattr(config, "task_tracker_tls_profile", "") or ""),
         }
     }
 
@@ -1637,6 +1643,12 @@ async def update_generation_config(
         metadata_system_prompt=request.metadata_system_prompt,
         cloning_image_system_prompt=request.cloning_image_system_prompt,
         cloning_video_system_prompt=request.cloning_video_system_prompt,
+        task_tracker_device_id=request.task_tracker_device_id,
+        task_tracker_device_name=request.task_tracker_device_name,
+        task_tracker_cookies=request.task_tracker_cookies,
+        task_tracker_device_token=request.task_tracker_device_token,
+        task_tracker_turnstile_token=request.task_tracker_turnstile_token,
+        task_tracker_tls_profile=request.task_tracker_tls_profile,
     )
 
     # 🔥 Hot reload: sync database config to memory
@@ -2327,6 +2339,12 @@ async def update_generation_timeout(
         metadata_system_prompt=request.metadata_system_prompt,
         cloning_image_system_prompt=request.cloning_image_system_prompt,
         cloning_video_system_prompt=request.cloning_video_system_prompt,
+        task_tracker_device_id=request.task_tracker_device_id,
+        task_tracker_device_name=request.task_tracker_device_name,
+        task_tracker_cookies=request.task_tracker_cookies,
+        task_tracker_device_token=request.task_tracker_device_token,
+        task_tracker_turnstile_token=request.task_tracker_turnstile_token,
+        task_tracker_tls_profile=request.task_tracker_tls_profile,
     )
 
     # 🔥 Hot reload: sync database config to memory

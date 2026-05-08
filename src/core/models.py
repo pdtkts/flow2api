@@ -184,6 +184,9 @@ class GenerationConfig(BaseModel):
     task_tracker_device_id: str = ""
     task_tracker_device_name: str = ""
     task_tracker_cookies: str = ""
+    task_tracker_device_token: str = ""
+    task_tracker_turnstile_token: str = ""
+    task_tracker_tls_profile: str = ""
 
 
 class CallLogicConfig(BaseModel):

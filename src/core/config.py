@@ -646,6 +646,33 @@ class Config:
             self._config["generation_routing"] = {}
         self._config["generation_routing"]["task_tracker_cookies"] = str(value or "")
 
+    @property
+    def task_tracker_device_token(self) -> str:
+        return str(self._config.get("generation_routing", {}).get("task_tracker_device_token", "") or "")
+
+    def set_task_tracker_device_token(self, value: str):
+        if "generation_routing" not in self._config:
+            self._config["generation_routing"] = {}
+        self._config["generation_routing"]["task_tracker_device_token"] = str(value or "")
+
+    @property
+    def task_tracker_turnstile_token(self) -> str:
+        return str(self._config.get("generation_routing", {}).get("task_tracker_turnstile_token", "") or "")
+
+    def set_task_tracker_turnstile_token(self, value: str):
+        if "generation_routing" not in self._config:
+            self._config["generation_routing"] = {}
+        self._config["generation_routing"]["task_tracker_turnstile_token"] = str(value or "")
+
+    @property
+    def task_tracker_tls_profile(self) -> str:
+        return str(self._config.get("generation_routing", {}).get("task_tracker_tls_profile", "") or "")
+
+    def set_task_tracker_tls_profile(self, value: str):
+        if "generation_routing" not in self._config:
+            self._config["generation_routing"] = {}
+        self._config["generation_routing"]["task_tracker_tls_profile"] = str(value or "")
+
     # Cache configuration
     @property
     def cache_enabled(self) -> bool:
