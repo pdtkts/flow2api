@@ -140,3 +140,7 @@ If you get a **400** auth/session error on either route, refresh TAS Tracker set
 - cookies
 - device token
 - optional turnstile token (if your account/session currently needs it)
+
+---
+
+**Follow-up:** send `response.images` to **`POST /api/market/analyze-keyword`** for LLM brief + trends — see [market-analyze-keyword.md](./market-analyze-keyword.md).

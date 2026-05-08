@@ -1,7 +1,7 @@
 """Data models for Flow2API"""
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-from typing import Optional, List, Union, Any, Literal
+from typing import Optional, List, Union, Any, Literal, Dict
 from datetime import datetime
 
 
@@ -173,6 +173,14 @@ class GenerationConfig(BaseModel):
     flow2api_metadata_enabled_models: str = ""
     flow2api_metadata_primary_model: str = ""
     flow2api_metadata_fallback_models: str = ""
+    flow2api_market_backend: str = "gemini_native"
+    flow2api_market_provider_order: str = ""
+    flow2api_market_enabled_providers: str = ""
+    flow2api_market_provider_retry_count: int = 1
+    flow2api_market_model: str = "gemini-2.5-flash"
+    flow2api_market_enabled_models: str = ""
+    flow2api_market_primary_model: str = ""
+    flow2api_market_fallback_models: str = ""
     metadata_system_prompt: str = ""
     flow2api_cloning_backend: str = "gemini_native"
     flow2api_cloning_provider_order: str = ""
@@ -525,6 +533,17 @@ class TaskTrackerKeywordSearchRequest(BaseModel):
     content_type: Optional[str] = "all"
     pages: Optional[List[int]] = None
     generative_ai: Optional[str] = "all"
+
+
+class MarketAnalyzeKeywordRequest(BaseModel):
+    eventName: str
+    rawData: List[Dict[str, Any]] = Field(default_factory=list)
+    max_items: int = 200
+    backend: Optional[Literal["gemini_native", "openai", "openrouter", "third_party_gemini", "cloudflare"]] = None
+    model: Optional[str] = None
+    fallbackModels: Optional[List[str]] = None
+
+    model_config = ConfigDict(extra="allow")
 
 
 class SuggestedEventItem(BaseModel):

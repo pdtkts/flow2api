@@ -646,6 +646,14 @@ class GenerationConfigRequest(BaseModel):
     flow2api_metadata_enabled_models: Optional[str] = None
     flow2api_metadata_primary_model: Optional[str] = None
     flow2api_metadata_fallback_models: Optional[str] = None
+    flow2api_market_backend: Optional[str] = None
+    flow2api_market_provider_order: Optional[str] = None
+    flow2api_market_enabled_providers: Optional[str] = None
+    flow2api_market_provider_retry_count: Optional[int] = None
+    flow2api_market_model: Optional[str] = None
+    flow2api_market_enabled_models: Optional[str] = None
+    flow2api_market_primary_model: Optional[str] = None
+    flow2api_market_fallback_models: Optional[str] = None
     metadata_system_prompt: Optional[str] = None
     flow2api_cloning_backend: Optional[str] = None
     flow2api_cloning_provider_order: Optional[str] = None
@@ -1618,6 +1626,30 @@ async def get_generation_config(token: str = Depends(verify_admin_token)):
             "flow2api_metadata_fallback_models": str(
                 getattr(config, "flow2api_metadata_fallback_models", "") or ""
             ),
+            "flow2api_market_backend": str(
+                getattr(config, "flow2api_market_backend", "gemini_native") or "gemini_native"
+            ),
+            "flow2api_market_provider_order": str(
+                getattr(config, "flow2api_market_provider_order", "") or ""
+            ),
+            "flow2api_market_enabled_providers": str(
+                getattr(config, "flow2api_market_enabled_providers", "") or ""
+            ),
+            "flow2api_market_provider_retry_count": int(
+                getattr(config, "flow2api_market_provider_retry_count", 1) or 1
+            ),
+            "flow2api_market_model": str(
+                getattr(config, "flow2api_market_model", "gemini-2.5-flash") or "gemini-2.5-flash"
+            ),
+            "flow2api_market_enabled_models": str(
+                getattr(config, "flow2api_market_enabled_models", "") or ""
+            ),
+            "flow2api_market_primary_model": str(
+                getattr(config, "flow2api_market_primary_model", "") or ""
+            ),
+            "flow2api_market_fallback_models": str(
+                getattr(config, "flow2api_market_fallback_models", "") or ""
+            ),
             "metadata_system_prompt": str(getattr(config, "metadata_system_prompt", "") or ""),
             "cloning_image_system_prompt": str(
                 getattr(config, "cloning_image_system_prompt", "") or ""
@@ -1681,6 +1713,14 @@ async def update_generation_config(
         flow2api_metadata_enabled_models=request.flow2api_metadata_enabled_models,
         flow2api_metadata_primary_model=request.flow2api_metadata_primary_model,
         flow2api_metadata_fallback_models=request.flow2api_metadata_fallback_models,
+        flow2api_market_backend=request.flow2api_market_backend,
+        flow2api_market_provider_order=request.flow2api_market_provider_order,
+        flow2api_market_enabled_providers=request.flow2api_market_enabled_providers,
+        flow2api_market_provider_retry_count=request.flow2api_market_provider_retry_count,
+        flow2api_market_model=request.flow2api_market_model,
+        flow2api_market_enabled_models=request.flow2api_market_enabled_models,
+        flow2api_market_primary_model=request.flow2api_market_primary_model,
+        flow2api_market_fallback_models=request.flow2api_market_fallback_models,
         metadata_system_prompt=request.metadata_system_prompt,
         cloning_image_system_prompt=request.cloning_image_system_prompt,
         cloning_video_system_prompt=request.cloning_video_system_prompt,
@@ -2445,6 +2485,14 @@ async def update_generation_timeout(
         flow2api_metadata_enabled_models=request.flow2api_metadata_enabled_models,
         flow2api_metadata_primary_model=request.flow2api_metadata_primary_model,
         flow2api_metadata_fallback_models=request.flow2api_metadata_fallback_models,
+        flow2api_market_backend=request.flow2api_market_backend,
+        flow2api_market_provider_order=request.flow2api_market_provider_order,
+        flow2api_market_enabled_providers=request.flow2api_market_enabled_providers,
+        flow2api_market_provider_retry_count=request.flow2api_market_provider_retry_count,
+        flow2api_market_model=request.flow2api_market_model,
+        flow2api_market_enabled_models=request.flow2api_market_enabled_models,
+        flow2api_market_primary_model=request.flow2api_market_primary_model,
+        flow2api_market_fallback_models=request.flow2api_market_fallback_models,
         metadata_system_prompt=request.metadata_system_prompt,
         cloning_image_system_prompt=request.cloning_image_system_prompt,
         cloning_video_system_prompt=request.cloning_video_system_prompt,

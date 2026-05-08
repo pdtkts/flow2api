@@ -9,6 +9,7 @@ import { CacheManagement } from "../components/manage/CacheManagement"
 import { AgentGateway } from "../components/manage/AgentGateway"
 import { ApiKeyManagement } from "../components/manage/ApiKeyManagement"
 import { MetadataSettings } from "../components/manage/MetadataSettings"
+import { MarketSettings } from "../components/manage/MarketSettings"
 import { CloningSettings } from "../components/manage/CloningSettings"
 import { TaskTrackerSettings } from "../components/manage/TaskTrackerSettings"
 import { EventCalendarSettings } from "../components/manage/EventCalendarSettings"
@@ -16,7 +17,7 @@ import { cn } from "@/lib/utils"
 import { useAuth } from "../contexts/AuthContext"
 import { adminJson } from "../lib/adminApi"
 
-const MANAGE_TABS = ["tokens", "apikeys", "settings", "metadata", "cloning", "tracker", "events", "logs", "cache", "agent"] as const
+const MANAGE_TABS = ["tokens", "apikeys", "settings", "metadata", "market", "cloning", "tracker", "events", "logs", "cache", "agent"] as const
 type ManageTab = (typeof MANAGE_TABS)[number]
 
 function parseManageTab(raw: string | null): ManageTab {
@@ -112,6 +113,14 @@ export default function Manage() {
               Metadata
             </TabsTrigger>
             <TabsTrigger
+              value="market"
+              className={cn(
+                "rounded-none border-b-2 border-transparent px-1 py-3 data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:shadow-none"
+              )}
+            >
+              Market
+            </TabsTrigger>
+            <TabsTrigger
               value="cloning"
               className={cn(
                 "rounded-none border-b-2 border-transparent px-1 py-3 data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:shadow-none"
@@ -187,6 +196,11 @@ export default function Manage() {
         <TabsContent value="metadata" className="mt-0 outline-none focus-visible:ring-0">
           <div className="animate-in fade-in duration-300">
             <MetadataSettings active={true} />
+          </div>
+        </TabsContent>
+        <TabsContent value="market" className="mt-0 outline-none focus-visible:ring-0">
+          <div className="animate-in fade-in duration-300">
+            <MarketSettings active={tab === "market"} />
           </div>
         </TabsContent>
         <TabsContent value="cloning" className="mt-0 outline-none focus-visible:ring-0">

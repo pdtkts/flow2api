@@ -633,6 +633,86 @@ class Config:
         self._config["generation_routing"]["flow2api_metadata_fallback_models"] = str(value or "")
 
     @property
+    def flow2api_market_backend(self) -> str:
+        return str(self._config.get("generation_routing", {}).get("flow2api_market_backend", "gemini_native") or "gemini_native")
+
+    def set_flow2api_market_backend(self, value: str):
+        if "generation_routing" not in self._config:
+            self._config["generation_routing"] = {}
+        self._config["generation_routing"]["flow2api_market_backend"] = str(value or "gemini_native")
+
+    @property
+    def flow2api_market_provider_order(self) -> str:
+        return str(self._config.get("generation_routing", {}).get("flow2api_market_provider_order", "") or "")
+
+    def set_flow2api_market_provider_order(self, value: str):
+        if "generation_routing" not in self._config:
+            self._config["generation_routing"] = {}
+        self._config["generation_routing"]["flow2api_market_provider_order"] = str(value or "")
+
+    @property
+    def flow2api_market_enabled_providers(self) -> str:
+        return str(self._config.get("generation_routing", {}).get("flow2api_market_enabled_providers", "") or "")
+
+    def set_flow2api_market_enabled_providers(self, value: str):
+        if "generation_routing" not in self._config:
+            self._config["generation_routing"] = {}
+        self._config["generation_routing"]["flow2api_market_enabled_providers"] = str(value or "")
+
+    @property
+    def flow2api_market_provider_retry_count(self) -> int:
+        value = self._config.get("generation_routing", {}).get("flow2api_market_provider_retry_count", 1)
+        try:
+            return max(0, min(5, int(value)))
+        except Exception:
+            return 1
+
+    def set_flow2api_market_provider_retry_count(self, value: int):
+        if "generation_routing" not in self._config:
+            self._config["generation_routing"] = {}
+        try:
+            normalized = max(0, min(5, int(value)))
+        except Exception:
+            normalized = 1
+        self._config["generation_routing"]["flow2api_market_provider_retry_count"] = normalized
+
+    @property
+    def flow2api_market_model(self) -> str:
+        return str(self._config.get("generation_routing", {}).get("flow2api_market_model", "gemini-2.5-flash") or "gemini-2.5-flash")
+
+    def set_flow2api_market_model(self, value: str):
+        if "generation_routing" not in self._config:
+            self._config["generation_routing"] = {}
+        self._config["generation_routing"]["flow2api_market_model"] = str(value or "gemini-2.5-flash")
+
+    @property
+    def flow2api_market_enabled_models(self) -> str:
+        return str(self._config.get("generation_routing", {}).get("flow2api_market_enabled_models", "") or "")
+
+    def set_flow2api_market_enabled_models(self, value: str):
+        if "generation_routing" not in self._config:
+            self._config["generation_routing"] = {}
+        self._config["generation_routing"]["flow2api_market_enabled_models"] = str(value or "")
+
+    @property
+    def flow2api_market_primary_model(self) -> str:
+        return str(self._config.get("generation_routing", {}).get("flow2api_market_primary_model", "") or "")
+
+    def set_flow2api_market_primary_model(self, value: str):
+        if "generation_routing" not in self._config:
+            self._config["generation_routing"] = {}
+        self._config["generation_routing"]["flow2api_market_primary_model"] = str(value or "")
+
+    @property
+    def flow2api_market_fallback_models(self) -> str:
+        return str(self._config.get("generation_routing", {}).get("flow2api_market_fallback_models", "") or "")
+
+    def set_flow2api_market_fallback_models(self, value: str):
+        if "generation_routing" not in self._config:
+            self._config["generation_routing"] = {}
+        self._config["generation_routing"]["flow2api_market_fallback_models"] = str(value or "")
+
+    @property
     def metadata_system_prompt(self) -> str:
         return str(self._config.get("generation_routing", {}).get("metadata_system_prompt", "") or "")
 

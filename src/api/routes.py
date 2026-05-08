@@ -38,11 +38,14 @@ from ..core.models import (
     Task,
     TaskTrackerContributorFetchRequest,
     TaskTrackerKeywordSearchRequest,
+    MarketAnalyzeKeywordRequest,
 )
 from ..core.config import config as app_config
 from ..services.browser_captcha_extension import ExtensionCaptchaService
 from ..services.cloning_metadata_service import CloningMetadataService
 from ..services.generation_handler import MODEL_CONFIG, GenerationHandler
+from ..services.llm_provider_chain import LlmProviderChain
+from ..services.market_intelligence_service import MarketIntelligenceService
 from ..services.tas_tracker_service import TaskTrackerService
 
 router = APIRouter()
@@ -90,7 +93,9 @@ GEMINI_STATUS_MAP = {
 
 # Dependency injection will be set up in main.py
 generation_handler: GenerationHandler = None
-cloning_metadata_service = CloningMetadataService()
+_llm_chain = LlmProviderChain()
+cloning_metadata_service = CloningMetadataService(_llm_chain)
+market_intelligence_service = MarketIntelligenceService(_llm_chain)
 task_tracker_service = TaskTrackerService()
 
 
@@ -2296,6 +2301,31 @@ async def fetch_task_tracker_contributor_assets(
     except Exception as exc:
         debug_logger.log_error(f"Tracker contributor fetch failed: {exc}")
         raise HTTPException(status_code=500, detail=f"Internal Error: {str(exc)}")
+
+
+@router.post("/api/market/analyze-keyword")
+async def analyze_market_keyword(
+    request: MarketAnalyzeKeywordRequest,
+    auth_ctx: AuthContext = Depends(verify_api_key_flexible),
+):
+    """Analyze TAS keyword-search images: brief, synthetic yearly trends, echoed insights."""
+    if auth_ctx.key_id is None:
+        raise HTTPException(status_code=403, detail="Managed API key required")
+    try:
+        raw_list = request.rawData if isinstance(request.rawData, list) else []
+        return await market_intelligence_service.analyze_keyword(
+            event_name=request.eventName,
+            raw_data=[x for x in raw_list if isinstance(x, dict)],
+            max_items=max(1, min(1000, int(request.max_items or 200))),
+            backend=request.backend,
+            model=request.model,
+            fallback_models=request.fallbackModels,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        debug_logger.log_error(f"Market analyze-keyword failed: {exc}")
+        raise HTTPException(status_code=500, detail=f"Internal Error: {exc}")
 
 
 @router.get("/api/suggested-events", response_model=SuggestedEventsResponse)
