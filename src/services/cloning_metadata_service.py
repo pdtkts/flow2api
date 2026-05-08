@@ -91,6 +91,23 @@ def _extract_json_object(raw: str) -> Dict[str, Any]:
 def _get_csv(raw: str) -> List[str]:
     return [x.strip() for x in str(raw or "").split(",") if x.strip()]
 
+CLONING_PROVIDERS = [
+    "gemini_native",
+    "openai",
+    "openrouter",
+    "third_party_gemini",
+    "cloudflare",
+]
+
+METADATA_PROVIDERS = [
+    "gemini_native",
+    "openai",
+    "openrouter",
+    "third_party_gemini",
+    "cloudflare",
+    "csvgen",
+]
+
 
 def _normalize_image_prompt(p: Dict[str, Any]) -> Dict[str, Any]:
     return {
@@ -130,6 +147,99 @@ def _normalize_image_prompt(p: Dict[str, Any]) -> Dict[str, Any]:
 
 
 class CloningMetadataService:
+    @staticmethod
+    def _is_retryable_error(exc: Exception) -> bool:
+        if isinstance(exc, HTTPException):
+            status = int(getattr(exc, "status_code", 500) or 500)
+            return status == 429 or status >= 500
+        text = str(exc).lower()
+        return any(token in text for token in ("timeout", "timed out", "connection", "temporar", "rate limit"))
+
+    @staticmethod
+    def _normalized_retry_count(raw_value: Any) -> int:
+        try:
+            return max(0, min(5, int(raw_value)))
+        except Exception:
+            return 1
+
+    @staticmethod
+    def _resolve_provider_chain(
+        explicit_provider: Optional[str],
+        *,
+        provider_order_csv: str,
+        enabled_providers_csv: str,
+        legacy_backend: str,
+        allowed_providers: List[str],
+    ) -> List[str]:
+        explicit = str(explicit_provider or "").strip().lower()
+        if explicit:
+            return [explicit]
+
+        allowed = [p for p in allowed_providers]
+        allowed_set = set(allowed)
+
+        legacy = str(legacy_backend or "").strip().lower()
+        if legacy not in allowed_set:
+            legacy = allowed[0]
+
+        configured_order = [p.strip().lower() for p in str(provider_order_csv or "").split(",") if p.strip()]
+        configured_order = [p for p in configured_order if p in allowed_set]
+        if not configured_order:
+            configured_order = [legacy] + [p for p in allowed if p != legacy]
+        else:
+            configured_order = configured_order + [p for p in allowed if p not in configured_order]
+
+        enabled = [p.strip().lower() for p in str(enabled_providers_csv or "").split(",") if p.strip()]
+        enabled = [p for p in enabled if p in allowed_set]
+        if not enabled:
+            enabled = [legacy]
+
+        ordered_enabled = [p for p in configured_order if p in set(enabled)]
+        return ordered_enabled
+
+    async def _invoke_with_provider_chain(
+        self,
+        *,
+        providers: List[str],
+        retry_count: int,
+        model: str,
+        fallback_models: Optional[List[str]],
+        prompt_text: str,
+        image_bytes: Optional[bytes],
+        mime_type: str,
+        use_cloning_credentials: bool = False,
+    ) -> Dict[str, Any]:
+        if not providers:
+            raise HTTPException(status_code=400, detail="No enabled providers configured")
+
+        retries = self._normalized_retry_count(retry_count)
+        last_err: Optional[Exception] = None
+        attempt_failures: List[str] = []
+
+        for provider in providers:
+            for attempt in range(retries + 1):
+                try:
+                    return await self._invoke_model_json(
+                        provider=provider,
+                        model=model,
+                        fallback_models=fallback_models,
+                        prompt_text=prompt_text,
+                        image_bytes=image_bytes,
+                        mime_type=mime_type,
+                        use_cloning_credentials=use_cloning_credentials,
+                    )
+                except Exception as exc:
+                    last_err = exc
+                    attempt_failures.append(f"{provider}#{attempt + 1}: {exc}")
+                    if attempt < retries and self._is_retryable_error(exc):
+                        continue
+                    break
+
+        detail = str(last_err or "Model invocation failed")
+        if attempt_failures:
+            detail = f"{detail} | attempts: {'; '.join(attempt_failures[-6:])}"
+        raise HTTPException(status_code=500, detail=detail)
+
     async def _fetch_image(self, image_url: Optional[str], image_base64: Optional[str]) -> Tuple[bytes, str]:
         if image_url:
             async with AsyncSession() as session:
@@ -539,14 +649,22 @@ class CloningMetadataService:
         model: Optional[str],
         fallback_models: Optional[List[str]],
     ) -> Dict[str, Any]:
-        selected_provider = (provider or app_config.flow2api_cloning_backend or "gemini_native").strip().lower()
+        provider_chain = self._resolve_provider_chain(
+            provider,
+            provider_order_csv=app_config.flow2api_cloning_provider_order,
+            enabled_providers_csv=app_config.flow2api_cloning_enabled_providers,
+            legacy_backend=app_config.flow2api_cloning_backend or "gemini_native",
+            allowed_providers=CLONING_PROVIDERS,
+        )
         selected_model = (model or app_config.flow2api_cloning_model or "gemini-2.5-flash").strip()
+        retry_count = self._normalized_retry_count(app_config.flow2api_cloning_provider_retry_count)
         out: List[Dict[str, Any]] = []
         for image in images:
             image_bytes, mime_type = await self._fetch_image(image.get("image_url"), image.get("image_base64"))
             prompt = self._build_clone_instruction(image)
-            response_json = await self._invoke_model_json(
-                provider=selected_provider,
+            response_json = await self._invoke_with_provider_chain(
+                providers=provider_chain,
+                retry_count=retry_count,
                 model=selected_model,
                 fallback_models=fallback_models,
                 prompt_text=prompt,
@@ -564,8 +682,15 @@ class CloningMetadataService:
         model: Optional[str],
         fallback_models: Optional[List[str]],
     ) -> Dict[str, Any]:
-        selected_provider = (provider or app_config.flow2api_cloning_backend or "gemini_native").strip().lower()
+        provider_chain = self._resolve_provider_chain(
+            provider,
+            provider_order_csv=app_config.flow2api_cloning_provider_order,
+            enabled_providers_csv=app_config.flow2api_cloning_enabled_providers,
+            legacy_backend=app_config.flow2api_cloning_backend or "gemini_native",
+            allowed_providers=CLONING_PROVIDERS,
+        )
         selected_model = (model or app_config.flow2api_cloning_model or "gemini-2.5-flash").strip()
+        retry_count = self._normalized_retry_count(app_config.flow2api_cloning_provider_retry_count)
         clone_prompt_raw = payload.get("imageClonePrompt") or ""
         try:
             clone_prompt_json = json.dumps(json.loads(clone_prompt_raw), ensure_ascii=False, indent=2)
@@ -582,8 +707,9 @@ class CloningMetadataService:
         mime_type = "image/jpeg"
         if payload.get("image_base64"):
             image_bytes, mime_type = await self._fetch_image(None, payload.get("image_base64"))
-        response_json = await self._invoke_model_json(
-            provider=selected_provider,
+        response_json = await self._invoke_with_provider_chain(
+            providers=provider_chain,
+            retry_count=retry_count,
             model=selected_model,
             fallback_models=fallback_models,
             prompt_text=instruction,
@@ -613,7 +739,16 @@ class CloningMetadataService:
         self,
         payload: Dict[str, Any],
     ) -> Dict[str, Any]:
-        backend = str(payload.get("backend") or app_config.flow2api_metadata_backend or "gemini_native").strip().lower()
+        explicit_provider = str(payload.get("backend") or "").strip().lower() or None
+        provider_chain = self._resolve_provider_chain(
+            explicit_provider,
+            provider_order_csv=app_config.flow2api_metadata_provider_order,
+            enabled_providers_csv=app_config.flow2api_metadata_enabled_providers,
+            legacy_backend=app_config.flow2api_metadata_backend or "gemini_native",
+            allowed_providers=METADATA_PROVIDERS,
+        )
+        retry_count = self._normalized_retry_count(app_config.flow2api_metadata_provider_retry_count)
+        backend = provider_chain[0] if provider_chain else "gemini_native"
         configured_primary = str(
             app_config.flow2api_metadata_primary_model
             or app_config.flow2api_metadata_model
@@ -636,44 +771,71 @@ class CloningMetadataService:
         fallback_models = payload.get("fallbackModels") or default_fallback_chain
         image_bytes, mime_type = await self._fetch_image(payload.get("image_url"), payload.get("image_base64"))
         metadata_settings = payload.get("metadataSettings") or {}
-        if backend == "csvgen":
-            cookie = str(app_config.flow2api_csvgen_cookie or "").strip()
-            if not cookie:
-                raise HTTPException(status_code=400, detail="CSVGEN cookie not configured")
-            b64 = base64.b64encode(image_bytes).decode("ascii")
-            body = {"base64ImageData": b64, "metadataSettings": metadata_settings}
-            async with AsyncSession() as session:
-                resp = await session.post(
-                    "https://www.csvgen.com/api/generate-metadata",
-                    headers={
-                        "Content-Type": "application/json",
-                        "Accept": "*/*",
-                        "Origin": "https://www.csvgen.com",
-                        "Referer": "https://www.csvgen.com/app",
-                        "Cookie": cookie,
-                    },
-                    json=body,
-                    timeout=120,
-                )
-                text = resp.text
-                try:
-                    data = json.loads(text)
-                except Exception:
-                    raise HTTPException(status_code=resp.status_code if resp.status_code >= 400 else 500, detail=text[:500] or "Invalid JSON from csvgen")
-                if resp.status_code >= 400:
-                    raise HTTPException(status_code=resp.status_code, detail={"error": data.get("error") or data.get("message") or "csvgen request failed", "details": data})
-                return self._normalize_csvgen_response(data)
         prompt = self._build_metadata_prompt(metadata_settings, bool(payload.get("dnaNoBgWorkflowActive")))
-        parsed = await self._invoke_model_json(
-            provider=backend,
-            model=model,
-            fallback_models=fallback_models,
-            prompt_text=prompt,
-            image_bytes=image_bytes,
-            mime_type=mime_type,
-        )
-        row = parsed.get("metadataSets", [{}])[0] if isinstance(parsed.get("metadataSets"), list) else parsed
-        return self._normalize_csvgen_response({"optionA": row, "optionB": row})
+        last_err: Optional[Exception] = None
+        attempt_failures: List[str] = []
+
+        for provider_name in provider_chain:
+            for attempt in range(retry_count + 1):
+                try:
+                    if provider_name == "csvgen":
+                        cookie = str(app_config.flow2api_csvgen_cookie or "").strip()
+                        if not cookie:
+                            raise HTTPException(status_code=400, detail="CSVGEN cookie not configured")
+                        b64 = base64.b64encode(image_bytes).decode("ascii")
+                        body = {"base64ImageData": b64, "metadataSettings": metadata_settings}
+                        async with AsyncSession() as session:
+                            resp = await session.post(
+                                "https://www.csvgen.com/api/generate-metadata",
+                                headers={
+                                    "Content-Type": "application/json",
+                                    "Accept": "*/*",
+                                    "Origin": "https://www.csvgen.com",
+                                    "Referer": "https://www.csvgen.com/app",
+                                    "Cookie": cookie,
+                                },
+                                json=body,
+                                timeout=120,
+                            )
+                            text = resp.text
+                            try:
+                                data = json.loads(text)
+                            except Exception:
+                                raise HTTPException(
+                                    status_code=resp.status_code if resp.status_code >= 400 else 500,
+                                    detail=text[:500] or "Invalid JSON from csvgen",
+                                )
+                            if resp.status_code >= 400:
+                                raise HTTPException(
+                                    status_code=resp.status_code,
+                                    detail={
+                                        "error": data.get("error") or data.get("message") or "csvgen request failed",
+                                        "details": data,
+                                    },
+                                )
+                            return self._normalize_csvgen_response(data)
+
+                    parsed = await self._invoke_model_json(
+                        provider=provider_name,
+                        model=model,
+                        fallback_models=fallback_models,
+                        prompt_text=prompt,
+                        image_bytes=image_bytes,
+                        mime_type=mime_type,
+                    )
+                    row = parsed.get("metadataSets", [{}])[0] if isinstance(parsed.get("metadataSets"), list) else parsed
+                    return self._normalize_csvgen_response({"optionA": row, "optionB": row})
+                except Exception as exc:
+                    last_err = exc
+                    attempt_failures.append(f"{provider_name}#{attempt + 1}: {exc}")
+                    if attempt < retry_count and self._is_retryable_error(exc):
+                        continue
+                    break
+
+        detail = str(last_err or "Metadata generation failed")
+        if attempt_failures:
+            detail = f"{detail} | attempts: {'; '.join(attempt_failures[-6:])}"
+        raise HTTPException(status_code=500, detail=detail)
 
     def _normalize_csvgen_response(self, data: Dict[str, Any]) -> Dict[str, Any]:
         def coerce(raw: Any) -> Dict[str, Any]:

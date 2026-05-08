@@ -455,6 +455,41 @@ class Config:
         self._config["generation_routing"]["flow2api_cloning_backend"] = str(value or "gemini_native")
 
     @property
+    def flow2api_cloning_provider_order(self) -> str:
+        return str(self._config.get("generation_routing", {}).get("flow2api_cloning_provider_order", "") or "")
+
+    def set_flow2api_cloning_provider_order(self, value: str):
+        if "generation_routing" not in self._config:
+            self._config["generation_routing"] = {}
+        self._config["generation_routing"]["flow2api_cloning_provider_order"] = str(value or "")
+
+    @property
+    def flow2api_cloning_enabled_providers(self) -> str:
+        return str(self._config.get("generation_routing", {}).get("flow2api_cloning_enabled_providers", "") or "")
+
+    def set_flow2api_cloning_enabled_providers(self, value: str):
+        if "generation_routing" not in self._config:
+            self._config["generation_routing"] = {}
+        self._config["generation_routing"]["flow2api_cloning_enabled_providers"] = str(value or "")
+
+    @property
+    def flow2api_cloning_provider_retry_count(self) -> int:
+        value = self._config.get("generation_routing", {}).get("flow2api_cloning_provider_retry_count", 1)
+        try:
+            return max(0, min(5, int(value)))
+        except Exception:
+            return 1
+
+    def set_flow2api_cloning_provider_retry_count(self, value: int):
+        if "generation_routing" not in self._config:
+            self._config["generation_routing"] = {}
+        try:
+            normalized = max(0, min(5, int(value)))
+        except Exception:
+            normalized = 1
+        self._config["generation_routing"]["flow2api_cloning_provider_retry_count"] = normalized
+
+    @property
     def flow2api_cloning_gemini_api_keys(self) -> str:
         return str(self._config.get("generation_routing", {}).get("flow2api_cloning_gemini_api_keys", "") or "")
 
@@ -525,6 +560,41 @@ class Config:
         if "generation_routing" not in self._config:
             self._config["generation_routing"] = {}
         self._config["generation_routing"]["flow2api_metadata_backend"] = str(value or "gemini_native")
+
+    @property
+    def flow2api_metadata_provider_order(self) -> str:
+        return str(self._config.get("generation_routing", {}).get("flow2api_metadata_provider_order", "") or "")
+
+    def set_flow2api_metadata_provider_order(self, value: str):
+        if "generation_routing" not in self._config:
+            self._config["generation_routing"] = {}
+        self._config["generation_routing"]["flow2api_metadata_provider_order"] = str(value or "")
+
+    @property
+    def flow2api_metadata_enabled_providers(self) -> str:
+        return str(self._config.get("generation_routing", {}).get("flow2api_metadata_enabled_providers", "") or "")
+
+    def set_flow2api_metadata_enabled_providers(self, value: str):
+        if "generation_routing" not in self._config:
+            self._config["generation_routing"] = {}
+        self._config["generation_routing"]["flow2api_metadata_enabled_providers"] = str(value or "")
+
+    @property
+    def flow2api_metadata_provider_retry_count(self) -> int:
+        value = self._config.get("generation_routing", {}).get("flow2api_metadata_provider_retry_count", 1)
+        try:
+            return max(0, min(5, int(value)))
+        except Exception:
+            return 1
+
+    def set_flow2api_metadata_provider_retry_count(self, value: int):
+        if "generation_routing" not in self._config:
+            self._config["generation_routing"] = {}
+        try:
+            normalized = max(0, min(5, int(value)))
+        except Exception:
+            normalized = 1
+        self._config["generation_routing"]["flow2api_metadata_provider_retry_count"] = normalized
 
     @property
     def flow2api_metadata_model(self) -> str:

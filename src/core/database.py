@@ -707,12 +707,18 @@ class Database:
                     ("flow2api_csvgen_cookie", "TEXT DEFAULT ''"),
                     ("flow2api_cloning_model", "TEXT DEFAULT 'gemini-2.5-flash'"),
                     ("flow2api_metadata_backend", "TEXT DEFAULT 'gemini_native'"),
+                    ("flow2api_metadata_provider_order", "TEXT DEFAULT ''"),
+                    ("flow2api_metadata_enabled_providers", "TEXT DEFAULT ''"),
+                    ("flow2api_metadata_provider_retry_count", "INTEGER DEFAULT 1"),
                     ("flow2api_metadata_model", "TEXT DEFAULT 'gemini-2.5-flash'"),
                     ("flow2api_metadata_enabled_models", "TEXT DEFAULT ''"),
                     ("flow2api_metadata_primary_model", "TEXT DEFAULT ''"),
                     ("flow2api_metadata_fallback_models", "TEXT DEFAULT ''"),
                     ("metadata_system_prompt", "TEXT DEFAULT ''"),
                     ("flow2api_cloning_backend", "TEXT DEFAULT 'gemini_native'"),
+                    ("flow2api_cloning_provider_order", "TEXT DEFAULT ''"),
+                    ("flow2api_cloning_enabled_providers", "TEXT DEFAULT ''"),
+                    ("flow2api_cloning_provider_retry_count", "INTEGER DEFAULT 1"),
                     ("flow2api_cloning_gemini_api_keys", "TEXT DEFAULT ''"),
                     ("flow2api_cloning_openai_api_keys", "TEXT DEFAULT ''"),
                     ("flow2api_cloning_openrouter_api_keys", "TEXT DEFAULT ''"),
@@ -1083,11 +1089,18 @@ class Database:
                     flow2api_csvgen_cookie TEXT DEFAULT '',
                     flow2api_cloning_model TEXT DEFAULT 'gemini-2.5-flash',
                     flow2api_metadata_backend TEXT DEFAULT 'gemini_native',
+                    flow2api_metadata_provider_order TEXT DEFAULT '',
+                    flow2api_metadata_enabled_providers TEXT DEFAULT '',
+                    flow2api_metadata_provider_retry_count INTEGER DEFAULT 1,
                     flow2api_metadata_model TEXT DEFAULT 'gemini-2.5-flash',
                     flow2api_metadata_enabled_models TEXT DEFAULT '',
                     flow2api_metadata_primary_model TEXT DEFAULT '',
                     flow2api_metadata_fallback_models TEXT DEFAULT '',
                     metadata_system_prompt TEXT DEFAULT '',
+                    flow2api_cloning_backend TEXT DEFAULT 'gemini_native',
+                    flow2api_cloning_provider_order TEXT DEFAULT '',
+                    flow2api_cloning_enabled_providers TEXT DEFAULT '',
+                    flow2api_cloning_provider_retry_count INTEGER DEFAULT 1,
                     cloning_image_system_prompt TEXT DEFAULT '',
                     cloning_video_system_prompt TEXT DEFAULT '',
                     task_tracker_device_id TEXT DEFAULT '',
@@ -2131,6 +2144,9 @@ class Database:
         flow2api_csvgen_cookie: Optional[str] = None,
         flow2api_cloning_model: Optional[str] = None,
         flow2api_cloning_backend: Optional[str] = None,
+        flow2api_cloning_provider_order: Optional[str] = None,
+        flow2api_cloning_enabled_providers: Optional[str] = None,
+        flow2api_cloning_provider_retry_count: Optional[int] = None,
         flow2api_cloning_gemini_api_keys: Optional[str] = None,
         flow2api_cloning_openai_api_keys: Optional[str] = None,
         flow2api_cloning_openrouter_api_keys: Optional[str] = None,
@@ -2139,6 +2155,9 @@ class Database:
         flow2api_cloning_cloudflare_account_id: Optional[str] = None,
         flow2api_cloning_cloudflare_api_token: Optional[str] = None,
         flow2api_metadata_backend: Optional[str] = None,
+        flow2api_metadata_provider_order: Optional[str] = None,
+        flow2api_metadata_enabled_providers: Optional[str] = None,
+        flow2api_metadata_provider_retry_count: Optional[int] = None,
         flow2api_metadata_model: Optional[str] = None,
         flow2api_metadata_enabled_models: Optional[str] = None,
         flow2api_metadata_primary_model: Optional[str] = None,
@@ -2252,6 +2271,24 @@ class Database:
                 normalized_flow2api_cloning_backend = str(
                     current.get("flow2api_cloning_backend", "gemini_native") or "gemini_native"
                 )
+            normalized_flow2api_cloning_provider_order = (
+                str(flow2api_cloning_provider_order)
+                if flow2api_cloning_provider_order is not None
+                else str(current.get("flow2api_cloning_provider_order", "") or "")
+            )
+            normalized_flow2api_cloning_enabled_providers = (
+                str(flow2api_cloning_enabled_providers)
+                if flow2api_cloning_enabled_providers is not None
+                else str(current.get("flow2api_cloning_enabled_providers", "") or "")
+            )
+            try:
+                normalized_flow2api_cloning_provider_retry_count = (
+                    max(0, min(5, int(flow2api_cloning_provider_retry_count)))
+                    if flow2api_cloning_provider_retry_count is not None
+                    else max(0, min(5, int(current.get("flow2api_cloning_provider_retry_count", 1) or 1)))
+                )
+            except Exception:
+                normalized_flow2api_cloning_provider_retry_count = 1
             normalized_flow2api_cloning_gemini_api_keys = (
                 str(flow2api_cloning_gemini_api_keys)
                 if flow2api_cloning_gemini_api_keys is not None
@@ -2292,6 +2329,24 @@ class Database:
                 if flow2api_metadata_backend is not None
                 else str(current.get("flow2api_metadata_backend", "gemini_native") or "gemini_native")
             )
+            normalized_flow2api_metadata_provider_order = (
+                str(flow2api_metadata_provider_order)
+                if flow2api_metadata_provider_order is not None
+                else str(current.get("flow2api_metadata_provider_order", "") or "")
+            )
+            normalized_flow2api_metadata_enabled_providers = (
+                str(flow2api_metadata_enabled_providers)
+                if flow2api_metadata_enabled_providers is not None
+                else str(current.get("flow2api_metadata_enabled_providers", "") or "")
+            )
+            try:
+                normalized_flow2api_metadata_provider_retry_count = (
+                    max(0, min(5, int(flow2api_metadata_provider_retry_count)))
+                    if flow2api_metadata_provider_retry_count is not None
+                    else max(0, min(5, int(current.get("flow2api_metadata_provider_retry_count", 1) or 1)))
+                )
+            except Exception:
+                normalized_flow2api_metadata_provider_retry_count = 1
             normalized_flow2api_metadata_model = (
                 str(flow2api_metadata_model)
                 if flow2api_metadata_model is not None
@@ -2388,6 +2443,9 @@ class Database:
                         flow2api_csvgen_cookie = ?,
                         flow2api_cloning_model = ?,
                         flow2api_cloning_backend = ?,
+                        flow2api_cloning_provider_order = ?,
+                        flow2api_cloning_enabled_providers = ?,
+                        flow2api_cloning_provider_retry_count = ?,
                         flow2api_cloning_gemini_api_keys = ?,
                         flow2api_cloning_openai_api_keys = ?,
                         flow2api_cloning_openrouter_api_keys = ?,
@@ -2396,6 +2454,9 @@ class Database:
                         flow2api_cloning_cloudflare_account_id = ?,
                         flow2api_cloning_cloudflare_api_token = ?,
                         flow2api_metadata_backend = ?,
+                        flow2api_metadata_provider_order = ?,
+                        flow2api_metadata_enabled_providers = ?,
+                        flow2api_metadata_provider_retry_count = ?,
                         flow2api_metadata_model = ?,
                         flow2api_metadata_enabled_models = ?,
                         flow2api_metadata_primary_model = ?,
@@ -2427,6 +2488,9 @@ class Database:
                     normalized_flow2api_csvgen_cookie,
                     normalized_flow2api_cloning_model,
                     normalized_flow2api_cloning_backend,
+                    normalized_flow2api_cloning_provider_order,
+                    normalized_flow2api_cloning_enabled_providers,
+                    normalized_flow2api_cloning_provider_retry_count,
                     normalized_flow2api_cloning_gemini_api_keys,
                     normalized_flow2api_cloning_openai_api_keys,
                     normalized_flow2api_cloning_openrouter_api_keys,
@@ -2435,6 +2499,9 @@ class Database:
                     normalized_flow2api_cloning_cloudflare_account_id,
                     normalized_flow2api_cloning_cloudflare_api_token,
                     normalized_flow2api_metadata_backend,
+                    normalized_flow2api_metadata_provider_order,
+                    normalized_flow2api_metadata_enabled_providers,
+                    normalized_flow2api_metadata_provider_retry_count,
                     normalized_flow2api_metadata_model,
                     normalized_flow2api_metadata_enabled_models,
                     normalized_flow2api_metadata_primary_model,
@@ -2468,6 +2535,9 @@ class Database:
                         flow2api_csvgen_cookie,
                         flow2api_cloning_model,
                         flow2api_cloning_backend,
+                        flow2api_cloning_provider_order,
+                        flow2api_cloning_enabled_providers,
+                        flow2api_cloning_provider_retry_count,
                         flow2api_cloning_gemini_api_keys,
                         flow2api_cloning_openai_api_keys,
                         flow2api_cloning_openrouter_api_keys,
@@ -2476,6 +2546,9 @@ class Database:
                         flow2api_cloning_cloudflare_account_id,
                         flow2api_cloning_cloudflare_api_token,
                         flow2api_metadata_backend,
+                        flow2api_metadata_provider_order,
+                        flow2api_metadata_enabled_providers,
+                        flow2api_metadata_provider_retry_count,
                         flow2api_metadata_model,
                         flow2api_metadata_enabled_models,
                         flow2api_metadata_primary_model,
@@ -2490,7 +2563,7 @@ class Database:
                         task_tracker_turnstile_token,
                         task_tracker_tls_profile
                     )
-                    VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     normalized_image_timeout,
                     normalized_video_timeout,
@@ -2507,6 +2580,9 @@ class Database:
                     normalized_flow2api_csvgen_cookie,
                     normalized_flow2api_cloning_model,
                     normalized_flow2api_cloning_backend,
+                    normalized_flow2api_cloning_provider_order,
+                    normalized_flow2api_cloning_enabled_providers,
+                    normalized_flow2api_cloning_provider_retry_count,
                     normalized_flow2api_cloning_gemini_api_keys,
                     normalized_flow2api_cloning_openai_api_keys,
                     normalized_flow2api_cloning_openrouter_api_keys,
@@ -2515,6 +2591,9 @@ class Database:
                     normalized_flow2api_cloning_cloudflare_account_id,
                     normalized_flow2api_cloning_cloudflare_api_token,
                     normalized_flow2api_metadata_backend,
+                    normalized_flow2api_metadata_provider_order,
+                    normalized_flow2api_metadata_enabled_providers,
+                    normalized_flow2api_metadata_provider_retry_count,
                     normalized_flow2api_metadata_model,
                     normalized_flow2api_metadata_enabled_models,
                     normalized_flow2api_metadata_primary_model,
@@ -3000,6 +3079,15 @@ class Database:
             config.set_flow2api_cloning_backend(
                 str(getattr(generation_config, "flow2api_cloning_backend", "gemini_native") or "gemini_native")
             )
+            config.set_flow2api_cloning_provider_order(
+                str(getattr(generation_config, "flow2api_cloning_provider_order", "") or "")
+            )
+            config.set_flow2api_cloning_enabled_providers(
+                str(getattr(generation_config, "flow2api_cloning_enabled_providers", "") or "")
+            )
+            config.set_flow2api_cloning_provider_retry_count(
+                int(getattr(generation_config, "flow2api_cloning_provider_retry_count", 1) or 1)
+            )
             config.set_flow2api_cloning_gemini_api_keys(
                 str(getattr(generation_config, "flow2api_cloning_gemini_api_keys", "") or "")
             )
@@ -3023,6 +3111,15 @@ class Database:
             )
             config.set_flow2api_metadata_backend(
                 str(getattr(generation_config, "flow2api_metadata_backend", "gemini_native") or "gemini_native")
+            )
+            config.set_flow2api_metadata_provider_order(
+                str(getattr(generation_config, "flow2api_metadata_provider_order", "") or "")
+            )
+            config.set_flow2api_metadata_enabled_providers(
+                str(getattr(generation_config, "flow2api_metadata_enabled_providers", "") or "")
+            )
+            config.set_flow2api_metadata_provider_retry_count(
+                int(getattr(generation_config, "flow2api_metadata_provider_retry_count", 1) or 1)
             )
             config.set_flow2api_metadata_model(
                 str(getattr(generation_config, "flow2api_metadata_model", "gemini-2.5-flash") or "gemini-2.5-flash")

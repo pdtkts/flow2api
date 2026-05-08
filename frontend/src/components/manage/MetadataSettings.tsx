@@ -7,7 +7,6 @@ import { Input } from "../ui/input"
 import { Label } from "../ui/label"
 import { Textarea } from "../ui/textarea"
 import { toast } from "sonner"
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../ui/table"
 import { Key } from "lucide-react"
 
@@ -40,7 +39,9 @@ const METADATA_BACKENDS = [
 export function MetadataSettings({ active }: { active: boolean }) {
   const { token } = useAuth()
   const [busy, setBusy] = useState(false)
-  const [backend, setBackend] = useState("gemini_native")
+  const [providerOrder, setProviderOrder] = useState<string[]>(METADATA_BACKENDS)
+  const [enabledProviders, setEnabledProviders] = useState<string[]>(["gemini_native"])
+  const [providerRetryCount, setProviderRetryCount] = useState(1)
   const [model, setModel] = useState("gemini-2.5-flash")
   const [enabledModels, setEnabledModels] = useState<string[]>(["gemini-2.5-flash"])
   const [primaryModel, setPrimaryModel] = useState("gemini-2.5-flash")
@@ -60,8 +61,29 @@ export function MetadataSettings({ active }: { active: boolean }) {
     const resp = await adminJson<{ success?: boolean; config?: Record<string, unknown> }>("/api/config/generation", token)
     if (!resp.ok || !resp.data?.success || !resp.data.config) return
     const c = resp.data.config
-    setBackend(String(c.flow2api_metadata_backend || "gemini_native"))
-    setModel(String(c.flow2api_metadata_model || "gemini-2.5-flash"))
+    const legacyBackend = String(c.flow2api_metadata_backend || "gemini_native").trim() || "gemini_native"
+    const orderFromConfig = String(c.flow2api_metadata_provider_order || "")
+      .split(",")
+      .map((x) => x.trim())
+      .filter(Boolean)
+      .filter((x) => METADATA_BACKENDS.includes(x))
+    const normalizedOrder = [
+      ...(orderFromConfig.length ? orderFromConfig : [legacyBackend]),
+      ...METADATA_BACKENDS.filter((x) => !(orderFromConfig.length ? orderFromConfig : [legacyBackend]).includes(x)),
+    ]
+    const enabledFromConfig = String(c.flow2api_metadata_enabled_providers || "")
+      .split(",")
+      .map((x) => x.trim())
+      .filter(Boolean)
+      .filter((x) => normalizedOrder.includes(x))
+    const normalizedEnabled = enabledFromConfig.length ? enabledFromConfig : [legacyBackend]
+    const selectedProvider = normalizedOrder.find((p) => normalizedEnabled.includes(p)) || normalizedOrder[0] || "gemini_native"
+    setProviderOrder(normalizedOrder)
+    setEnabledProviders(normalizedEnabled)
+    setProviderRetryCount(
+      Math.max(0, Math.min(5, Number(c.flow2api_metadata_provider_retry_count ?? 1) || 1))
+    )
+    setModel(String(c.flow2api_metadata_model || PRESET_MODELS[selectedProvider]?.[0] || "gemini-2.5-flash"))
     const configuredEnabledRaw = String(c.flow2api_metadata_enabled_models || "").trim()
     const configuredPrimary = String(c.flow2api_metadata_primary_model || "").trim()
     const configuredFallbackRaw = String(c.flow2api_metadata_fallback_models || "").trim()
@@ -88,7 +110,12 @@ export function MetadataSettings({ active }: { active: boolean }) {
     setCloudflareApiToken(String(c.cloudflare_api_token || ""))
   }, [token, active])
 
-  const backendModels = useMemo(() => PRESET_MODELS[backend] || [], [backend])
+  const selectedProvider = useMemo(
+    () => providerOrder.find((provider) => enabledProviders.includes(provider)) || providerOrder[0] || "gemini_native",
+    [providerOrder, enabledProviders],
+  )
+
+  const backendModels = useMemo(() => PRESET_MODELS[selectedProvider] || [], [selectedProvider])
 
   const allModels = useMemo(() => {
     const fromEnabled = enabledModels.map((m) => m.trim()).filter(Boolean)
@@ -132,6 +159,30 @@ export function MetadataSettings({ active }: { active: boolean }) {
     })
   }
 
+  const toggleProvider = (providerName: string, checked: boolean) => {
+    const value = providerName.trim()
+    if (!value) return
+    setEnabledProviders((prev) => {
+      if (checked) return Array.from(new Set([...prev, value]))
+      const next = prev.filter((p) => p !== value)
+      return next.length ? next : prev
+    })
+  }
+
+  const moveProvider = (providerName: string, direction: -1 | 1) => {
+    setProviderOrder((prev) => {
+      const idx = prev.indexOf(providerName)
+      if (idx < 0) return prev
+      const target = idx + direction
+      if (target < 0 || target >= prev.length) return prev
+      const next = [...prev]
+      const tmp = next[idx]
+      next[idx] = next[target]
+      next[target] = tmp
+      return next
+    })
+  }
+
   useEffect(() => {
     const timer = window.setTimeout(() => {
       void load()
@@ -146,7 +197,10 @@ export function MetadataSettings({ active }: { active: boolean }) {
       const r = await adminFetch("/api/config/generation", token, {
         method: "POST",
         body: JSON.stringify({
-          flow2api_metadata_backend: backend,
+          flow2api_metadata_backend: selectedProvider,
+          flow2api_metadata_provider_order: providerOrder.join(","),
+          flow2api_metadata_enabled_providers: enabledProviders.join(","),
+          flow2api_metadata_provider_retry_count: providerRetryCount,
           flow2api_metadata_model: model,
           flow2api_metadata_enabled_models: enabledModels.join(","),
           flow2api_metadata_primary_model: primaryModel,
@@ -181,26 +235,54 @@ export function MetadataSettings({ active }: { active: boolean }) {
       </CardHeader>
       <CardContent className="space-y-6">
         <div className="space-y-2">
-          <Label>Default Metadata Backend</Label>
-          <Select value={backend} onValueChange={(v) => {
-            setBackend(v)
-            const fallback = PRESET_MODELS[v]?.[0] || ""
-            setModel(fallback)
-            setPrimaryModel(fallback)
-            setEnabledModels(fallback ? [fallback] : [])
-          }}>
-            <SelectTrigger className="w-full sm:w-[300px]">
-              <SelectValue placeholder="Select backend" />
-            </SelectTrigger>
-            <SelectContent>
-              {METADATA_BACKENDS.map(entry => (
-                <SelectItem key={entry} value={entry} className="font-mono">{entry}</SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          <Label>Metadata Providers (ranked fallback)</Label>
+          <div className="rounded-md border overflow-hidden">
+            <div className="grid grid-cols-[1fr_90px_110px] gap-2 border-b bg-muted/40 px-3 py-2 text-xs font-medium">
+              <span>Provider</span>
+              <span className="text-center">Enabled</span>
+              <span className="text-center">Order</span>
+            </div>
+            <div className="max-h-[260px] overflow-y-auto">
+              {providerOrder.map((entry) => {
+                const enabled = enabledProviders.includes(entry)
+                return (
+                  <div key={entry} className="grid grid-cols-[1fr_90px_110px] items-center gap-2 border-b last:border-0 px-3 py-2 text-sm hover:bg-muted/20 transition-colors">
+                    <span className="font-mono truncate" title={entry}>{entry}</span>
+                    <div className="flex justify-center">
+                      <input
+                        type="checkbox"
+                        className="h-4 w-4 accent-primary rounded cursor-pointer"
+                        checked={enabled}
+                        onChange={(e) => toggleProvider(entry, e.target.checked)}
+                      />
+                    </div>
+                    <div className="flex gap-1 justify-center">
+                      <Button type="button" size="sm" variant="outline" onClick={() => moveProvider(entry, -1)} className="h-7 px-2">Up</Button>
+                      <Button type="button" size="sm" variant="outline" onClick={() => moveProvider(entry, 1)} className="h-7 px-2">Down</Button>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Requests use the first enabled provider, then fallback in order.
+          </p>
+          <div className="max-w-xs">
+            <Label htmlFor="metadata-provider-retries">Retry per provider before fallback</Label>
+            <Input
+              id="metadata-provider-retries"
+              type="number"
+              min={0}
+              max={5}
+              className="mt-1 w-32 font-mono text-sm"
+              value={providerRetryCount}
+              onChange={(e) => setProviderRetryCount(Math.max(0, Math.min(5, Number(e.target.value) || 0)))}
+            />
+          </div>
         </div>
 
-        {backend !== 'csvgen' && (
+        {selectedProvider !== 'csvgen' && (
           <div className="space-y-2">
             <Label>Metadata Models (preset)</Label>
             <div className="rounded-md border overflow-hidden">
@@ -324,7 +406,7 @@ export function MetadataSettings({ active }: { active: boolean }) {
                     <Input className="font-mono text-xs h-8 bg-muted/20" placeholder="API Token..." value={cloudflareApiToken} onChange={(e) => setCloudflareApiToken(e.target.value)} />
                   </TableCell>
                 </TableRow>
-                {backend === 'csvgen' && (
+                {selectedProvider === 'csvgen' && (
                   <TableRow className="bg-primary/5">
                     <TableCell className="font-medium text-primary">CSVGEN</TableCell>
                     <TableCell className="text-muted-foreground font-mono text-[11px]">FLOW2API_CSVGEN_COOKIE</TableCell>

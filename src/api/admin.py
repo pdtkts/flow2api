@@ -638,12 +638,18 @@ class GenerationConfigRequest(BaseModel):
     flow2api_csvgen_cookie: Optional[str] = None
     flow2api_cloning_model: Optional[str] = None
     flow2api_metadata_backend: Optional[str] = None
+    flow2api_metadata_provider_order: Optional[str] = None
+    flow2api_metadata_enabled_providers: Optional[str] = None
+    flow2api_metadata_provider_retry_count: Optional[int] = None
     flow2api_metadata_model: Optional[str] = None
     flow2api_metadata_enabled_models: Optional[str] = None
     flow2api_metadata_primary_model: Optional[str] = None
     flow2api_metadata_fallback_models: Optional[str] = None
     metadata_system_prompt: Optional[str] = None
     flow2api_cloning_backend: Optional[str] = None
+    flow2api_cloning_provider_order: Optional[str] = None
+    flow2api_cloning_enabled_providers: Optional[str] = None
+    flow2api_cloning_provider_retry_count: Optional[int] = None
     flow2api_cloning_gemini_api_keys: Optional[str] = None
     flow2api_cloning_openai_api_keys: Optional[str] = None
     flow2api_cloning_openrouter_api_keys: Optional[str] = None
@@ -1545,6 +1551,15 @@ async def get_generation_config(token: str = Depends(verify_admin_token)):
             "flow2api_cloning_backend": str(
                 getattr(config, "flow2api_cloning_backend", "gemini_native") or "gemini_native"
             ),
+            "flow2api_cloning_provider_order": str(
+                getattr(config, "flow2api_cloning_provider_order", "") or ""
+            ),
+            "flow2api_cloning_enabled_providers": str(
+                getattr(config, "flow2api_cloning_enabled_providers", "") or ""
+            ),
+            "flow2api_cloning_provider_retry_count": int(
+                getattr(config, "flow2api_cloning_provider_retry_count", 1) or 1
+            ),
             "flow2api_cloning_gemini_api_keys": str(
                 getattr(config, "flow2api_cloning_gemini_api_keys", "") or ""
             ),
@@ -1569,6 +1584,15 @@ async def get_generation_config(token: str = Depends(verify_admin_token)):
             "flow2api_metadata_backend": str(
                 getattr(config, "flow2api_metadata_backend", "gemini_native")
                 or "gemini_native"
+            ),
+            "flow2api_metadata_provider_order": str(
+                getattr(config, "flow2api_metadata_provider_order", "") or ""
+            ),
+            "flow2api_metadata_enabled_providers": str(
+                getattr(config, "flow2api_metadata_enabled_providers", "") or ""
+            ),
+            "flow2api_metadata_provider_retry_count": int(
+                getattr(config, "flow2api_metadata_provider_retry_count", 1) or 1
             ),
             "flow2api_metadata_model": str(
                 getattr(config, "flow2api_metadata_model", "gemini-2.5-flash")
@@ -1628,6 +1652,9 @@ async def update_generation_config(
         flow2api_csvgen_cookie=request.flow2api_csvgen_cookie,
         flow2api_cloning_model=request.flow2api_cloning_model,
         flow2api_cloning_backend=request.flow2api_cloning_backend,
+        flow2api_cloning_provider_order=request.flow2api_cloning_provider_order,
+        flow2api_cloning_enabled_providers=request.flow2api_cloning_enabled_providers,
+        flow2api_cloning_provider_retry_count=request.flow2api_cloning_provider_retry_count,
         flow2api_cloning_gemini_api_keys=request.flow2api_cloning_gemini_api_keys,
         flow2api_cloning_openai_api_keys=request.flow2api_cloning_openai_api_keys,
         flow2api_cloning_openrouter_api_keys=request.flow2api_cloning_openrouter_api_keys,
@@ -1636,6 +1663,9 @@ async def update_generation_config(
         flow2api_cloning_cloudflare_account_id=request.flow2api_cloning_cloudflare_account_id,
         flow2api_cloning_cloudflare_api_token=request.flow2api_cloning_cloudflare_api_token,
         flow2api_metadata_backend=request.flow2api_metadata_backend,
+        flow2api_metadata_provider_order=request.flow2api_metadata_provider_order,
+        flow2api_metadata_enabled_providers=request.flow2api_metadata_enabled_providers,
+        flow2api_metadata_provider_retry_count=request.flow2api_metadata_provider_retry_count,
         flow2api_metadata_model=request.flow2api_metadata_model,
         flow2api_metadata_enabled_models=request.flow2api_metadata_enabled_models,
         flow2api_metadata_primary_model=request.flow2api_metadata_primary_model,
@@ -2324,6 +2354,9 @@ async def update_generation_timeout(
         flow2api_csvgen_cookie=request.flow2api_csvgen_cookie,
         flow2api_cloning_model=request.flow2api_cloning_model,
         flow2api_cloning_backend=request.flow2api_cloning_backend,
+        flow2api_cloning_provider_order=request.flow2api_cloning_provider_order,
+        flow2api_cloning_enabled_providers=request.flow2api_cloning_enabled_providers,
+        flow2api_cloning_provider_retry_count=request.flow2api_cloning_provider_retry_count,
         flow2api_cloning_gemini_api_keys=request.flow2api_cloning_gemini_api_keys,
         flow2api_cloning_openai_api_keys=request.flow2api_cloning_openai_api_keys,
         flow2api_cloning_openrouter_api_keys=request.flow2api_cloning_openrouter_api_keys,
@@ -2332,6 +2365,9 @@ async def update_generation_timeout(
         flow2api_cloning_cloudflare_account_id=request.flow2api_cloning_cloudflare_account_id,
         flow2api_cloning_cloudflare_api_token=request.flow2api_cloning_cloudflare_api_token,
         flow2api_metadata_backend=request.flow2api_metadata_backend,
+        flow2api_metadata_provider_order=request.flow2api_metadata_provider_order,
+        flow2api_metadata_enabled_providers=request.flow2api_metadata_enabled_providers,
+        flow2api_metadata_provider_retry_count=request.flow2api_metadata_provider_retry_count,
         flow2api_metadata_model=request.flow2api_metadata_model,
         flow2api_metadata_enabled_models=request.flow2api_metadata_enabled_models,
         flow2api_metadata_primary_model=request.flow2api_metadata_primary_model,

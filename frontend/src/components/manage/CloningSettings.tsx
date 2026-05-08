@@ -39,7 +39,9 @@ const CLONING_BACKENDS = [
 export function CloningSettings({ active }: { active: boolean }) {
   const { token } = useAuth()
   const [busy, setBusy] = useState(false)
-  const [backend, setBackend] = useState("gemini_native")
+  const [providerOrder, setProviderOrder] = useState<string[]>(CLONING_BACKENDS)
+  const [enabledProviders, setEnabledProviders] = useState<string[]>(["gemini_native"])
+  const [providerRetryCount, setProviderRetryCount] = useState(1)
   const [model, setModel] = useState("gemini-2.5-flash")
 
 
@@ -56,13 +58,33 @@ export function CloningSettings({ active }: { active: boolean }) {
     const resp = await adminJson<{ success?: boolean; config?: Record<string, unknown> }>("/api/config/generation", token)
     if (!resp.ok || !resp.data?.success || !resp.data.config) return
     const c = resp.data.config
-    const backendStr = String(c.flow2api_cloning_backend || "gemini_native").trim() || "gemini_native"
-    const presets = PRESET_MODELS[backendStr] || []
+    const legacyBackend = String(c.flow2api_cloning_backend || "gemini_native").trim() || "gemini_native"
+    const orderFromConfig = String(c.flow2api_cloning_provider_order || "")
+      .split(",")
+      .map((x) => x.trim())
+      .filter(Boolean)
+      .filter((x) => CLONING_BACKENDS.includes(x))
+    const normalizedOrder = [
+      ...(orderFromConfig.length ? orderFromConfig : [legacyBackend]),
+      ...CLONING_BACKENDS.filter((x) => !(orderFromConfig.length ? orderFromConfig : [legacyBackend]).includes(x)),
+    ]
+    const enabledFromConfig = String(c.flow2api_cloning_enabled_providers || "")
+      .split(",")
+      .map((x) => x.trim())
+      .filter(Boolean)
+      .filter((x) => normalizedOrder.includes(x))
+    const normalizedEnabled = enabledFromConfig.length ? enabledFromConfig : [legacyBackend]
+    const selectedProvider = normalizedOrder.find((p) => normalizedEnabled.includes(p)) || normalizedOrder[0] || "gemini_native"
+    const presets = PRESET_MODELS[selectedProvider] || []
     let modelStr = String(c.flow2api_cloning_model || "").trim()
     if (!modelStr) {
       modelStr = presets[0] || "gemini-2.5-flash"
     }
-    setBackend(backendStr)
+    setProviderOrder(normalizedOrder)
+    setEnabledProviders(normalizedEnabled)
+    setProviderRetryCount(
+      Math.max(0, Math.min(5, Number(c.flow2api_cloning_provider_retry_count ?? 1) || 1))
+    )
     setModel(modelStr)
 
     setGeminiKeys(String(c.flow2api_cloning_gemini_api_keys || ""))
@@ -74,13 +96,18 @@ export function CloningSettings({ active }: { active: boolean }) {
     setCloudflareApiToken(String(c.flow2api_cloning_cloudflare_api_token || ""))
   }, [token, active])
 
+  const selectedProvider = useMemo(
+    () => providerOrder.find((provider) => enabledProviders.includes(provider)) || providerOrder[0] || "gemini_native",
+    [providerOrder, enabledProviders],
+  )
+
   /** Include the persisted model so Radix Select never gets a value missing from items (fixes blank dropdown after load). */
   const backendModels = useMemo(() => {
-    const base = [...(PRESET_MODELS[backend] || [])]
+    const base = [...(PRESET_MODELS[selectedProvider] || [])]
     const cur = model.trim()
     if (cur && !base.includes(cur)) base.unshift(cur)
     return base
-  }, [backend, model])
+  }, [selectedProvider, model])
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -89,9 +116,33 @@ export function CloningSettings({ active }: { active: boolean }) {
     return () => window.clearTimeout(timer)
   }, [load])
 
+  const toggleProvider = (providerName: string, checked: boolean) => {
+    const value = providerName.trim()
+    if (!value) return
+    setEnabledProviders((prev) => {
+      if (checked) return Array.from(new Set([...prev, value]))
+      const next = prev.filter((p) => p !== value)
+      return next.length ? next : prev
+    })
+  }
+
+  const moveProvider = (providerName: string, direction: -1 | 1) => {
+    setProviderOrder((prev) => {
+      const idx = prev.indexOf(providerName)
+      if (idx < 0) return prev
+      const target = idx + direction
+      if (target < 0 || target >= prev.length) return prev
+      const next = [...prev]
+      const tmp = next[idx]
+      next[idx] = next[target]
+      next[target] = tmp
+      return next
+    })
+  }
+
   const save = async () => {
     if (!token) return
-    const presets = PRESET_MODELS[backend] || []
+    const presets = PRESET_MODELS[selectedProvider] || []
     let modelOut = model.trim()
     if (!modelOut) {
       modelOut = presets[0] || "gemini-2.5-flash"
@@ -106,7 +157,10 @@ export function CloningSettings({ active }: { active: boolean }) {
           "X-Flow2API-Client-Operation": "save-cloning-settings",
         },
         body: JSON.stringify({
-          flow2api_cloning_backend: backend,
+          flow2api_cloning_backend: selectedProvider,
+          flow2api_cloning_provider_order: providerOrder.join(","),
+          flow2api_cloning_enabled_providers: enabledProviders.join(","),
+          flow2api_cloning_provider_retry_count: providerRetryCount,
           flow2api_cloning_model: modelOut,
 
           flow2api_cloning_gemini_api_keys: geminiKeys,
@@ -173,31 +227,58 @@ export function CloningSettings({ active }: { active: boolean }) {
           }}
         >
         <div className="space-y-2">
-          <Label>Cloning Backend</Label>
-          <Select
-            value={backend}
-            onValueChange={(v) => {
-              setBackend(v)
-              const fallback = PRESET_MODELS[v]?.[0] || ""
-              setModel(fallback)
-            }}
-          >
-            <SelectTrigger className="w-full sm:w-[300px]">
-              <SelectValue placeholder="Select cloning backend" />
-            </SelectTrigger>
-            <SelectContent>
-              {CLONING_BACKENDS.map(entry => (
-                <SelectItem key={entry} value={entry} className="font-mono">{entry}</SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          <Label>Cloning Providers (ranked fallback)</Label>
+          <div className="rounded-md border overflow-hidden">
+            <div className="grid grid-cols-[1fr_90px_110px] gap-2 border-b bg-muted/40 px-3 py-2 text-xs font-medium">
+              <span>Provider</span>
+              <span className="text-center">Enabled</span>
+              <span className="text-center">Order</span>
+            </div>
+            <div className="max-h-[260px] overflow-y-auto">
+              {providerOrder.map((entry) => {
+                const enabled = enabledProviders.includes(entry)
+                return (
+                  <div key={entry} className="grid grid-cols-[1fr_90px_110px] items-center gap-2 border-b last:border-0 px-3 py-2 text-sm hover:bg-muted/20 transition-colors">
+                    <span className="font-mono truncate" title={entry}>{entry}</span>
+                    <div className="flex justify-center">
+                      <input
+                        type="checkbox"
+                        className="h-4 w-4 accent-primary rounded cursor-pointer"
+                        checked={enabled}
+                        onChange={(e) => toggleProvider(entry, e.target.checked)}
+                      />
+                    </div>
+                    <div className="flex gap-1 justify-center">
+                      <Button type="button" size="sm" variant="outline" onClick={() => moveProvider(entry, -1)} className="h-7 px-2">Up</Button>
+                      <Button type="button" size="sm" variant="outline" onClick={() => moveProvider(entry, 1)} className="h-7 px-2">Down</Button>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Requests use the first enabled provider, then fallback in order.
+          </p>
+          <div className="max-w-xs">
+            <Label htmlFor="cloning-provider-retries">Retry per provider before fallback</Label>
+            <Input
+              id="cloning-provider-retries"
+              type="number"
+              min={0}
+              max={5}
+              className="mt-1 w-32 font-mono text-sm"
+              value={providerRetryCount}
+              onChange={(e) => setProviderRetryCount(Math.max(0, Math.min(5, Number(e.target.value) || 0)))}
+            />
+          </div>
         </div>
 
         <div className="space-y-2">
           <Label>Cloning Model</Label>
           <div className="flex gap-2 w-full sm:w-[400px]">
             <Select
-              key={`${backend}:${model}`}
+              key={`${selectedProvider}:${model}`}
               value={model}
               onValueChange={setModel}
             >
