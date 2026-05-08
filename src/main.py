@@ -80,6 +80,13 @@ def _path_allowed_on_api_only_host(path: str) -> bool:
         return True
     if path.startswith("/api/extension/"):
         return True
+    # Public cloning + metadata endpoints (managed-API-key auth) used by external clients.
+    if path in (
+        "/api/generate-cloning-prompts",
+        "/api/generate-cloning-video-prompt",
+        "/api/generate-metadata",
+    ):
+        return True
     return False
 
 
