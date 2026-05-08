@@ -2285,6 +2285,7 @@ async def fetch_task_tracker_assets(
             order=request.order or "creation",
             pages=request.pages,
             title_filter=request.title_filter or "",
+            generative_ai=request.generative_ai or "all",
         )
         return results
     except ValueError as exc:

@@ -505,3 +505,4 @@ class TaskTrackerFetchRequest(BaseModel):
     order: Optional[str] = "creation"
     pages: Optional[List[int]] = None
     title_filter: Optional[str] = ""
+    generative_ai: Optional[str] = "all"

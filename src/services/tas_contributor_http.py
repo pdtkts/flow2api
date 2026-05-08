@@ -53,12 +53,23 @@ def request_with_fallback(method: str, url: str, **kwargs: Any):
     raise RuntimeError("; ".join(errors) if errors else "no working impersonation profile")
 
 
-def build_referer(search_id: str, order: str, page: int) -> str:
+def normalize_generative_ai(value: Optional[str]) -> str:
+    raw = str(value or "all").strip().lower()
+    if raw in {"all", "any"}:
+        return "all"
+    if raw in {"ai_only", "only_ai", "ai", "gen_ai"}:
+        return "ai_only"
+    if raw in {"exclude_ai", "non_ai", "no_ai", "human_only"}:
+        return "exclude_ai"
+    return "all"
+
+
+def build_referer(search_id: str, order: str, page: int, generative_ai: str = "all") -> str:
     qs: Dict[str, str] = {
         "search": search_id,
         "order": order,
         "content_type": "all",
-        "generative_ai": "all",
+        "generative_ai": normalize_generative_ai(generative_ai),
     }
     if page > 1:
         qs["page"] = str(page)
@@ -188,13 +199,18 @@ def fetch_contributor_search_page(
     search_id: str,
     order: str,
     page: int,
+    generative_ai: str,
     cookie: str,
     csr_token: str,
     turnstile_token: Optional[str],
     device_id: str,
     impersonate: str,
 ) -> Tuple[Optional[Dict[str, Any]], str]:
-    params: Dict[str, str] = {"search": search_id, "order": order}
+    params: Dict[str, str] = {
+        "search": search_id,
+        "order": order,
+        "generative_ai": normalize_generative_ai(generative_ai),
+    }
     if page > 1:
         params["page"] = str(page)
     qs = urlencode(params)
@@ -203,7 +219,7 @@ def fetch_contributor_search_page(
         "Accept": "*/*",
         "Accept-Language": "en-GB,en;q=0.9",
         "Cookie": cookie,
-        "Referer": build_referer(search_id, order, page),
+        "Referer": build_referer(search_id, order, page, generative_ai),
         "User-Agent": DEFAULT_UA,
         "X-Requested-With": "XMLHttpRequest",
         "X-CSR-Token": csr_token,
@@ -237,6 +253,7 @@ def fetch_contributor_raw_images(
     search_id: str,
     order: str,
     pages: List[int],
+    generative_ai: str,
     cookie: str,
     device_id: str,
     device_token: Optional[str],
@@ -251,7 +268,7 @@ def fetch_contributor_raw_images(
     if not pages:
         return [], "no pages"
     impersonate = (tls_profile or "").strip() or DEFAULT_TLS_PROFILE
-    csr_referer = build_referer(search_id, order, pages[0])
+    csr_referer = build_referer(search_id, order, pages[0], generative_ai)
     all_images: List[Dict[str, Any]] = []
     for page in pages:
         csr, err = ensure_csr_token(
@@ -263,6 +280,7 @@ def fetch_contributor_raw_images(
             search_id,
             order,
             page,
+            generative_ai,
             cookie,
             csr,
             turnstile_token,
