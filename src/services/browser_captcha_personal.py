@@ -1349,7 +1349,7 @@ class BrowserCaptchaService:
         max_resident_tabs_override: Optional[int] = None,
     ):
         """初始化服务"""
-        self.headless = bool(getattr(config, "personal_headless", True))  # 是否无头由配置控制
+        self.headless = bool(getattr(config, "personal_headless", False))  # 是否无头由配置控制
         self.browser = None
         self._initialized = False
         self.website_key = "6LdsFiUsAAAAAIjVDZcuLhaHiDn5nnHVXVRQGeMV"
@@ -1762,7 +1762,7 @@ class BrowserCaptchaService:
         old_user_data_dir = self.user_data_dir
         old_runtime_config_signature = self._proxy_config_signature
 
-        self.headless = bool(getattr(config, "personal_headless", True))
+        self.headless = bool(getattr(config, "personal_headless", False))
         configured_max_tabs = config.personal_max_resident_tabs
         self._max_resident_tabs = self._resolve_personal_max_resident_tabs(configured_max_tabs)
         self._idle_tab_ttl_seconds = config.personal_idle_tab_ttl_seconds
@@ -9531,6 +9531,36 @@ class BrowserCaptchaService:
 
         return None
 
+    async def warmup_resident_tabs(
+        self,
+        project_ids: Optional[list[str]] = None,
+        limit: int = 1,
+    ) -> list[Optional[str]]:
+        """启动时预热共享常驻标签页。
+
+        对每个 project_id 调用 _ensure_resident_tab 创建标签页，
+        达到 limit 数量后停止。返回已预热的 slot_id 列表。
+        """
+        if not project_ids:
+            return []
+        warmed: list[Optional[str]] = []
+        for pid in project_ids:
+            if len(warmed) >= limit:
+                break
+            try:
+                _slot_id, _info = await self._ensure_resident_tab(
+                    project_id=pid,
+                    force_create=False,
+                    return_slot_key=True,
+                )
+                if _slot_id:
+                    warmed.append(_slot_id)
+            except Exception:
+                debug_logger.log_warning(
+                    f"[BrowserCaptcha] warmup_resident_tabs 预热 project={pid} 失败",
+                )
+        return warmed
+
     # ========== 状态查询 ==========
 
     def is_resident_mode_active(self) -> bool:
@@ -9798,7 +9828,7 @@ class _PersonalBrowserPoolService:
 
     def __init__(self, db=None):
         self.db = db
-        self.headless = bool(getattr(config, "personal_headless", True))
+        self.headless = bool(getattr(config, "personal_headless", False))
         self._closing = False
         self._workers: list[BrowserCaptchaService] = []
         self._worker_tab_limits: list[int] = []
@@ -10816,7 +10846,7 @@ class _PersonalBrowserPoolService:
 
         async with self._reload_lock:
             async with self._worker_dispatch_lock:
-                self.headless = bool(getattr(config, "personal_headless", True))
+                self.headless = bool(getattr(config, "personal_headless", False))
                 configured_browser_count = BrowserCaptchaService._resolve_configured_browser_count()
                 total_tabs = self._resolve_total_resident_tabs()
                 worker_limits = self._build_worker_tab_limits(
