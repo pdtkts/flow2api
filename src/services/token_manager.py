@@ -924,7 +924,11 @@ class TokenManager:
         stats = await self.db.get_token_stats(token_id)
         admin_config = await self.db.get_admin_config()
 
-        if stats and stats.consecutive_error_count >= admin_config.error_ban_threshold:
+        if (
+            admin_config.error_ban_enabled
+            and stats
+            and stats.consecutive_error_count >= admin_config.error_ban_threshold
+        ):
             debug_logger.log_warning(
                 f"[TOKEN_BAN] Token {token_id} consecutive error count ({stats.consecutive_error_count}) "
                 f"reached threshold ({admin_config.error_ban_threshold}), auto-disabling"

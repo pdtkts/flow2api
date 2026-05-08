@@ -1,6 +1,6 @@
 """Data models for Flow2API"""
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from typing import Optional, List, Union, Any, Literal, Dict
 from datetime import datetime
 
@@ -135,6 +135,18 @@ class AdminConfig(BaseModel):
     password: str
     api_key: str
     error_ban_threshold: int = 3  # Auto-disable token after N consecutive errors
+    error_ban_enabled: bool = True  # When False, consecutive errors do not auto-disable tokens
+
+    @field_validator("error_ban_enabled", mode="before")
+    @classmethod
+    def coerce_error_ban_enabled(cls, v):
+        if v is None:
+            return True
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, (int, str)):
+            return bool(int(v))
+        return bool(v)
 
 
 class ProxyConfig(BaseModel):

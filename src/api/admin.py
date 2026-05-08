@@ -746,7 +746,8 @@ class UpdateDebugConfigRequest(BaseModel):
 
 
 class UpdateAdminConfigRequest(BaseModel):
-    error_ban_threshold: int
+    error_ban_threshold: Optional[int] = None
+    error_ban_enabled: Optional[bool] = None
 
 
 class ST2ATRequest(BaseModel):
@@ -1977,6 +1978,7 @@ async def get_admin_config(token: str = Depends(verify_admin_token)):
         "admin_username": admin_config.username,
         "api_key": admin_config.api_key,
         "error_ban_threshold": admin_config.error_ban_threshold,
+        "error_ban_enabled": admin_config.error_ban_enabled,
         "debug_enabled": config.debug_enabled  # Return actual debug status
     }
 
@@ -1986,9 +1988,15 @@ async def update_admin_config(
     request: UpdateAdminConfigRequest,
     token: str = Depends(verify_admin_token)
 ):
-    """Update admin configuration (error_ban_threshold)"""
-    # Update error_ban_threshold in database
-    await db.update_admin_config(error_ban_threshold=request.error_ban_threshold)
+    """Update admin configuration (error ban threshold and/or auto-disable toggle)"""
+    kwargs: Dict[str, Any] = {}
+    if request.error_ban_threshold is not None:
+        kwargs["error_ban_threshold"] = request.error_ban_threshold
+    if request.error_ban_enabled is not None:
+        kwargs["error_ban_enabled"] = 1 if request.error_ban_enabled else 0
+    if not kwargs:
+        raise HTTPException(status_code=400, detail="No fields to update")
+    await db.update_admin_config(**kwargs)
 
     return {"success": True, "message": "配置更新成功"}
 

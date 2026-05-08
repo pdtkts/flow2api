@@ -85,6 +85,7 @@ class Database:
             admin_password = "admin"
             api_key = "han1234"
             error_ban_threshold = 3
+            error_ban_enabled = 1
 
             if config_dict:
                 global_config = config_dict.get("global", {})
@@ -94,11 +95,13 @@ class Database:
 
                 admin_config = config_dict.get("admin", {})
                 error_ban_threshold = admin_config.get("error_ban_threshold", 3)
+                if "error_ban_enabled" in admin_config:
+                    error_ban_enabled = 1 if admin_config.get("error_ban_enabled") else 0
 
             await db.execute("""
-                INSERT INTO admin_config (id, username, password, api_key, error_ban_threshold)
-                VALUES (1, ?, ?, ?, ?)
-            """, (admin_username, admin_password, api_key, error_ban_threshold))
+                INSERT INTO admin_config (id, username, password, api_key, error_ban_threshold, error_ban_enabled)
+                VALUES (1, ?, ?, ?, ?, ?)
+            """, (admin_username, admin_password, api_key, error_ban_threshold, error_ban_enabled))
 
         # Ensure proxy_config has a row
         cursor = await db.execute("SELECT COUNT(*) FROM proxy_config")
@@ -694,6 +697,12 @@ class Database:
                         print("  ✓ Added column 'error_ban_threshold' to admin_config table")
                     except Exception as e:
                         print(f"  ✗ Failed to add column 'error_ban_threshold': {e}")
+                if not await self._column_exists(db, "admin_config", "error_ban_enabled"):
+                    try:
+                        await db.execute("ALTER TABLE admin_config ADD COLUMN error_ban_enabled INTEGER DEFAULT 1")
+                        print("  ✓ Added column 'error_ban_enabled' to admin_config table")
+                    except Exception as e:
+                        print(f"  ✗ Failed to add column 'error_ban_enabled': {e}")
 
             # Check and add missing columns to proxy_config table
             if await self._table_exists(db, "proxy_config"):
@@ -1073,6 +1082,7 @@ class Database:
                     password TEXT DEFAULT 'admin',
                     api_key TEXT DEFAULT 'han1234',
                     error_ban_threshold INTEGER DEFAULT 3,
+                    error_ban_enabled INTEGER DEFAULT 1,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)

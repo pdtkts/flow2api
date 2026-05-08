@@ -138,6 +138,7 @@ export function SystemSettings({ active }: { active: boolean }) {
   const [newPwd, setNewPwd] = useState("")
   const [newApiKeyInput, setNewApiKeyInput] = useState("")
   const [errorBan, setErrorBan] = useState("3")
+  const [errorBanEnabled, setErrorBanEnabled] = useState(true)
   const [debugEnabled, setDebugEnabled] = useState(false)
 
   const [proxyEnabled, setProxyEnabled] = useState(false)
@@ -179,6 +180,7 @@ export function SystemSettings({ active }: { active: boolean }) {
         admin_username?: string
         api_key?: string
         error_ban_threshold?: number
+        error_ban_enabled?: boolean
         debug_enabled?: boolean
       }>("/api/admin/config", token),
       adminJson<{ proxy_enabled?: boolean; proxy_url?: string; media_proxy_enabled?: boolean; media_proxy_url?: string }>(
@@ -219,6 +221,7 @@ export function SystemSettings({ active }: { active: boolean }) {
       setAdminUsername(a.data.admin_username || "admin")
       setCurrentApiKey(a.data.api_key || "")
       setErrorBan(String(a.data.error_ban_threshold ?? 3))
+      setErrorBanEnabled(a.data.error_ban_enabled !== false)
       setDebugEnabled(!!a.data.debug_enabled)
     }
     if (p.data) {
@@ -331,7 +334,10 @@ export function SystemSettings({ active }: { active: boolean }) {
     try {
       const r = await adminFetch("/api/admin/config", token, {
         method: "POST",
-        body: JSON.stringify({ error_ban_threshold: parseInt(errorBan, 10) || 3 }),
+        body: JSON.stringify({
+          error_ban_threshold: parseInt(errorBan, 10) || 3,
+          error_ban_enabled: errorBanEnabled,
+        }),
       })
       if (!r) return
       const d = await r.json()
@@ -792,9 +798,22 @@ export function SystemSettings({ active }: { active: boolean }) {
           <CardTitle>Error handling</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
+          <div className="flex items-center gap-2">
+            <Switch checked={errorBanEnabled} onCheckedChange={setErrorBanEnabled} id="error-ban-enabled" />
+            <Label htmlFor="error-ban-enabled">Auto-disable token after consecutive errors</Label>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            When off, tokens are not disabled by this counter. Other limits (for example 429) are unchanged.
+          </p>
           <div>
             <Label>Error ban threshold</Label>
-            <Input className="mt-1" type="number" value={errorBan} onChange={(e) => setErrorBan(e.target.value)} />
+            <Input
+              className="mt-1"
+              type="number"
+              value={errorBan}
+              onChange={(e) => setErrorBan(e.target.value)}
+              disabled={!errorBanEnabled}
+            />
             <p className="text-xs text-muted-foreground mt-1">Disable token after this many consecutive errors</p>
           </div>
           <Button onClick={saveErrorBan} disabled={busy}>
