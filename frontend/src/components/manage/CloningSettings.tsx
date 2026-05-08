@@ -77,6 +77,12 @@ export function CloningSettings({ active }: { active: boolean }) {
 
   const save = async () => {
     if (!token) return
+    const presets = PRESET_MODELS[backend] || []
+    let modelOut = model.trim()
+    if (!modelOut) {
+      modelOut = presets[0] || "gemini-2.5-flash"
+      setModel(modelOut)
+    }
     setBusy(true)
     try {
       const r = await adminFetch("/api/config/generation", token, {
@@ -87,7 +93,7 @@ export function CloningSettings({ active }: { active: boolean }) {
         },
         body: JSON.stringify({
           flow2api_cloning_backend: backend,
-          flow2api_cloning_model: model,
+          flow2api_cloning_model: modelOut,
 
           flow2api_cloning_gemini_api_keys: geminiKeys,
           flow2api_cloning_openai_api_keys: openaiKeys,
@@ -116,8 +122,10 @@ export function CloningSettings({ active }: { active: boolean }) {
         toast.error(msg || `Save failed (HTTP ${r.status}).`)
         return
       }
-      if (d.success) toast.success("Cloning settings saved")
-      else {
+      if (d.success) {
+        toast.success("Cloning settings saved")
+        await load()
+      } else {
         const msg =
           typeof d.detail === "string"
             ? d.detail

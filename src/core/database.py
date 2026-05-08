@@ -2212,16 +2212,28 @@ class Database:
                 if flow2api_csvgen_cookie is not None
                 else str(current.get("flow2api_csvgen_cookie", "") or "")
             )
-            normalized_flow2api_cloning_model = (
-                str(flow2api_cloning_model)
-                if flow2api_cloning_model is not None
-                else str(current.get("flow2api_cloning_model", "gemini-2.5-flash") or "gemini-2.5-flash")
-            )
-            normalized_flow2api_cloning_backend = (
-                str(flow2api_cloning_backend)
-                if flow2api_cloning_backend is not None
-                else str(current.get("flow2api_cloning_backend", "gemini_native") or "gemini_native")
-            )
+            if flow2api_cloning_model is not None:
+                raw_cm = str(flow2api_cloning_model).strip()
+                normalized_flow2api_cloning_model = (
+                    raw_cm
+                    if raw_cm
+                    else str(current.get("flow2api_cloning_model", "gemini-2.5-flash") or "gemini-2.5-flash")
+                )
+            else:
+                normalized_flow2api_cloning_model = str(
+                    current.get("flow2api_cloning_model", "gemini-2.5-flash") or "gemini-2.5-flash"
+                )
+            if flow2api_cloning_backend is not None:
+                raw_be = str(flow2api_cloning_backend).strip()
+                normalized_flow2api_cloning_backend = (
+                    raw_be
+                    if raw_be
+                    else str(current.get("flow2api_cloning_backend", "gemini_native") or "gemini_native")
+                )
+            else:
+                normalized_flow2api_cloning_backend = str(
+                    current.get("flow2api_cloning_backend", "gemini_native") or "gemini_native"
+                )
             normalized_flow2api_cloning_gemini_api_keys = (
                 str(flow2api_cloning_gemini_api_keys)
                 if flow2api_cloning_gemini_api_keys is not None

@@ -21,6 +21,7 @@ from ..core.auth import AuthManager
 from ..core.api_key_manager import ApiKeyManager
 from ..core.database import Database
 from ..core.config import config
+from ..core.models import GenerationConfig
 from ..core.monitoring import build_public_health_snapshot
 from ..services.token_manager import TokenManager
 from ..services.proxy_manager import ProxyManager
@@ -1505,6 +1506,8 @@ async def test_proxy_connectivity(
 async def get_generation_config(token: str = Depends(verify_admin_token)):
     """Get generation timeout configuration"""
     config = await db.get_generation_config()
+    if config is None:
+        config = GenerationConfig()
     return {
         "success": True,
         "config": {
@@ -1578,6 +1581,9 @@ async def get_generation_config(token: str = Depends(verify_admin_token)):
             "cloning_video_system_prompt": str(
                 getattr(config, "cloning_video_system_prompt", "") or ""
             ),
+            "task_tracker_device_id": str(getattr(config, "task_tracker_device_id", "") or ""),
+            "task_tracker_device_name": str(getattr(config, "task_tracker_device_name", "") or ""),
+            "task_tracker_cookies": str(getattr(config, "task_tracker_cookies", "") or ""),
         }
     }
 
