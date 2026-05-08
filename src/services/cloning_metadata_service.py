@@ -170,6 +170,10 @@ class CloningMetadataService:
                     return await self._invoke_openai(
                         candidate, prompt_text, image_bytes, mime_type, use_cloning_credentials
                     )
+                if provider == "openrouter":
+                    return await self._invoke_openrouter(
+                        candidate, prompt_text, image_bytes, mime_type, use_cloning_credentials
+                    )
                 if provider == "third_party_gemini":
                     return await self._invoke_third_party(
                         candidate, prompt_text, image_bytes, mime_type, use_cloning_credentials
@@ -226,6 +230,56 @@ class CloningMetadataService:
                 text = (((data or {}).get("choices") or [{}])[0].get("message") or {}).get("content") or "{}"
                 return _extract_json_object(text)
         raise HTTPException(status_code=500, detail="OpenAI request failed")
+
+    async def _invoke_openrouter(
+        self,
+        model: str,
+        prompt_text: str,
+        image_bytes: Optional[bytes],
+        mime_type: str,
+        use_cloning_credentials: bool = False,
+    ) -> Dict[str, Any]:
+        keys = _get_csv(app_config.flow2api_openrouter_api_keys)
+        if use_cloning_credentials:
+            alt = _get_csv(app_config.flow2api_cloning_openrouter_api_keys)
+            if alt:
+                keys = alt
+        if not keys:
+            raise HTTPException(status_code=503, detail="OpenRouter API key not configured")
+        content: Any = prompt_text
+        if image_bytes:
+            b64 = base64.b64encode(image_bytes).decode("ascii")
+            content = [
+                {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{b64}"}},
+                {"type": "text", "text": prompt_text},
+            ]
+        url = "https://openrouter.ai/api/v1/chat/completions"
+        extra_headers = {
+            "Referer": "https://github.com/flow2api",
+            "X-Title": "Flow2API",
+        }
+        for key in keys:
+            async with AsyncSession() as session:
+                resp = await session.post(
+                    url,
+                    headers={
+                        "Authorization": f"Bearer {key}",
+                        "Content-Type": "application/json",
+                        **extra_headers,
+                    },
+                    json={
+                        "model": model,
+                        "response_format": {"type": "json_object"},
+                        "messages": [{"role": "user", "content": content}],
+                    },
+                    timeout=120,
+                )
+                if resp.status_code >= 400:
+                    continue
+                data = resp.json()
+                text = (((data or {}).get("choices") or [{}])[0].get("message") or {}).get("content") or "{}"
+                return _extract_json_object(text)
+        raise HTTPException(status_code=500, detail="OpenRouter request failed")
 
     async def _invoke_gemini(
         self,

@@ -699,6 +699,7 @@ class Database:
                     ("extension_generation_fallback_mode", "TEXT DEFAULT 'local_http_on_recaptcha'"),
                     ("flow2api_gemini_api_keys", "TEXT DEFAULT ''"),
                     ("flow2api_openai_api_keys", "TEXT DEFAULT ''"),
+                    ("flow2api_openrouter_api_keys", "TEXT DEFAULT ''"),
                     ("flow2api_third_party_gemini_api_keys", "TEXT DEFAULT ''"),
                     ("flow2api_third_party_gemini_base_url", "TEXT DEFAULT ''"),
                     ("cloudflare_account_id", "TEXT DEFAULT ''"),
@@ -714,6 +715,7 @@ class Database:
                     ("flow2api_cloning_backend", "TEXT DEFAULT 'gemini_native'"),
                     ("flow2api_cloning_gemini_api_keys", "TEXT DEFAULT ''"),
                     ("flow2api_cloning_openai_api_keys", "TEXT DEFAULT ''"),
+                    ("flow2api_cloning_openrouter_api_keys", "TEXT DEFAULT ''"),
                     ("flow2api_cloning_third_party_gemini_api_keys", "TEXT DEFAULT ''"),
                     ("flow2api_cloning_third_party_gemini_base_url", "TEXT DEFAULT ''"),
                     ("flow2api_cloning_cloudflare_account_id", "TEXT DEFAULT ''"),
@@ -2115,6 +2117,7 @@ class Database:
         extension_generation_fallback_mode: Optional[str] = None,
         flow2api_gemini_api_keys: Optional[str] = None,
         flow2api_openai_api_keys: Optional[str] = None,
+        flow2api_openrouter_api_keys: Optional[str] = None,
         flow2api_third_party_gemini_api_keys: Optional[str] = None,
         flow2api_third_party_gemini_base_url: Optional[str] = None,
         cloudflare_account_id: Optional[str] = None,
@@ -2124,6 +2127,7 @@ class Database:
         flow2api_cloning_backend: Optional[str] = None,
         flow2api_cloning_gemini_api_keys: Optional[str] = None,
         flow2api_cloning_openai_api_keys: Optional[str] = None,
+        flow2api_cloning_openrouter_api_keys: Optional[str] = None,
         flow2api_cloning_third_party_gemini_api_keys: Optional[str] = None,
         flow2api_cloning_third_party_gemini_base_url: Optional[str] = None,
         flow2api_cloning_cloudflare_account_id: Optional[str] = None,
@@ -2187,6 +2191,11 @@ class Database:
                 if flow2api_openai_api_keys is not None
                 else str(current.get("flow2api_openai_api_keys", "") or "")
             )
+            normalized_flow2api_openrouter_api_keys = (
+                str(flow2api_openrouter_api_keys)
+                if flow2api_openrouter_api_keys is not None
+                else str(current.get("flow2api_openrouter_api_keys", "") or "")
+            )
             normalized_flow2api_third_party_gemini_api_keys = (
                 str(flow2api_third_party_gemini_api_keys)
                 if flow2api_third_party_gemini_api_keys is not None
@@ -2243,6 +2252,11 @@ class Database:
                 str(flow2api_cloning_openai_api_keys)
                 if flow2api_cloning_openai_api_keys is not None
                 else str(current.get("flow2api_cloning_openai_api_keys", "") or "")
+            )
+            normalized_flow2api_cloning_openrouter_api_keys = (
+                str(flow2api_cloning_openrouter_api_keys)
+                if flow2api_cloning_openrouter_api_keys is not None
+                else str(current.get("flow2api_cloning_openrouter_api_keys", "") or "")
             )
             normalized_flow2api_cloning_third_party_gemini_api_keys = (
                 str(flow2api_cloning_third_party_gemini_api_keys)
@@ -2342,6 +2356,7 @@ class Database:
                         extension_generation_fallback_mode = ?,
                         flow2api_gemini_api_keys = ?,
                         flow2api_openai_api_keys = ?,
+                        flow2api_openrouter_api_keys = ?,
                         flow2api_third_party_gemini_api_keys = ?,
                         flow2api_third_party_gemini_base_url = ?,
                         cloudflare_account_id = ?,
@@ -2351,6 +2366,7 @@ class Database:
                         flow2api_cloning_backend = ?,
                         flow2api_cloning_gemini_api_keys = ?,
                         flow2api_cloning_openai_api_keys = ?,
+                        flow2api_cloning_openrouter_api_keys = ?,
                         flow2api_cloning_third_party_gemini_api_keys = ?,
                         flow2api_cloning_third_party_gemini_base_url = ?,
                         flow2api_cloning_cloudflare_account_id = ?,
@@ -2376,6 +2392,7 @@ class Database:
                     normalized_extension_generation_fallback_mode,
                     normalized_flow2api_gemini_api_keys,
                     normalized_flow2api_openai_api_keys,
+                    normalized_flow2api_openrouter_api_keys,
                     normalized_flow2api_third_party_gemini_api_keys,
                     normalized_flow2api_third_party_gemini_base_url,
                     normalized_cloudflare_account_id,
@@ -2385,6 +2402,7 @@ class Database:
                     normalized_flow2api_cloning_backend,
                     normalized_flow2api_cloning_gemini_api_keys,
                     normalized_flow2api_cloning_openai_api_keys,
+                    normalized_flow2api_cloning_openrouter_api_keys,
                     normalized_flow2api_cloning_third_party_gemini_api_keys,
                     normalized_flow2api_cloning_third_party_gemini_base_url,
                     normalized_flow2api_cloning_cloudflare_account_id,
@@ -2412,6 +2430,7 @@ class Database:
                         extension_generation_fallback_mode,
                         flow2api_gemini_api_keys,
                         flow2api_openai_api_keys,
+                        flow2api_openrouter_api_keys,
                         flow2api_third_party_gemini_api_keys,
                         flow2api_third_party_gemini_base_url,
                         cloudflare_account_id,
@@ -2421,6 +2440,7 @@ class Database:
                         flow2api_cloning_backend,
                         flow2api_cloning_gemini_api_keys,
                         flow2api_cloning_openai_api_keys,
+                        flow2api_cloning_openrouter_api_keys,
                         flow2api_cloning_third_party_gemini_api_keys,
                         flow2api_cloning_third_party_gemini_base_url,
                         flow2api_cloning_cloudflare_account_id,
@@ -2437,7 +2457,7 @@ class Database:
                         task_tracker_device_name,
                         task_tracker_cookies
                     )
-                    VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     normalized_image_timeout,
                     normalized_video_timeout,
@@ -2446,6 +2466,7 @@ class Database:
                     normalized_extension_generation_fallback_mode,
                     normalized_flow2api_gemini_api_keys,
                     normalized_flow2api_openai_api_keys,
+                    normalized_flow2api_openrouter_api_keys,
                     normalized_flow2api_third_party_gemini_api_keys,
                     normalized_flow2api_third_party_gemini_base_url,
                     normalized_cloudflare_account_id,
@@ -2455,6 +2476,7 @@ class Database:
                     normalized_flow2api_cloning_backend,
                     normalized_flow2api_cloning_gemini_api_keys,
                     normalized_flow2api_cloning_openai_api_keys,
+                    normalized_flow2api_cloning_openrouter_api_keys,
                     normalized_flow2api_cloning_third_party_gemini_api_keys,
                     normalized_flow2api_cloning_third_party_gemini_base_url,
                     normalized_flow2api_cloning_cloudflare_account_id,
