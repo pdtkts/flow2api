@@ -92,8 +92,8 @@ export function MetadataSettings({ active }: { active: boolean }) {
 
   const allModels = useMemo(() => {
     const fromEnabled = enabledModels.map((m) => m.trim()).filter(Boolean)
-    const merged = Array.from(new Set([...backendModels, ...fromEnabled]))
-    return merged
+    const remainingPresetModels = backendModels.filter((m) => !fromEnabled.includes(m))
+    return [...fromEnabled, ...remainingPresetModels]
   }, [enabledModels, backendModels])
 
   const fallbackModels = useMemo(
@@ -247,15 +247,6 @@ export function MetadataSettings({ active }: { active: boolean }) {
               </div>
             </div>
 
-            <div className="mt-4 max-w-sm">
-              <Label>Legacy FLOW2API_METADATA_MODEL</Label>
-              <Input
-                className="mt-1 font-mono text-sm"
-                value={model}
-                readOnly
-                title="Automatically set from Primary Model"
-              />
-            </div>
             <p className="text-xs text-muted-foreground mt-2">
               Fallback order follows enabled model order excluding primary.
             </p>
