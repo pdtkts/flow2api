@@ -16,6 +16,7 @@ import time
 import os
 import sys
 import re
+import signal
 import json
 import hashlib
 import mimetypes
@@ -234,7 +235,7 @@ def _cleanup_runtime_artifacts_sync(
             for child in PERSONAL_RUNTIME_TMP_DIR.iterdir():
                 child_name = child.name
                 normalized_child = os.path.normcase(os.path.normpath(str(child)))
-                if child_name.startswith(("browser_profile_", "fresh_browser_profile_")):
+                if child_name.startswith(("browser_profile_", "fresh_browser_profile_", "launch_retry_profile_")):
                     if normalized_child in normalized_active_runtime_paths:
                         continue
                     age_seconds = _path_mtime_age_seconds(child, now_value)
@@ -1363,6 +1364,8 @@ class BrowserCaptchaService:
             max_resident_tabs_override=max_resident_tabs_override,
         )
         self._runtime_ephemeral_user_data_dir: Optional[str] = None
+        self._managed_runtime_profile_dirs: set[str] = set()
+        self._browser_process_pid: Optional[int] = None
         self.user_data_dir = self._resolve_user_data_dir(self.headless)
         self._visible_startup_target_id: Optional[str] = None
         self._headless_host_target_id: Optional[str] = None
@@ -1412,6 +1415,7 @@ class BrowserCaptchaService:
         self._last_fingerprint: Optional[Dict[str, Any]] = None
         self._resident_error_streaks: dict[str, int] = {}
         self._resident_unavailable_slots: set[str] = set()
+        self._resident_warmup_task: Optional[asyncio.Task] = None
         self._resident_rebuild_tasks: dict[str, asyncio.Task] = {}
         self._resident_recovery_tasks: dict[str, asyncio.Task] = {}
         self._last_runtime_restart_at = 0.0
@@ -1470,6 +1474,7 @@ class BrowserCaptchaService:
             dir=str(PERSONAL_RUNTIME_TMP_DIR),
         )
         normalized_dir = os.path.normpath(str(fresh_profile_dir))
+        self._managed_runtime_profile_dirs.add(normalized_dir)
         self._runtime_ephemeral_user_data_dir = normalized_dir
         self.user_data_dir = normalized_dir
         return normalized_dir
@@ -1512,7 +1517,12 @@ class BrowserCaptchaService:
         targets: list[Path] = []
         seen_targets: set[str] = set()
 
-        for raw_path in (self.user_data_dir, str(self._default_runtime_profile_dir())):
+        for raw_path in (
+            self.user_data_dir,
+            self._runtime_ephemeral_user_data_dir,
+            str(self._default_runtime_profile_dir()),
+            *list(getattr(self, "_managed_runtime_profile_dirs", set()) or set()),
+        ):
             normalized_path = str(raw_path or "").strip()
             if not normalized_path or not self._is_runtime_managed_profile_dir(normalized_path):
                 continue
@@ -6275,12 +6285,184 @@ class BrowserCaptchaService:
             reason=reason,
         )
 
+    @staticmethod
+    def _get_process_pid(process: Any) -> Optional[int]:
+        try:
+            pid = int(getattr(process, "pid", 0) or 0)
+        except Exception:
+            pid = 0
+        return pid if pid > 0 else None
+
+    def _get_browser_process_pid(self, browser_instance) -> Optional[int]:
+        if not browser_instance:
+            return None
+        return self._get_process_pid(getattr(browser_instance, "_process", None))
+
+    def _is_pid_running(self, pid: Optional[int]) -> bool:
+        if not pid:
+            return False
+        try:
+            if sys.platform.startswith("win"):
+                result = subprocess.run(
+                    ["tasklist", "/FI", f"PID eq {int(pid)}"],
+                    capture_output=True,
+                    text=True,
+                    timeout=8,
+                )
+                return str(int(pid)) in (result.stdout or "")
+            os.kill(int(pid), 0)
+            return True
+        except Exception:
+            return False
+
+    def _terminate_pid_tree(self, pid: Optional[int], *, reason: str) -> bool:
+        if not pid:
+            return False
+        try:
+            debug_logger.log_warning(
+                f"[BrowserCaptcha] 浏览器进程仍未退出，强制回收进程树 PID={pid} ({reason})"
+            )
+            if sys.platform.startswith("win"):
+                result = subprocess.run(
+                    ["taskkill", "/PID", str(int(pid)), "/T", "/F"],
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+                return result.returncode == 0 or not self._is_pid_running(pid)
+
+            try:
+                os.kill(int(pid), signal.SIGTERM)
+            except ProcessLookupError:
+                return True
+            deadline = time.time() + 3.0
+            while time.time() < deadline:
+                if not self._is_pid_running(pid):
+                    return True
+                time.sleep(0.1)
+            os.kill(int(pid), signal.SIGKILL)
+            return True
+        except Exception as e:
+            debug_logger.log_warning(
+                f"[BrowserCaptcha] 强制回收浏览器进程失败 PID={pid} ({reason}): {e}"
+            )
+            return False
+
+    def _collect_runtime_profile_process_targets(self) -> list[str]:
+        profile_dirs: list[str] = []
+        seen: set[str] = set()
+        candidates = [
+            self.user_data_dir,
+            self._runtime_ephemeral_user_data_dir,
+            *list(getattr(self, "_managed_runtime_profile_dirs", set()) or set()),
+        ]
+
+        for raw_path in candidates:
+            normalized_path = str(raw_path or "").strip()
+            if not normalized_path or not self._is_runtime_managed_profile_dir(normalized_path):
+                continue
+            try:
+                resolved = os.path.normcase(os.path.normpath(str(Path(normalized_path).resolve())))
+            except Exception:
+                resolved = os.path.normcase(os.path.normpath(normalized_path))
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            profile_dirs.append(resolved)
+
+        return profile_dirs
+
+    def _find_browser_pids_for_profile_dirs(self, profile_dirs: Iterable[str]) -> list[int]:
+        normalized_profile_dirs = [
+            os.path.normcase(os.path.normpath(str(item or "").strip()))
+            for item in profile_dirs
+            if str(item or "").strip()
+        ]
+        if not normalized_profile_dirs:
+            return []
+
+        found_pids: set[int] = set()
+        browser_names = {"chrome.exe", "chromium.exe", "msedge.exe", "chrome", "chromium", "msedge"}
+
+        if sys.platform.startswith("win"):
+            try:
+                result = subprocess.run(
+                    [
+                        "powershell",
+                        "-NoProfile",
+                        "-Command",
+                        (
+                            "Get-CimInstance Win32_Process | "
+                            "Where-Object { $_.Name -match '^(chrome|chromium|msedge)\\.exe$' } | "
+                            "Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress"
+                        ),
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+                output = (result.stdout or "").strip()
+                if not output:
+                    return []
+                payload = json.loads(output)
+                if isinstance(payload, dict):
+                    payload = [payload]
+                for item in payload if isinstance(payload, list) else []:
+                    try:
+                        pid = int(item.get("ProcessId") or 0)
+                    except Exception:
+                        continue
+                    command_line = os.path.normcase(
+                        os.path.normpath(str(item.get("CommandLine") or ""))
+                    )
+                    if pid > 0 and any(profile_dir in command_line for profile_dir in normalized_profile_dirs):
+                        found_pids.add(pid)
+            except Exception as e:
+                debug_logger.log_warning(f"[BrowserCaptcha] 扫描浏览器残留进程失败: {e}")
+            return sorted(found_pids)
+
+        proc_dir = Path("/proc")
+        if not proc_dir.exists():
+            return []
+        for child in proc_dir.iterdir():
+            if not child.name.isdigit():
+                continue
+            try:
+                pid = int(child.name)
+                comm = (child / "comm").read_text(encoding="utf-8", errors="ignore").strip()
+                if comm not in browser_names:
+                    continue
+                command_line = (child / "cmdline").read_bytes().decode(
+                    "utf-8",
+                    errors="ignore",
+                ).replace("\x00", " ")
+                normalized_command_line = os.path.normcase(os.path.normpath(command_line))
+                if any(profile_dir in normalized_command_line for profile_dir in normalized_profile_dirs):
+                    found_pids.add(pid)
+            except Exception:
+                continue
+        return sorted(found_pids)
+
+    def _terminate_browser_processes_for_profile_dirs(self, profile_dirs: Iterable[str], *, reason: str) -> int:
+        pids = self._find_browser_pids_for_profile_dirs(profile_dirs)
+        killed_count = 0
+        for pid in pids:
+            if self._terminate_pid_tree(pid, reason=reason):
+                killed_count += 1
+        if killed_count > 0:
+            debug_logger.log_warning(
+                f"[BrowserCaptcha] 已按 profile 路径兜底回收浏览器进程 ({reason}): {killed_count}/{len(pids)}"
+            )
+        return killed_count
+
     async def _stop_browser_process(self, browser_instance, reason: str = "browser_stop"):
         """兼容 nodriver 同步 stop API，安全停止浏览器进程。"""
         if not browser_instance:
             return
 
         process = getattr(browser_instance, "_process", None)
+        browser_pid = self._get_browser_process_pid(browser_instance) or self._browser_process_pid
+        profile_dirs = self._collect_runtime_profile_process_targets()
         connection = getattr(browser_instance, "connection", None)
         await self._disconnect_browser_connection_quietly(browser_instance, reason=reason)
 
@@ -6298,15 +6480,17 @@ class BrowserCaptchaService:
                 pass
 
         stop_method = getattr(browser_instance, "stop", None)
-        if stop_method is None:
-            return
-        result = stop_method()
-        if inspect.isawaitable(result):
-            await self._run_with_timeout(
-                result,
-                timeout_seconds=10.0,
-                label="browser.stop",
-            )
+        if stop_method is not None:
+            try:
+                result = stop_method()
+                if inspect.isawaitable(result):
+                    await self._run_with_timeout(
+                        result,
+                        timeout_seconds=10.0,
+                        label="browser.stop",
+                    )
+            except Exception as e:
+                debug_logger.log_warning(f"[BrowserCaptcha] browser.stop 异常 ({reason}): {e}")
         if process is not None:
             for stream_name in ("stdin", "stdout", "stderr"):
                 stream = getattr(process, stream_name, None)
@@ -6324,6 +6508,10 @@ class BrowserCaptchaService:
                 )
             except Exception:
                 pass
+        if browser_pid and self._is_pid_running(browser_pid):
+            self._terminate_pid_tree(browser_pid, reason=reason)
+        self._terminate_browser_processes_for_profile_dirs(profile_dirs, reason=reason)
+        self._browser_process_pid = None
         await asyncio.sleep(0.3)
 
     async def _cancel_background_runtime_tasks(self, *, reason: str) -> None:
@@ -6332,8 +6520,9 @@ class BrowserCaptchaService:
 
         async with self._resident_lock:
             candidate_tasks = []
-            if self._resident_warmup_task is not None:
-                candidate_tasks.append(self._resident_warmup_task)
+            resident_warmup_task = getattr(self, "_resident_warmup_task", None)
+            if resident_warmup_task is not None:
+                candidate_tasks.append(resident_warmup_task)
             candidate_tasks.extend(self._resident_rebuild_tasks.values())
             candidate_tasks.extend(self._resident_recovery_tasks.values())
 
@@ -6344,6 +6533,7 @@ class BrowserCaptchaService:
 
             self._resident_rebuild_tasks.clear()
             self._resident_recovery_tasks.clear()
+            self._resident_warmup_task = None
 
         if not tasks_to_cancel:
             return
@@ -7326,9 +7516,17 @@ class BrowserCaptchaService:
                                 timeout_seconds=30.0,
                                 label=launch_label,
                             )
+                            self._browser_process_pid = self._get_browser_process_pid(self.browser)
                             break
                         except Exception as start_error:
                             last_start_error = start_error
+                            failed_profile_dir = str(current_launch_kwargs.get("user_data_dir") or "").strip()
+                            if failed_profile_dir and self._is_runtime_managed_profile_dir(failed_profile_dir):
+                                self._managed_runtime_profile_dirs.add(os.path.normpath(failed_profile_dir))
+                                self._terminate_browser_processes_for_profile_dirs(
+                                    [failed_profile_dir],
+                                    reason=f"{launch_label}:failed_start",
+                                )
 
                             if (
                                 not tried_no_sandbox_retry
@@ -9004,6 +9202,8 @@ class BrowserCaptchaService:
         Returns:
             ResidentTabInfo 对象，或 None（创建失败）
         """
+        tab = None
+        browser_context_id = None
         try:
             debug_logger.log_info(
                 f"[BrowserCaptcha] 创建共享常驻标签页 slot={slot_id}, seed_project={project_id}, token_id={token_id}"
@@ -9095,7 +9295,15 @@ class BrowserCaptchaService:
             )
             return resident_info
 
+        except asyncio.CancelledError:
+            if tab is not None:
+                await self._dispose_browser_context_quietly(browser_context_id)
+                await self._close_tab_quietly(tab)
+            raise
         except Exception as e:
+            if tab is not None:
+                await self._dispose_browser_context_quietly(browser_context_id)
+                await self._close_tab_quietly(tab)
             debug_logger.log_error(
                 f"[BrowserCaptcha] 创建共享常驻标签页异常 (slot={slot_id}, project={project_id}, token_id={token_id}): {e}"
             )
