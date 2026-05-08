@@ -28,6 +28,9 @@ METADATA_PROVIDERS = [
     "csvgen",
 ]
 
+# OpenAI-compatible providers default to very high max_tokens; cap completion budget for JSON extraction calls.
+_JSON_CHAT_MAX_TOKENS = 8192
+
 
 def extract_json_object(raw: str) -> Dict[str, Any]:
     cleaned = str(raw or "").replace("```json", "").replace("```", "").strip()
@@ -208,7 +211,14 @@ class LlmProviderChain:
             except Exception as exc:
                 last_err = exc
                 continue
-        raise HTTPException(status_code=500, detail=str(last_err or "Model invocation failed"))
+        if last_err is None:
+            raise HTTPException(status_code=500, detail="Model invocation failed")
+        if isinstance(last_err, HTTPException):
+            raise HTTPException(
+                status_code=int(getattr(last_err, "status_code", 500) or 500),
+                detail=last_err.detail,
+            ) from last_err
+        raise HTTPException(status_code=500, detail=str(last_err)) from last_err
 
     async def _invoke_openai(
         self,
@@ -241,6 +251,7 @@ class LlmProviderChain:
                     headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
                     json={
                         "model": model,
+                        "max_tokens": _JSON_CHAT_MAX_TOKENS,
                         "response_format": {"type": "json_object"},
                         "messages": [{"role": "user", "content": content}],
                     },
@@ -295,6 +306,7 @@ class LlmProviderChain:
                     },
                     json={
                         "model": model,
+                        "max_tokens": _JSON_CHAT_MAX_TOKENS,
                         "response_format": {"type": "json_object"},
                         "messages": [{"role": "user", "content": content}],
                     },
@@ -378,7 +390,12 @@ class LlmProviderChain:
                 resp = await session.post(
                     f"{endpoint}/chat/completions",
                     headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-                    json={"model": model, "response_format": {"type": "json_object"}, "messages": [{"role": "user", "content": content}]},
+                    json={
+                        "model": model,
+                        "max_tokens": _JSON_CHAT_MAX_TOKENS,
+                        "response_format": {"type": "json_object"},
+                        "messages": [{"role": "user", "content": content}],
+                    },
                     timeout=120,
                 )
                 if resp.status_code >= 400:
@@ -421,7 +438,12 @@ class LlmProviderChain:
             resp = await session.post(
                 url,
                 headers={"Authorization": f"Bearer {api_token}", "Content-Type": "application/json"},
-                json={"model": model, "response_format": {"type": "json_object"}, "messages": [{"role": "user", "content": content}]},
+                json={
+                    "model": model,
+                    "max_tokens": _JSON_CHAT_MAX_TOKENS,
+                    "response_format": {"type": "json_object"},
+                    "messages": [{"role": "user", "content": content}],
+                },
                 timeout=120,
             )
             if resp.status_code >= 400:
