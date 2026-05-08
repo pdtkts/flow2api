@@ -18,7 +18,7 @@ export function TaskTrackerSettings({ active }: { active: boolean }) {
   const load = useCallback(async () => {
     if (!token || !active) return
     const resp = await adminJson<{ success?: boolean; config?: Record<string, unknown> }>(
-      "/api/generation/timeout",
+      "/api/config/generation",
       token
     )
     if (!resp.ok || !resp.data?.success || !resp.data.config) return
@@ -36,8 +36,8 @@ export function TaskTrackerSettings({ active }: { active: boolean }) {
     if (!token) return
     setBusy(true)
     try {
-      const resp = await adminFetch("/api/generation/timeout", token, {
-        method: "PUT",
+      const resp = await adminFetch("/api/config/generation", token, {
+        method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           task_tracker_device_id: deviceId.trim(),

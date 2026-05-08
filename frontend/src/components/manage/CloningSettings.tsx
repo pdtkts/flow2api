@@ -43,7 +43,7 @@ export function CloningSettings({ active }: { active: boolean }) {
 
   const load = useCallback(async () => {
     if (!token || !active) return
-    const resp = await adminJson<{ success?: boolean; config?: Record<string, unknown> }>("/api/generation/timeout", token)
+    const resp = await adminJson<{ success?: boolean; config?: Record<string, unknown> }>("/api/config/generation", token)
     if (!resp.ok || !resp.data?.success || !resp.data.config) return
     const c = resp.data.config
     const backendStr = String(c.flow2api_cloning_backend || "gemini_native")
@@ -79,8 +79,12 @@ export function CloningSettings({ active }: { active: boolean }) {
     if (!token) return
     setBusy(true)
     try {
-      const r = await adminFetch("/api/generation/timeout", token, {
+      const r = await adminFetch("/api/config/generation", token, {
         method: "POST",
+        headers: {
+          // Same URL as GET load; this header lets you spot the save in DevTools → Headers.
+          "X-Flow2API-Client-Operation": "save-cloning-settings",
+        },
         body: JSON.stringify({
           flow2api_cloning_backend: backend,
           flow2api_cloning_model: model,

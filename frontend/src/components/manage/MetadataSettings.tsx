@@ -47,7 +47,7 @@ export function MetadataSettings({ active }: { active: boolean }) {
 
   const load = useCallback(async () => {
     if (!token || !active) return
-    const resp = await adminJson<{ success?: boolean; config?: Record<string, unknown> }>("/api/generation/timeout", token)
+    const resp = await adminJson<{ success?: boolean; config?: Record<string, unknown> }>("/api/config/generation", token)
     if (!resp.ok || !resp.data?.success || !resp.data.config) return
     const c = resp.data.config
     setBackend(String(c.flow2api_metadata_backend || "gemini_native"))
@@ -132,7 +132,7 @@ export function MetadataSettings({ active }: { active: boolean }) {
     if (!token) return
     setBusy(true)
     try {
-      const r = await adminFetch("/api/generation/timeout", token, {
+      const r = await adminFetch("/api/config/generation", token, {
         method: "POST",
         body: JSON.stringify({
           flow2api_metadata_backend: backend,

@@ -23,7 +23,7 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
-
+scripts/
 # Database
 *.db
 *.sqlite
