@@ -35,7 +35,8 @@ from ..core.models import (
     GeminiGenerateContentRequest,
     Project,
     Task,
-    TaskTrackerFetchRequest,
+    TaskTrackerContributorFetchRequest,
+    TaskTrackerKeywordSearchRequest,
 )
 from ..core.config import config as app_config
 from ..services.browser_captcha_extension import ExtensionCaptchaService
@@ -2270,15 +2271,15 @@ async def get_allowed_tokens(
     }
 
 
-@router.post("/api/tracker/fetch")
-async def fetch_task_tracker_assets(
-    request: TaskTrackerFetchRequest,
+@router.post("/api/tracker/contributor")
+async def fetch_task_tracker_contributor_assets(
+    request: TaskTrackerContributorFetchRequest,
     auth_ctx: AuthContext = Depends(verify_api_key_flexible),
 ):
-    """Fetch task tracker assets via direct HTTPS to tastracker.com (curl-cffi)."""
+    """Fetch TAS contributor-search results via direct HTTPS to tastracker.com (curl-cffi)."""
     if auth_ctx.key_id is None:
         raise HTTPException(status_code=403, detail="Managed API key required")
-        
+
     try:
         results = await task_tracker_service.fetch_contributor_assets(
             search_id=request.search_id,
@@ -2292,5 +2293,29 @@ async def fetch_task_tracker_assets(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
-        debug_logger.log_error(f"Tracker fetch failed: {exc}")
+        debug_logger.log_error(f"Tracker contributor fetch failed: {exc}")
+        raise HTTPException(status_code=500, detail=f"Internal Error: {str(exc)}")
+
+
+@router.post("/api/tracker/keyword")
+async def fetch_task_tracker_keyword_search(
+    request: TaskTrackerKeywordSearchRequest,
+    auth_ctx: AuthContext = Depends(verify_api_key_flexible),
+):
+    """Proxy TAS keyword search (GET /api/search); returns upstream JSON (e.g. images array)."""
+    if auth_ctx.key_id is None:
+        raise HTTPException(status_code=403, detail="Managed API key required")
+
+    try:
+        return await task_tracker_service.fetch_keyword_search(
+            q=request.q,
+            order=request.order or "relevance",
+            content_type=request.content_type or "all",
+            pages=request.pages,
+            generative_ai=request.generative_ai or "all",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        debug_logger.log_error(f"Tracker keyword search failed: {exc}")
         raise HTTPException(status_code=500, detail=f"Internal Error: {str(exc)}")

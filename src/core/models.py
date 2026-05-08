@@ -500,10 +500,22 @@ class GenerateMetadataRequest(BaseModel):
         return self
 
 
-class TaskTrackerFetchRequest(BaseModel):
+class TaskTrackerContributorFetchRequest(BaseModel):
     search_id: str
     order: Optional[str] = "creation"
     content_type: Optional[str] = "all"
     pages: Optional[List[int]] = None
     title_filter: Optional[str] = ""
+    generative_ai: Optional[str] = "all"
+
+
+# Backwards-compatible name for contributor fetch body schema.
+TaskTrackerFetchRequest = TaskTrackerContributorFetchRequest
+
+
+class TaskTrackerKeywordSearchRequest(BaseModel):
+    q: str
+    order: Optional[str] = "relevance"
+    content_type: Optional[str] = "all"
+    pages: Optional[List[int]] = None
     generative_ai: Optional[str] = "all"
