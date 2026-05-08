@@ -9,6 +9,84 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from curl_cffi.requests import AsyncSession
+
+# Adobe Stock top-level metadata categories (id + label). Single source of truth for prompts and normalization.
+ADOBE_STOCK_METADATA_CATEGORIES: Tuple[Tuple[int, str], ...] = (
+    (1, "Animals"),
+    (2, "Buildings and Architecture"),
+    (3, "Business"),
+    (4, "Drinks"),
+    (5, "The Environment"),
+    (6, "States of Mind"),
+    (7, "Food"),
+    (8, "Graphic Resources"),
+    (9, "Hobbies and Leisure"),
+    (10, "Industry"),
+    (11, "Landscape"),
+    (12, "Lifestyle"),
+    (13, "People"),
+    (14, "Plants and Flowers"),
+    (15, "Culture and Religion"),
+    (16, "Science"),
+    (17, "Social Issues"),
+    (18, "Sports"),
+    (19, "Technology"),
+    (20, "Transport"),
+    (21, "Travel"),
+)
+
+
+def _adobe_stock_category_table_prompt_lines() -> str:
+    return "\n".join(f"{cid} — {name}" for cid, name in ADOBE_STOCK_METADATA_CATEGORIES)
+
+
+def _canonical_adobe_category_label(category_id: int) -> Optional[str]:
+    for cid, label in ADOBE_STOCK_METADATA_CATEGORIES:
+        if cid == category_id:
+            return label
+    return None
+
+
+def _adobe_category_id_by_label(name: str) -> Optional[int]:
+    n = (name or "").strip().lower()
+    if not n:
+        return None
+    for cid, label in ADOBE_STOCK_METADATA_CATEGORIES:
+        if label.lower() == n:
+            return cid
+    return None
+
+
+def _parse_adobe_category_id_value(value: Any) -> Optional[int]:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if 1 <= value <= 21 else None
+    if isinstance(value, float):
+        if value == int(value) and 1 <= int(value) <= 21:
+            return int(value)
+        return None
+    if isinstance(value, str):
+        s = value.strip()
+        if s.isdigit():
+            v = int(s)
+            return v if 1 <= v <= 21 else None
+    return None
+
+
+def _resolve_adobe_stock_category_id(raw: Dict[str, Any]) -> Optional[int]:
+    parsed = _parse_adobe_category_id_value(raw.get("categoryId"))
+    if parsed is not None:
+        return parsed
+    cat = raw.get("category")
+    if cat is None:
+        return None
+    s = str(cat).strip()
+    if s.isdigit():
+        v = int(s)
+        if 1 <= v <= 21:
+            return v
+    return _adobe_category_id_by_label(s)
 from fastapi import HTTPException
 from ..core.config import config as app_config
 from ..core.logger import debug_logger
@@ -220,7 +298,19 @@ class CloningMetadataService:
             else ("Each keyword MUST be exactly two words." if double else "Each keyword MUST be a single English token.")
         )
         description_rule = '`description` MUST be exactly "" (empty string).' if desc_max == 0 else f"`description` MUST be between {desc_min} and {desc_max} characters (plain text, no HTML)."
-        category_line = "categoryId is REQUIRED (Adobe Stock integer category)." if bool(meta.get("includeCategory")) else ""
+        include_cat = bool(meta.get("includeCategory"))
+        category_block = (
+            (
+                "Adobe Stock category table — classify the attached image with exactly ONE `categoryId` from this list "
+                "(integers 1–21 only). Choose the single best-matching row for what is visible:\n"
+                + _adobe_stock_category_table_prompt_lines()
+                + "\n\n"
+                "For Adobe Stock taxonomy, output ONLY the integer field `categoryId` in the metadata object. "
+                "Do not output a separate `category` string field for Adobe.\n\n"
+            )
+            if include_cat
+            else ""
+        )
         releases = (
             "Releases: if the image shows identifiable people, private property, or prominent branded products, buyers may need model or property releases."
             if bool(meta.get("includeReleases"))
@@ -238,11 +328,11 @@ class CloningMetadataService:
             else ""
         )
         title_style_line = f'Follow this title style label: "{title_style}".'
-        optional_key = ', "categoryId": 7' if bool(meta.get("includeCategory")) else ""
+        optional_key = ', "categoryId": 12' if include_cat else ""
         optional_instruction = (
-            "categoryId is REQUIRED; integer 1-21 only."
-            if bool(meta.get("includeCategory"))
-            else "Do not include categoryId in the JSON."
+            "categoryId is REQUIRED; it MUST be one of the integers listed in the Adobe Stock category table above."
+            if include_cat
+            else "Do not include categoryId or Adobe category fields in the JSON."
         )
         title_length = f"Title MUST be between {title_min} and {title_max} characters inclusive."
         keyword_count = f"Generate between {keyword_min} and {keyword_max} keywords inclusive."
@@ -266,7 +356,7 @@ class CloningMetadataService:
             "Safety / accuracy:\n"
             "* Describe only what is visible. Do not invent people, brands, or locations.\n"
             "* No URLs, email addresses, or watermark text in any field.\n\n"
-            + (f"{category_line}\n\n" if category_line else "")
+            + category_block
             + (f"{releases}\n\n" if releases else "")
             + f"{bg_line}\n"
             + custom
@@ -416,6 +506,7 @@ class CloningMetadataService:
         fallback_models = payload.get("fallbackModels") or default_fallback_chain
         image_bytes, mime_type = await self._fetch_image(payload.get("image_url"), payload.get("image_base64"))
         metadata_settings = payload.get("metadataSettings") or {}
+        include_category = bool(metadata_settings.get("includeCategory"))
         prompt = self._build_metadata_prompt(metadata_settings, bool(payload.get("dnaNoBgWorkflowActive")))
         last_err: Optional[Exception] = None
         attempt_failures: List[str] = []
@@ -458,7 +549,7 @@ class CloningMetadataService:
                                         "details": data,
                                     },
                                 )
-                            return self._normalize_csvgen_response(data)
+                            return self._normalize_csvgen_response(data, include_category=include_category)
 
                     parsed = await self._llm.invoke_model_json(
                         provider=provider_name,
@@ -469,7 +560,10 @@ class CloningMetadataService:
                         mime_type=mime_type,
                     )
                     row = parsed.get("metadataSets", [{}])[0] if isinstance(parsed.get("metadataSets"), list) else parsed
-                    return self._normalize_csvgen_response({"optionA": row, "optionB": row})
+                    return self._normalize_csvgen_response(
+                        {"optionA": row, "optionB": row},
+                        include_category=include_category,
+                    )
                 except Exception as exc:
                     last_err = exc
                     attempt_failures.append(f"{provider_name}#{attempt + 1}: {exc}")
@@ -482,7 +576,12 @@ class CloningMetadataService:
             detail = f"{detail} | attempts: {'; '.join(attempt_failures[-6:])}"
         raise HTTPException(status_code=500, detail=detail)
 
-    def _normalize_csvgen_response(self, data: Dict[str, Any]) -> Dict[str, Any]:
+    def _normalize_csvgen_response(
+        self,
+        data: Dict[str, Any],
+        *,
+        include_category: bool = False,
+    ) -> Dict[str, Any]:
         def coerce(raw: Any) -> Dict[str, Any]:
             if not isinstance(raw, dict):
                 return {"title": "", "keywords": "", "description": ""}
@@ -491,13 +590,18 @@ class CloningMetadataService:
                 keywords = ", ".join([str(x) for x in keywords])
             if not isinstance(keywords, str):
                 keywords = ""
-            out = {
+            out: Dict[str, Any] = {
                 "title": str(raw.get("title") or ""),
                 "keywords": keywords,
                 "description": str(raw.get("description") or ""),
             }
-            if raw.get("category") is not None:
-                out["category"] = str(raw.get("category"))
+            if include_category:
+                rid = _resolve_adobe_stock_category_id(raw)
+                if rid is not None:
+                    out["categoryId"] = rid
+                    label = _canonical_adobe_category_label(rid)
+                    if label:
+                        out["category"] = label
             return out
 
         a = coerce(data.get("optionA") if isinstance(data, dict) else None)
