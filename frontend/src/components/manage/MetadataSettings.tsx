@@ -12,12 +12,19 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from ".
 import { Key } from "lucide-react"
 
 
+const CLOUDFLARE_MODELS = [
+  "@cf/moonshotai/kimi-k2.6",
+  "@cf/zai-org/glm-4.7-flash",
+  "@cf/meta/llama-4-scout-17b-16e-instruct",
+  "@cf/google/gemma-4-26b-a4b-it",
+]
+
 const PRESET_MODELS: Record<string, string[]> = {
   gemini_native: ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro", "gemini-1.5-flash", "gemini-1.5-pro"],
   openai: ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "gpt-4.1-mini", "gpt-4.1"],
   openrouter: ["google/gemma-4-26b-a4b-it"],
   third_party_gemini: ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro", "gemini-1.5-flash", "gemini-1.5-pro"],
-  cloudflare: ["@cf/meta/llama-3.1-8b-instruct", "@cf/meta/llama-3-8b-instruct"],
+  cloudflare: CLOUDFLARE_MODELS,
   csvgen: []
 }
 
