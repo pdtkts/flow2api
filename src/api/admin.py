@@ -1,5 +1,6 @@
 """Admin API routes"""
 import asyncio
+import csv
 import inspect
 import json
 import mimetypes
@@ -756,6 +757,16 @@ class ImportTokenItem(BaseModel):
 class ImportTokensRequest(BaseModel):
     """导入Token请求"""
     tokens: List[ImportTokenItem]
+
+
+class EventCalendarItemRequest(BaseModel):
+    date: str
+    month: str
+    event_name: str
+
+
+class EventCalendarUpdateRequest(BaseModel):
+    events: List[EventCalendarItemRequest]
 
 
 # ========== Auth Middleware ==========
@@ -1685,6 +1696,68 @@ async def update_generation_config(
     await db.reload_config_to_memory()
 
     return {"success": True, "message": "生成配置更新成功"}
+
+
+def _event_calendar_path() -> Path:
+    return Path(__file__).resolve().parent.parent / "services" / "event_calendar_2026.csv"
+
+
+@router.get("/api/admin/event-calendar")
+async def get_event_calendar(token: str = Depends(verify_admin_token)):
+    """Read editable event calendar rows from CSV."""
+    csv_path = _event_calendar_path()
+    if not csv_path.exists():
+        raise HTTPException(status_code=404, detail="Event calendar CSV not found")
+
+    events: List[Dict[str, str]] = []
+    try:
+        with csv_path.open("r", encoding="utf-8-sig", newline="") as fh:
+            reader = csv.DictReader(fh)
+            for row in reader:
+                events.append(
+                    {
+                        "date": str(row.get("Date") or "").strip(),
+                        "month": str(row.get("Month") or "").strip(),
+                        "event_name": str(row.get("Event Name") or "").strip(),
+                    }
+                )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to read event calendar CSV: {exc}") from exc
+
+    return {"success": True, "events": events}
+
+
+@router.post("/api/admin/event-calendar")
+async def update_event_calendar(
+    request: EventCalendarUpdateRequest,
+    token: str = Depends(verify_admin_token),
+):
+    """Replace editable event calendar CSV rows."""
+    normalized_rows: List[Dict[str, str]] = []
+    for idx, item in enumerate(request.events):
+        date_value = item.date.strip()
+        month_value = item.month.strip()
+        event_name = item.event_name.strip()
+        if not date_value or not month_value or not event_name:
+            raise HTTPException(status_code=400, detail=f"Row {idx + 1} must include date, month, and event_name")
+        normalized_rows.append(
+            {
+                "Date": date_value,
+                "Month": month_value,
+                "Event Name": event_name,
+            }
+        )
+
+    csv_path = _event_calendar_path()
+    try:
+        with csv_path.open("w", encoding="utf-8", newline="") as fh:
+            writer = csv.DictWriter(fh, fieldnames=["Date", "Month", "Event Name"])
+            writer.writeheader()
+            writer.writerows(normalized_rows)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to write event calendar CSV: {exc}") from exc
+
+    return {"success": True, "message": "Event calendar updated", "count": len(normalized_rows)}
 
 
 @router.get("/api/call-logic/config")

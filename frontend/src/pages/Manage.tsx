@@ -11,11 +11,12 @@ import { ApiKeyManagement } from "../components/manage/ApiKeyManagement"
 import { MetadataSettings } from "../components/manage/MetadataSettings"
 import { CloningSettings } from "../components/manage/CloningSettings"
 import { TaskTrackerSettings } from "../components/manage/TaskTrackerSettings"
+import { EventCalendarSettings } from "../components/manage/EventCalendarSettings"
 import { cn } from "@/lib/utils"
 import { useAuth } from "../contexts/AuthContext"
 import { adminJson } from "../lib/adminApi"
 
-const MANAGE_TABS = ["tokens", "apikeys", "settings", "metadata", "cloning", "tracker", "logs", "cache", "agent"] as const
+const MANAGE_TABS = ["tokens", "apikeys", "settings", "metadata", "cloning", "tracker", "events", "logs", "cache", "agent"] as const
 type ManageTab = (typeof MANAGE_TABS)[number]
 
 function parseManageTab(raw: string | null): ManageTab {
@@ -127,6 +128,14 @@ export default function Manage() {
               Task Tracker
             </TabsTrigger>
             <TabsTrigger
+              value="events"
+              className={cn(
+                "rounded-none border-b-2 border-transparent px-1 py-3 data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:shadow-none"
+              )}
+            >
+              Event Calendar
+            </TabsTrigger>
+            <TabsTrigger
               value="cache"
               className={cn(
                 "rounded-none border-b-2 border-transparent px-1 py-3 data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:shadow-none"
@@ -188,6 +197,11 @@ export default function Manage() {
         <TabsContent value="tracker" className="mt-0 outline-none focus-visible:ring-0">
           <div className="animate-in fade-in duration-300">
             <TaskTrackerSettings active={true} />
+          </div>
+        </TabsContent>
+        <TabsContent value="events" className="mt-0 outline-none focus-visible:ring-0">
+          <div className="animate-in fade-in duration-300">
+            <EventCalendarSettings active={true} />
           </div>
         </TabsContent>
         <TabsContent value="cache" className="mt-0 outline-none focus-visible:ring-0">
