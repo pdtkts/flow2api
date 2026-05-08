@@ -48,9 +48,35 @@ def get_csv(raw: str) -> List[str]:
     return [x.strip() for x in str(raw or "").split(",") if x.strip()]
 
 
+def _truncate_response_snippet(raw: Optional[str], max_len: int = 1200) -> str:
+    s = (raw or "").replace("\r\n", "\n").strip()
+    if len(s) > max_len:
+        return s[:max_len] + "…"
+    return s or "(empty body)"
+
+
+def _chain_http_status_for_upstream(upstream_status: int) -> int:
+    """Map upstream HTTP codes for client responses; auth errors are not retried by the provider chain."""
+    if upstream_status in (401, 402, 403):
+        return upstream_status
+    if upstream_status == 404:
+        return 404
+    if upstream_status == 429:
+        return 429
+    return 502
+
+
+def _http_fail_exc(service: str, upstream_status: int, resp_text: Optional[str]) -> HTTPException:
+    mapped = _chain_http_status_for_upstream(upstream_status)
+    detail = f"{service} HTTP {upstream_status}: {_truncate_response_snippet(resp_text)}"
+    return HTTPException(status_code=mapped, detail=detail)
+
+
 def is_retryable_error(exc: Exception) -> bool:
     if isinstance(exc, HTTPException):
         status = int(getattr(exc, "status_code", 500) or 500)
+        if status in (401, 402, 403):
+            return False
         return status == 429 or status >= 500
     text = str(exc).lower()
     return any(token in text for token in ("timeout", "timed out", "connection", "temporar", "rate limit"))
@@ -140,7 +166,10 @@ class LlmProviderChain:
         detail = str(last_err or "Model invocation failed")
         if attempt_failures:
             detail = f"{detail} | attempts: {'; '.join(attempt_failures[-6:])}"
-        raise HTTPException(status_code=500, detail=detail)
+        out_status = 500
+        if isinstance(last_err, HTTPException):
+            out_status = int(getattr(last_err, "status_code", 500) or 500)
+        raise HTTPException(status_code=out_status, detail=detail)
 
     async def invoke_model_json(
         self,
@@ -203,6 +232,8 @@ class LlmProviderChain:
                 {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{b64}"}},
                 {"type": "text", "text": prompt_text},
             ]
+        last_upstream = 502
+        last_snippet = ""
         for key in keys:
             async with AsyncSession() as session:
                 resp = await session.post(
@@ -216,11 +247,13 @@ class LlmProviderChain:
                     timeout=120,
                 )
                 if resp.status_code >= 400:
+                    last_upstream = int(resp.status_code)
+                    last_snippet = getattr(resp, "text", None) or ""
                     continue
                 data = resp.json()
                 text = (((data or {}).get("choices") or [{}])[0].get("message") or {}).get("content") or "{}"
                 return extract_json_object(text)
-        raise HTTPException(status_code=500, detail="OpenAI request failed")
+        raise _http_fail_exc("OpenAI", last_upstream, last_snippet)
 
     async def _invoke_openrouter(
         self,
@@ -249,6 +282,8 @@ class LlmProviderChain:
             "Referer": "https://github.com/flow2api",
             "X-Title": "Flow2API",
         }
+        last_upstream = 502
+        last_snippet = ""
         for key in keys:
             async with AsyncSession() as session:
                 resp = await session.post(
@@ -266,11 +301,13 @@ class LlmProviderChain:
                     timeout=120,
                 )
                 if resp.status_code >= 400:
+                    last_upstream = int(resp.status_code)
+                    last_snippet = getattr(resp, "text", None) or ""
                     continue
                 data = resp.json()
                 text = (((data or {}).get("choices") or [{}])[0].get("message") or {}).get("content") or "{}"
                 return extract_json_object(text)
-        raise HTTPException(status_code=500, detail="OpenRouter request failed")
+        raise _http_fail_exc("OpenRouter", last_upstream, last_snippet)
 
     async def _invoke_gemini(
         self,
@@ -287,6 +324,8 @@ class LlmProviderChain:
                 keys = alt
         if not keys:
             raise HTTPException(status_code=503, detail="Gemini API key not configured")
+        last_upstream = 502
+        last_snippet = ""
         for key in keys:
             parts: List[Dict[str, Any]] = []
             if image_bytes:
@@ -297,12 +336,14 @@ class LlmProviderChain:
             async with AsyncSession() as session:
                 resp = await session.post(url, json=body, timeout=120)
                 if resp.status_code >= 400:
+                    last_upstream = int(resp.status_code)
+                    last_snippet = getattr(resp, "text", None) or ""
                     continue
                 data = resp.json()
                 text_parts = (((((data or {}).get("candidates") or [{}])[0].get("content") or {}).get("parts")) or [])
                 text = "\n".join([str(p.get("text") or "") for p in text_parts if not p.get("thought")]).strip()
                 return extract_json_object(text or "{}")
-        raise HTTPException(status_code=500, detail="Gemini request failed")
+        raise _http_fail_exc("Gemini", last_upstream, last_snippet)
 
     async def _invoke_third_party(
         self,
@@ -330,6 +371,8 @@ class LlmProviderChain:
                 {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{b64}"}},
                 {"type": "text", "text": prompt_text},
             ]
+        last_upstream = 502
+        last_snippet = ""
         for key in keys:
             async with AsyncSession() as session:
                 resp = await session.post(
@@ -339,11 +382,13 @@ class LlmProviderChain:
                     timeout=120,
                 )
                 if resp.status_code >= 400:
+                    last_upstream = int(resp.status_code)
+                    last_snippet = getattr(resp, "text", None) or ""
                     continue
                 data = resp.json()
                 text = (((data or {}).get("choices") or [{}])[0].get("message") or {}).get("content") or "{}"
                 return extract_json_object(text)
-        raise HTTPException(status_code=500, detail="Third-party Gemini request failed")
+        raise _http_fail_exc("Third-party Gemini", last_upstream, last_snippet)
 
     async def _invoke_cloudflare(
         self,
