@@ -503,6 +503,7 @@ class GenerateMetadataRequest(BaseModel):
 class TaskTrackerFetchRequest(BaseModel):
     search_id: str
     order: Optional[str] = "creation"
+    content_type: Optional[str] = "all"
     pages: Optional[List[int]] = None
     title_filter: Optional[str] = ""
     generative_ai: Optional[str] = "all"

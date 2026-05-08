@@ -2283,6 +2283,7 @@ async def fetch_task_tracker_assets(
         results = await task_tracker_service.fetch_contributor_assets(
             search_id=request.search_id,
             order=request.order or "creation",
+            content_type=request.content_type or "all",
             pages=request.pages,
             title_filter=request.title_filter or "",
             generative_ai=request.generative_ai or "all",

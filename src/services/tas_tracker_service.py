@@ -25,6 +25,7 @@ class TaskTrackerService:
         pages: Optional[List[int]] = None,
         title_filter: str = "",
         generative_ai: str = "all",
+        content_type: str = "all",
     ) -> List[Dict[str, Any]]:
         search_id = search_id.strip()
         order = order.strip()
@@ -66,6 +67,7 @@ class TaskTrackerService:
             order,
             pages,
             generative_ai,
+            content_type,
             auth_cookie,
             device_id,
             device_token or None,

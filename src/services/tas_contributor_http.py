@@ -58,19 +58,34 @@ def normalize_generative_ai(value: Optional[str]) -> str:
     if raw in {"all", "any"}:
         return "all"
     if raw in {"ai_only", "only_ai", "ai", "gen_ai"}:
-        return "ai_only"
+        return "only"
     if raw in {"exclude_ai", "non_ai", "no_ai", "human_only"}:
-        return "exclude_ai"
+        return "exclude"
     return "all"
 
 
-def build_referer(search_id: str, order: str, page: int, generative_ai: str = "all") -> str:
+def normalize_content_type(value: Optional[str]) -> str:
+    raw = str(value or "all").strip().lower()
+    allowed = {"all", "photo", "illustration", "vector", "video", "template", "3d", "audio"}
+    return raw if raw in allowed else "all"
+
+
+def build_referer(
+    search_id: str,
+    order: str,
+    page: int,
+    generative_ai: str = "all",
+    content_type: str = "all",
+) -> str:
+    ga = normalize_generative_ai(generative_ai)
+    ct = normalize_content_type(content_type)
     qs: Dict[str, str] = {
         "search": search_id,
         "order": order,
-        "content_type": "all",
-        "generative_ai": normalize_generative_ai(generative_ai),
+        "content_type": ct,
     }
+    if ga != "all":
+        qs["generative_ai"] = ga
     if page > 1:
         qs["page"] = str(page)
     return f"{BASE}/contributor?{urlencode(qs)}"
@@ -200,17 +215,22 @@ def fetch_contributor_search_page(
     order: str,
     page: int,
     generative_ai: str,
+    content_type: str,
     cookie: str,
     csr_token: str,
     turnstile_token: Optional[str],
     device_id: str,
     impersonate: str,
 ) -> Tuple[Optional[Dict[str, Any]], str]:
+    ga = normalize_generative_ai(generative_ai)
+    ct = normalize_content_type(content_type)
     params: Dict[str, str] = {
         "search": search_id,
         "order": order,
-        "generative_ai": normalize_generative_ai(generative_ai),
+        "content_type": ct,
     }
+    if ga != "all":
+        params["generative_ai"] = ga
     if page > 1:
         params["page"] = str(page)
     qs = urlencode(params)
@@ -219,7 +239,7 @@ def fetch_contributor_search_page(
         "Accept": "*/*",
         "Accept-Language": "en-GB,en;q=0.9",
         "Cookie": cookie,
-        "Referer": build_referer(search_id, order, page, generative_ai),
+        "Referer": build_referer(search_id, order, page, generative_ai, content_type),
         "User-Agent": DEFAULT_UA,
         "X-Requested-With": "XMLHttpRequest",
         "X-CSR-Token": csr_token,
@@ -254,6 +274,7 @@ def fetch_contributor_raw_images(
     order: str,
     pages: List[int],
     generative_ai: str,
+    content_type: str,
     cookie: str,
     device_id: str,
     device_token: Optional[str],
@@ -268,7 +289,7 @@ def fetch_contributor_raw_images(
     if not pages:
         return [], "no pages"
     impersonate = (tls_profile or "").strip() or DEFAULT_TLS_PROFILE
-    csr_referer = build_referer(search_id, order, pages[0], generative_ai)
+    csr_referer = build_referer(search_id, order, pages[0], generative_ai, content_type)
     all_images: List[Dict[str, Any]] = []
     for page in pages:
         csr, err = ensure_csr_token(
@@ -281,6 +302,7 @@ def fetch_contributor_raw_images(
             order,
             page,
             generative_ai,
+            content_type,
             cookie,
             csr,
             turnstile_token,
