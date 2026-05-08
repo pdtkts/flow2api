@@ -15,6 +15,7 @@ import { Key } from "lucide-react"
 const PRESET_MODELS: Record<string, string[]> = {
   gemini_native: ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro", "gemini-1.5-flash", "gemini-1.5-pro"],
   openai: ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "gpt-4.1-mini", "gpt-4.1"],
+  openrouter: ["google/gemma-4-26b-a4b-it"],
   third_party_gemini: ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro", "gemini-1.5-flash", "gemini-1.5-pro"],
   cloudflare: ["@cf/meta/llama-3.1-8b-instruct", "@cf/meta/llama-3-8b-instruct"],
   csvgen: []
@@ -23,6 +24,7 @@ const PRESET_MODELS: Record<string, string[]> = {
 const METADATA_BACKENDS = [
   "gemini_native",
   "openai",
+  "openrouter",
   "third_party_gemini",
   "cloudflare",
   "csvgen",
@@ -42,6 +44,7 @@ export function MetadataSettings({ active }: { active: boolean }) {
   const [openaiKeys, setOpenaiKeys] = useState("")
   const [thirdPartyKeys, setThirdPartyKeys] = useState("")
   const [thirdPartyBaseUrl, setThirdPartyBaseUrl] = useState("")
+  const [openrouterKeys, setOpenrouterKeys] = useState("")
   const [cloudflareAccountId, setCloudflareAccountId] = useState("")
   const [cloudflareApiToken, setCloudflareApiToken] = useState("")
 
@@ -73,6 +76,7 @@ export function MetadataSettings({ active }: { active: boolean }) {
     setOpenaiKeys(String(c.flow2api_openai_api_keys || ""))
     setThirdPartyKeys(String(c.flow2api_third_party_gemini_api_keys || ""))
     setThirdPartyBaseUrl(String(c.flow2api_third_party_gemini_base_url || ""))
+    setOpenrouterKeys(String(c.flow2api_openrouter_api_keys || ""))
     setCloudflareAccountId(String(c.cloudflare_account_id || ""))
     setCloudflareApiToken(String(c.cloudflare_api_token || ""))
   }, [token, active])
@@ -144,6 +148,7 @@ export function MetadataSettings({ active }: { active: boolean }) {
 
           flow2api_gemini_api_keys: geminiKeys,
           flow2api_openai_api_keys: openaiKeys,
+          flow2api_openrouter_api_keys: openrouterKeys,
           flow2api_third_party_gemini_api_keys: thirdPartyKeys,
           flow2api_third_party_gemini_base_url: thirdPartyBaseUrl,
           cloudflare_account_id: cloudflareAccountId,
@@ -284,6 +289,13 @@ export function MetadataSettings({ active }: { active: boolean }) {
                   <TableCell className="text-muted-foreground font-mono text-[11px]">FLOW2API_OPENAI_API_KEYS</TableCell>
                   <TableCell>
                     <Textarea className="font-mono text-xs min-h-[60px] bg-muted/20 resize-y" placeholder="sk-proj-..., sk-proj-..." value={openaiKeys} onChange={(e) => setOpenaiKeys(e.target.value)} />
+                  </TableCell>
+                </TableRow>
+                <TableRow>
+                  <TableCell className="font-medium">OpenRouter</TableCell>
+                  <TableCell className="text-muted-foreground font-mono text-[11px]">FLOW2API_OPENROUTER_API_KEYS</TableCell>
+                  <TableCell>
+                    <Textarea className="font-mono text-xs min-h-[60px] bg-muted/20 resize-y" placeholder="sk-or-v1-..., sk-or-v1-..." value={openrouterKeys} onChange={(e) => setOpenrouterKeys(e.target.value)} />
                   </TableCell>
                 </TableRow>
                 <TableRow>

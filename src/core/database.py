@@ -2940,6 +2940,9 @@ class Database:
             config.set_flow2api_openai_api_keys(
                 str(getattr(generation_config, "flow2api_openai_api_keys", "") or "")
             )
+            config.set_flow2api_openrouter_api_keys(
+                str(getattr(generation_config, "flow2api_openrouter_api_keys", "") or "")
+            )
             config.set_flow2api_third_party_gemini_api_keys(
                 str(getattr(generation_config, "flow2api_third_party_gemini_api_keys", "") or "")
             )
@@ -2966,6 +2969,9 @@ class Database:
             )
             config.set_flow2api_cloning_openai_api_keys(
                 str(getattr(generation_config, "flow2api_cloning_openai_api_keys", "") or "")
+            )
+            config.set_flow2api_cloning_openrouter_api_keys(
+                str(getattr(generation_config, "flow2api_cloning_openrouter_api_keys", "") or "")
             )
             config.set_flow2api_cloning_third_party_gemini_api_keys(
                 str(getattr(generation_config, "flow2api_cloning_third_party_gemini_api_keys", "") or "")

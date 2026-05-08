@@ -630,6 +630,7 @@ class GenerationConfigRequest(BaseModel):
     extension_generation_fallback_mode: Optional[str] = None
     flow2api_gemini_api_keys: Optional[str] = None
     flow2api_openai_api_keys: Optional[str] = None
+    flow2api_openrouter_api_keys: Optional[str] = None
     flow2api_third_party_gemini_api_keys: Optional[str] = None
     flow2api_third_party_gemini_base_url: Optional[str] = None
     cloudflare_account_id: Optional[str] = None
@@ -645,6 +646,7 @@ class GenerationConfigRequest(BaseModel):
     flow2api_cloning_backend: Optional[str] = None
     flow2api_cloning_gemini_api_keys: Optional[str] = None
     flow2api_cloning_openai_api_keys: Optional[str] = None
+    flow2api_cloning_openrouter_api_keys: Optional[str] = None
     flow2api_cloning_third_party_gemini_api_keys: Optional[str] = None
     flow2api_cloning_third_party_gemini_base_url: Optional[str] = None
     flow2api_cloning_cloudflare_account_id: Optional[str] = None
@@ -1523,6 +1525,7 @@ async def get_generation_config(token: str = Depends(verify_admin_token)):
             ),
             "flow2api_gemini_api_keys": str(getattr(config, "flow2api_gemini_api_keys", "") or ""),
             "flow2api_openai_api_keys": str(getattr(config, "flow2api_openai_api_keys", "") or ""),
+            "flow2api_openrouter_api_keys": str(getattr(config, "flow2api_openrouter_api_keys", "") or ""),
             "flow2api_third_party_gemini_api_keys": str(
                 getattr(config, "flow2api_third_party_gemini_api_keys", "") or ""
             ),
@@ -1544,6 +1547,9 @@ async def get_generation_config(token: str = Depends(verify_admin_token)):
             ),
             "flow2api_cloning_openai_api_keys": str(
                 getattr(config, "flow2api_cloning_openai_api_keys", "") or ""
+            ),
+            "flow2api_cloning_openrouter_api_keys": str(
+                getattr(config, "flow2api_cloning_openrouter_api_keys", "") or ""
             ),
             "flow2api_cloning_third_party_gemini_api_keys": str(
                 getattr(config, "flow2api_cloning_third_party_gemini_api_keys", "") or ""
@@ -1608,6 +1614,7 @@ async def update_generation_config(
         extension_generation_fallback_mode=extension_generation_fallback_mode,
         flow2api_gemini_api_keys=request.flow2api_gemini_api_keys,
         flow2api_openai_api_keys=request.flow2api_openai_api_keys,
+        flow2api_openrouter_api_keys=request.flow2api_openrouter_api_keys,
         flow2api_third_party_gemini_api_keys=request.flow2api_third_party_gemini_api_keys,
         flow2api_third_party_gemini_base_url=request.flow2api_third_party_gemini_base_url,
         cloudflare_account_id=request.cloudflare_account_id,
@@ -1617,6 +1624,7 @@ async def update_generation_config(
         flow2api_cloning_backend=request.flow2api_cloning_backend,
         flow2api_cloning_gemini_api_keys=request.flow2api_cloning_gemini_api_keys,
         flow2api_cloning_openai_api_keys=request.flow2api_cloning_openai_api_keys,
+        flow2api_cloning_openrouter_api_keys=request.flow2api_cloning_openrouter_api_keys,
         flow2api_cloning_third_party_gemini_api_keys=request.flow2api_cloning_third_party_gemini_api_keys,
         flow2api_cloning_third_party_gemini_base_url=request.flow2api_cloning_third_party_gemini_base_url,
         flow2api_cloning_cloudflare_account_id=request.flow2api_cloning_cloudflare_account_id,
@@ -2296,6 +2304,7 @@ async def update_generation_timeout(
         extension_generation_fallback_mode=extension_generation_fallback_mode,
         flow2api_gemini_api_keys=request.flow2api_gemini_api_keys,
         flow2api_openai_api_keys=request.flow2api_openai_api_keys,
+        flow2api_openrouter_api_keys=request.flow2api_openrouter_api_keys,
         flow2api_third_party_gemini_api_keys=request.flow2api_third_party_gemini_api_keys,
         flow2api_third_party_gemini_base_url=request.flow2api_third_party_gemini_base_url,
         cloudflare_account_id=request.cloudflare_account_id,
@@ -2305,6 +2314,7 @@ async def update_generation_timeout(
         flow2api_cloning_backend=request.flow2api_cloning_backend,
         flow2api_cloning_gemini_api_keys=request.flow2api_cloning_gemini_api_keys,
         flow2api_cloning_openai_api_keys=request.flow2api_cloning_openai_api_keys,
+        flow2api_cloning_openrouter_api_keys=request.flow2api_cloning_openrouter_api_keys,
         flow2api_cloning_third_party_gemini_api_keys=request.flow2api_cloning_third_party_gemini_api_keys,
         flow2api_cloning_third_party_gemini_base_url=request.flow2api_cloning_third_party_gemini_base_url,
         flow2api_cloning_cloudflare_account_id=request.flow2api_cloning_cloudflare_account_id,
