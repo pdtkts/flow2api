@@ -546,11 +546,11 @@ def _build_personal_browser_args(
         '--safebrowsing-disable-auto-update',
         '--no-first-run',
         '--no-default-browser-check',
-        '--no-startup-window',
         '--no-zygote',
     ]
 
     if headless:
+        browser_args.append('--no-startup-window')
         browser_args.append('--window-position=3000,3000')
     else:
         browser_args.append('--window-position=80,80')
@@ -857,6 +857,14 @@ def _patch_nodriver_browser_instance(browser_instance):
             raise
         except Exception as e:
                 if _is_runtime_disconnect_error(e):
+                    try:
+                        setattr(self, "_flow2api_runtime_disconnected", True)
+                    except Exception:
+                        pass
+                    try:
+                        self.targets = []
+                    except Exception:
+                        pass
                     log_message = (
                         f"[BrowserCaptcha] nodriver.update_targets 在浏览器断连后退出: "
                         f"{type(e).__name__}: {e}"
@@ -871,6 +879,10 @@ def _patch_nodriver_browser_instance(browser_instance):
         _patch_nodriver_connection_instance(getattr(self, "connection", None))
         for target in list(getattr(self, "targets", []) or []):
             _patch_nodriver_connection_instance(target)
+        try:
+            setattr(self, "_flow2api_runtime_disconnected", False)
+        except Exception:
+            pass
         return result
 
     browser_instance.update_targets = types.MethodType(patched_update_targets, browser_instance)
@@ -1423,6 +1435,7 @@ class BrowserCaptchaService:
         self._runtime_last_active_at = time.time()
         self._successful_solves_since_browser_start = 0
         self._fresh_profile_restart_pending = False
+        self._fresh_profile_restart_force_pending = False
         self._browser_launch_failure_streak = 0
         self._browser_launch_cooldown_until = 0.0
         self._browser_launch_last_error = ""
@@ -1926,6 +1939,7 @@ class BrowserCaptchaService:
     def _reset_browser_rotation_budget(self) -> None:
         self._successful_solves_since_browser_start = 0
         self._fresh_profile_restart_pending = False
+        self._fresh_profile_restart_force_pending = False
         self._fresh_profile_restart_pending_reason = ""
 
     def _mark_runtime_active(self) -> None:
@@ -1952,10 +1966,23 @@ class BrowserCaptchaService:
             )
             debug_logger.log_warning(
                 "[BrowserCaptcha] 浏览器成功打码次数达到 fresh profile 轮换阈值，"
-                f"后续请求会等待并发清空后执行全新无状态浏览器重启 "
+                f"后续新取码会先等待当前并发清空并完成全新无状态浏览器重启 "
                 f"(count={current_count}, threshold={threshold}, reason={self._fresh_profile_restart_pending_reason})"
             )
         return current_count
+
+    def _mark_fresh_profile_restart_pending(self, *, reason: str, force: bool = False) -> None:
+        normalized_reason = str(reason or "manual").strip() or "manual"
+        already_pending = bool(self._fresh_profile_restart_pending)
+        self._fresh_profile_restart_pending = True
+        if force:
+            self._fresh_profile_restart_force_pending = True
+        self._fresh_profile_restart_pending_reason = normalized_reason
+        if not already_pending:
+            debug_logger.log_warning(
+                "[BrowserCaptcha] 已请求 fresh profile 轮换，"
+                f"后续新取码会等待当前并发清空并完成重启 (force={force}, reason={normalized_reason})"
+            )
 
     async def _has_active_browser_work(self) -> bool:
         if (
@@ -1993,8 +2020,10 @@ class BrowserCaptchaService:
             return False
 
         threshold = max(0, int(self._fresh_profile_restart_every_n_solves or 0))
-        if threshold <= 0:
+        force_restart = bool(getattr(self, "_fresh_profile_restart_force_pending", False))
+        if threshold <= 0 and not force_restart:
             self._fresh_profile_restart_pending = False
+            self._fresh_profile_restart_force_pending = False
             self._fresh_profile_restart_pending_reason = ""
             return False
 
@@ -2049,6 +2078,86 @@ class BrowserCaptchaService:
                     self._fresh_profile_restart_task = None
 
         self._fresh_profile_restart_task = asyncio.create_task(_runner())
+        debug_logger.log_info(
+            f"[BrowserCaptcha] fresh profile 轮换已计划执行 (project_id={project_id}, source={source})"
+        )
+        return False
+
+    async def _wait_for_pending_fresh_profile_restart_before_solve(
+        self,
+        project_id: str,
+        token_id: Optional[int] = None,
+        *,
+        source: str,
+    ) -> bool:
+        """达到 fresh 轮换阈值后，阻止新取码继续复用旧 resident tab。"""
+        waited = False
+        current_task = asyncio.current_task()
+
+        while True:
+            existing_task = getattr(self, "_fresh_profile_restart_task", None)
+            if existing_task is not None and not existing_task.done() and existing_task is not current_task:
+                if not waited:
+                    waited = True
+                    debug_logger.log_warning(
+                        "[BrowserCaptcha] fresh profile 轮换正在执行/等待，"
+                        f"当前取码先等待重启完成再分配标签页 (project_id={project_id}, source={source})"
+                    )
+                try:
+                    await asyncio.shield(existing_task)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    debug_logger.log_warning(
+                        f"[BrowserCaptcha] 等待 fresh profile 轮换任务异常 (project_id={project_id}, source={source}): {e}"
+                    )
+                if not self._fresh_profile_restart_pending:
+                    return True
+                await asyncio.sleep(0)
+                continue
+
+            if not self._fresh_profile_restart_pending:
+                return waited
+
+            threshold = max(0, int(self._fresh_profile_restart_every_n_solves or 0))
+            force_restart = bool(getattr(self, "_fresh_profile_restart_force_pending", False))
+            if threshold <= 0 and not force_restart:
+                self._fresh_profile_restart_pending = False
+                self._fresh_profile_restart_force_pending = False
+                self._fresh_profile_restart_pending_reason = ""
+                return waited
+
+            if not waited:
+                waited = True
+                debug_logger.log_warning(
+                    "[BrowserCaptcha] fresh profile 轮换已到阈值，"
+                    f"当前取码先触发并等待重启完成 (project_id={project_id}, source={source}, "
+                    f"reason={self._fresh_profile_restart_pending_reason})"
+                )
+
+            await self._maybe_execute_pending_fresh_profile_restart(
+                project_id,
+                token_id=token_id,
+                source=source,
+            )
+
+            scheduled_task = getattr(self, "_fresh_profile_restart_task", None)
+            if scheduled_task is None or scheduled_task.done() or scheduled_task is current_task:
+                await asyncio.sleep(0.05)
+                continue
+
+            try:
+                await asyncio.shield(scheduled_task)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                debug_logger.log_warning(
+                    f"[BrowserCaptcha] fresh profile 轮换任务执行异常 (project_id={project_id}, source={source}): {e}"
+                )
+
+            if not self._fresh_profile_restart_pending:
+                return True
+            await asyncio.sleep(0)
 
     def _requires_virtual_display(self) -> bool:
         """仅在显式有头模式下要求 Docker/Linux 提供 DISPLAY/虚拟显示。"""
@@ -2108,7 +2217,7 @@ class BrowserCaptchaService:
         if not (self._initialized and self.browser and self._last_health_probe_ok):
             return False
         try:
-            if self.browser.stopped:
+            if self.browser.stopped or getattr(self.browser, "_flow2api_runtime_disconnected", False):
                 return False
         except Exception:
             return False
@@ -2354,7 +2463,7 @@ class BrowserCaptchaService:
 
     def _is_browser_runtime_error(self, error: Any) -> bool:
         """识别浏览器运行态已损坏/已关闭的典型异常。"""
-        return _is_runtime_disconnect_error(error)
+        return _is_runtime_disconnect_error(error) or self._is_no_browser_window_error(error)
 
     @staticmethod
     def _is_no_browser_window_error(error: Any) -> bool:
@@ -2422,6 +2531,9 @@ class BrowserCaptchaService:
     async def _probe_browser_runtime(self) -> bool:
         """轻量探测当前 nodriver 连接是否仍可用。"""
         if not self.browser:
+            self._invalidate_browser_health()
+            return False
+        if getattr(self.browser, "_flow2api_runtime_disconnected", False):
             self._invalidate_browser_health()
             return False
         if self._is_browser_health_fresh():
@@ -6570,8 +6682,10 @@ class BrowserCaptchaService:
 
             self._resident_rebuild_tasks.clear()
             self._resident_recovery_tasks.clear()
-            self._resident_warmup_task = None
-            self._fresh_profile_restart_task = None
+            if resident_warmup_task is not current_task:
+                self._resident_warmup_task = None
+            if fresh_restart_task is not current_task:
+                self._fresh_profile_restart_task = None
 
         if not tasks_to_cancel:
             return
@@ -6668,8 +6782,8 @@ class BrowserCaptchaService:
                 if pooled_proxy:
                     debug_logger.log_info(f"[BrowserCaptcha] Personal 使用验证码代理池: {pooled_proxy}")
                     return _parse_proxy_url(pooled_proxy)
-            if captcha_cfg.browser_proxy_enabled and captcha_cfg.browser_proxy_url:
-                url = captcha_cfg.browser_proxy_url.strip()
+            if getattr(captcha_cfg, "browser_proxy_enabled", False) and getattr(captcha_cfg, "browser_proxy_url", None):
+                url = str(getattr(captcha_cfg, "browser_proxy_url", "") or "").strip()
                 if url:
                     debug_logger.log_info(f"[BrowserCaptcha] Personal 使用验证码代理: {url}")
                     return _parse_proxy_url(url)
@@ -7409,6 +7523,10 @@ class BrowserCaptchaService:
                         debug_logger.log_warning("[BrowserCaptcha] 浏览器已停止，准备重新初始化...")
                         self._mark_browser_health(False)
                         browser_needs_restart = True
+                    elif getattr(self.browser, "_flow2api_runtime_disconnected", False):
+                        debug_logger.log_warning("[BrowserCaptcha] 浏览器连接已标记断开，准备重新初始化...")
+                        self._mark_browser_health(False)
+                        browser_needs_restart = True
                     elif self._is_browser_health_fresh():
                         self._mark_runtime_active()
                         if self._idle_reaper_task is None or self._idle_reaper_task.done():
@@ -7738,8 +7856,10 @@ class BrowserCaptchaService:
                 )
                 if ready_state == "complete":
                     return True
-            except Exception:
-                pass
+            except Exception as e:
+                if self._is_browser_runtime_error(e):
+                    self._mark_browser_health(False)
+                    raise
             await asyncio.sleep(interval_seconds)
         return False
 
@@ -8003,6 +8123,20 @@ class BrowserCaptchaService:
         fresh_profile: bool = False,
     ) -> bool:
         async with self._runtime_recover_lock:
+            if fresh_profile and await self._has_active_browser_work():
+                self._mark_fresh_profile_restart_pending(
+                    reason=f"fresh_restart_deferred:{project_id}",
+                    force=True,
+                )
+                await self._maybe_execute_pending_fresh_profile_restart(
+                    project_id,
+                    token_id=token_id,
+                    source="fresh_restart_deferred_active_work",
+                )
+                debug_logger.log_warning(
+                    f"[BrowserCaptcha] project_id={project_id} fresh profile 重启已延后到当前并发 drain 后立即执行"
+                )
+                return True
             if not fresh_profile and self._was_runtime_restarted_recently():
                 try:
                     if await self._probe_browser_runtime():
@@ -8044,7 +8178,7 @@ class BrowserCaptchaService:
         restart_reason = f"restart_project:{project_id}"
         if fresh_profile:
             debug_logger.log_warning(
-                f"[BrowserCaptcha] project_id={project_id} 命中特定 Flow 风控错误，准备执行全新浏览器冷启动"
+                f"[BrowserCaptcha] project_id={project_id} 准备执行 fresh profile 浏览器冷启动"
             )
             restart_reason = f"fresh_restart_project:{project_id}"
         else:
@@ -8135,12 +8269,22 @@ class BrowserCaptchaService:
             if self._is_force_fresh_browser_restart_error(error_text):
                 debug_logger.log_warning(
                     f"[BrowserCaptcha] project_id={project_id}, slot={resolved_slot_id} "
-                    "命中特定 Flow 风控错误，直接销毁浏览器运行态并删除 profile 后冷启动"
+                    "命中特定 Flow 风控错误，已标记当前 slot 不再复用；浏览器 fresh profile 轮换会等待当前并发 drain 后立即执行"
                 )
-                await self._restart_browser_for_project(
+                if resident_info is not None:
+                    await self._mark_resident_slot_unavailable(
+                        resolved_slot_id,
+                        resident_info,
+                        reason=f"flow_force_fresh:{project_id}:{streak}",
+                    )
+                self._mark_fresh_profile_restart_pending(
+                    reason=f"flow_force_fresh:{project_id}:{resolved_slot_id}:streak={streak}",
+                    force=True,
+                )
+                await self._maybe_execute_pending_fresh_profile_restart(
                     project_id,
                     token_id=token_id,
-                    fresh_profile=True,
+                    source="flow_force_fresh_error",
                 )
                 return
 
@@ -8320,6 +8464,12 @@ class BrowserCaptchaService:
 
                 await tab.sleep(poll_interval_seconds)
             except Exception as e:
+                if self._is_browser_runtime_error(e):
+                    self._mark_browser_health(False)
+                    debug_logger.log_warning(
+                        f"[BrowserCaptcha] 检查 reCAPTCHA 时浏览器运行态断开，停止等待并触发恢复: {e}"
+                    )
+                    raise
                 debug_logger.log_warning(f"[BrowserCaptcha] 检查 reCAPTCHA 时异常: {e}")
                 await tab.sleep(0.5)
 
@@ -8868,8 +9018,20 @@ class BrowserCaptchaService:
         )
         self._mark_runtime_active()
 
+        await self._wait_for_pending_fresh_profile_restart_before_solve(
+            project_id,
+            token_id=token_id,
+            source="get_token_pre_initialize",
+        )
+
         # 确保浏览器已初始化
         await self.initialize()
+
+        await self._wait_for_pending_fresh_profile_restart_before_solve(
+            project_id,
+            token_id=token_id,
+            source="get_token_pre_resident_pick",
+        )
 
         reserved_slot_id: Optional[str] = None
 
@@ -8884,12 +9046,37 @@ class BrowserCaptchaService:
                 f"[BrowserCaptcha] 开始从共享打码池获取标签页 (project: {project_id}, token_id={token_id}, 当前: {len(self._resident_tabs)}/{self._max_resident_tabs})"
             )
             resident_pick_started_at = time.monotonic()
-            slot_id, resident_info = await self._ensure_resident_tab(
-                project_id,
-                token_id=token_id,
-                reserve_for_solve=True,
-                return_slot_key=True,
-            )
+            try:
+                slot_id, resident_info = await self._ensure_resident_tab(
+                    project_id,
+                    token_id=token_id,
+                    reserve_for_solve=True,
+                    return_slot_key=True,
+                )
+            except Exception as e:
+                if not self._is_browser_runtime_error(e):
+                    raise
+                self._mark_browser_health(False)
+                debug_logger.log_warning(
+                    f"[BrowserCaptcha] 共享标签页分配时浏览器运行态断开，立即重启恢复 (project: {project_id}, token_id={token_id}): {e}"
+                )
+                slot_id, resident_info = None, None
+                if await self._recover_browser_runtime(project_id, reason="ensure_resident_tab_runtime_error"):
+                    try:
+                        slot_id, resident_info = await self._ensure_resident_tab(
+                            project_id,
+                            token_id=token_id,
+                            reserve_for_solve=True,
+                            return_slot_key=True,
+                        )
+                    except Exception as retry_error:
+                        if not self._is_browser_runtime_error(retry_error):
+                            raise
+                        self._mark_browser_health(False)
+                        debug_logger.log_warning(
+                            f"[BrowserCaptcha] 浏览器恢复后分配共享标签页仍断开 (project: {project_id}, token_id={token_id}): {retry_error}"
+                        )
+                        slot_id, resident_info = None, None
             reserved_slot_id = slot_id or None
             if resident_info is None or not slot_id:
                 if await self._wait_for_active_resident_rebuild(timeout_seconds=min(20.0, self._solve_timeout_seconds)):
@@ -9278,6 +9465,12 @@ class BrowserCaptchaService:
                         debug_logger.log_info(f"[BrowserCaptcha] 页面已加载")
                         break
                 except Exception as e:
+                    if self._is_browser_runtime_error(e):
+                        self._mark_browser_health(False)
+                        debug_logger.log_warning(
+                            f"[BrowserCaptcha] 等待页面时浏览器运行态断开 (slot={slot_id}, project={project_id}, token_id={token_id}): {e}"
+                        )
+                        raise
                     debug_logger.log_warning(f"[BrowserCaptcha] 等待页面异常: {e}，重试 {retry + 1}/10...")
                     await asyncio.sleep(0.3)  # 减少重试间隔
 
@@ -9341,6 +9534,12 @@ class BrowserCaptchaService:
             if tab is not None:
                 await self._dispose_browser_context_quietly(browser_context_id)
                 await self._close_tab_quietly(tab)
+            if self._is_browser_runtime_error(e):
+                self._mark_browser_health(False)
+                debug_logger.log_warning(
+                    f"[BrowserCaptcha] 创建共享常驻标签页时浏览器运行态断开 (slot={slot_id}, project={project_id}, token_id={token_id}): {e}"
+                )
+                raise
             debug_logger.log_error(
                 f"[BrowserCaptcha] 创建共享常驻标签页异常 (slot={slot_id}, project={project_id}, token_id={token_id}): {e}"
             )
@@ -10483,6 +10682,7 @@ class _PersonalBrowserPoolService:
             getattr(worker, "_initialized", False)
             and browser_instance
             and not getattr(browser_instance, "stopped", False)
+            and not getattr(browser_instance, "_flow2api_runtime_disconnected", False)
         )
 
     @staticmethod
