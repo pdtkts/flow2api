@@ -1,13 +1,17 @@
 """Metadata and cloning prompt generation service."""
 
 import base64
+import csv
 import json
 from copy import deepcopy
+from datetime import date, datetime, timedelta
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from curl_cffi.requests import AsyncSession
 from fastapi import HTTPException
 from ..core.config import config as app_config
+from ..core.logger import debug_logger
 
 
 DEFAULT_TEMPLATE: Dict[str, Any] = {
@@ -107,6 +111,25 @@ METADATA_PROVIDERS = [
     "cloudflare",
     "csvgen",
 ]
+
+
+def _ensure_iso_date(value: str) -> date:
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").date()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="today must be in YYYY-MM-DD format") from exc
+
+
+def _parse_recurring_event_date(day_month: str, today: date) -> date:
+    """Convert day-month labels like 10-Feb to the nearest upcoming date."""
+    try:
+        parsed = datetime.strptime(day_month.strip(), "%d-%b")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Invalid event date in CSV: {day_month}") from exc
+    candidate = date(today.year, parsed.month, parsed.day)
+    if candidate < today:
+        candidate = date(today.year + 1, parsed.month, parsed.day)
+    return candidate
 
 
 def _normalize_image_prompt(p: Dict[str, Any]) -> Dict[str, Any]:
@@ -865,3 +888,130 @@ class CloningMetadataService:
         if isinstance(data, dict) and "creditsRemaining" in data:
             base["creditsRemaining"] = data["creditsRemaining"]
         return base
+
+    def _build_suggested_events_prompt(self, *, today_iso: str, event_list_text: str) -> str:
+        return (
+            f"Today is {today_iso}. The following events fall between today and 90 days from today. "
+            "From this list, select the 8-10 most commercially relevant for stock/visual content. "
+            "Return each with date in ISO format (YYYY-MM-DD), category (e.g. Holiday, Seasonal, Global Event), "
+            "short description, and icon (FontAwesome class such as fa-solid fa-gift).\n\n"
+            f"Events:\n{event_list_text}\n\n"
+            "Response format:\n"
+            "{\n"
+            '  "events": [\n'
+            "    {\n"
+            '      "name": "Event name",\n'
+            '      "date": "2026-05-10",\n'
+            '      "category": "Holiday",\n'
+            '      "description": "Short description",\n'
+            '      "icon": "fa-solid fa-gift"\n'
+            "    }\n"
+            "  ]\n"
+            "}\n"
+            "Return valid JSON only."
+        )
+
+    def _normalize_suggested_events(self, raw: Dict[str, Any]) -> Dict[str, Any]:
+        raw_events = raw.get("events")
+        if not isinstance(raw_events, list):
+            raise HTTPException(status_code=500, detail="Model response must include an events array")
+
+        normalized: List[Dict[str, str]] = []
+        for item in raw_events:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            date_str = str(item.get("date") or "").strip()
+            if not name or not date_str:
+                continue
+            try:
+                date_iso = datetime.strptime(date_str, "%Y-%m-%d").date().isoformat()
+            except Exception:
+                continue
+            category = str(item.get("category") or "Seasonal").strip() or "Seasonal"
+            description = str(item.get("description") or "").strip()
+            icon = str(item.get("icon") or "fa-solid fa-calendar-days").strip() or "fa-solid fa-calendar-days"
+            normalized.append(
+                {
+                    "name": name,
+                    "date": date_iso,
+                    "category": category,
+                    "description": description,
+                    "icon": icon,
+                }
+            )
+
+        if not normalized:
+            raise HTTPException(status_code=500, detail="Model response did not include any valid events")
+
+        if len(normalized) > 10:
+            normalized = normalized[:10]
+        if len(normalized) < 8:
+            debug_logger.log_warning(
+                f"Suggested events model returned fewer than 8 events: count={len(normalized)}"
+            )
+        return {"events": normalized}
+
+    async def generate_suggested_events(self, today_iso: Optional[str] = None) -> Dict[str, Any]:
+        resolved_today = _ensure_iso_date(today_iso) if today_iso else datetime.utcnow().date()
+        window_end = resolved_today + timedelta(days=90)
+
+        calendar_path = Path(__file__).with_name("event_calendar_2026.csv")
+        if not calendar_path.exists():
+            raise HTTPException(status_code=500, detail="Event calendar CSV file not found")
+
+        in_window_events: List[Dict[str, str]] = []
+        try:
+            with calendar_path.open("r", encoding="utf-8-sig", newline="") as fh:
+                reader = csv.DictReader(fh)
+                for row in reader:
+                    raw_day_month = str(row.get("Date") or "").strip()
+                    raw_name = str(row.get("Event Name") or "").strip()
+                    if not raw_day_month or not raw_name:
+                        continue
+                    event_date = _parse_recurring_event_date(raw_day_month, resolved_today)
+                    if resolved_today <= event_date <= window_end:
+                        in_window_events.append(
+                            {
+                                "name": raw_name,
+                                "date": event_date.isoformat(),
+                            }
+                        )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Failed to parse event calendar CSV: {exc}") from exc
+
+        if not in_window_events:
+            raise HTTPException(status_code=400, detail="No events found between today and 90 days from today")
+
+        in_window_events.sort(key=lambda x: x["date"])
+        event_list_text = "\n".join(f"- {item['date']} - {item['name']}" for item in in_window_events)
+        prompt = self._build_suggested_events_prompt(
+            today_iso=resolved_today.isoformat(),
+            event_list_text=event_list_text,
+        )
+
+        provider_chain = self._resolve_provider_chain(
+            None,
+            provider_order_csv=app_config.flow2api_metadata_provider_order,
+            enabled_providers_csv=app_config.flow2api_metadata_enabled_providers,
+            legacy_backend=app_config.flow2api_metadata_backend or "gemini_native",
+            allowed_providers=[p for p in METADATA_PROVIDERS if p != "csvgen"],
+        )
+        model = str(
+            app_config.flow2api_metadata_primary_model
+            or app_config.flow2api_metadata_model
+            or "gemini-2.5-flash"
+        ).strip()
+        retry_count = self._normalized_retry_count(app_config.flow2api_metadata_provider_retry_count)
+        result = await self._invoke_with_provider_chain(
+            providers=provider_chain,
+            retry_count=retry_count,
+            model=model,
+            fallback_models=None,
+            prompt_text=prompt,
+            image_bytes=None,
+            mime_type="image/jpeg",
+        )
+        return self._normalize_suggested_events(result)

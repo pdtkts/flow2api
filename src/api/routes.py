@@ -34,6 +34,7 @@ from ..core.models import (
     GeminiContent,
     GeminiGenerateContentRequest,
     Project,
+    SuggestedEventsResponse,
     Task,
     TaskTrackerContributorFetchRequest,
     TaskTrackerKeywordSearchRequest,
@@ -2295,6 +2296,17 @@ async def fetch_task_tracker_contributor_assets(
     except Exception as exc:
         debug_logger.log_error(f"Tracker contributor fetch failed: {exc}")
         raise HTTPException(status_code=500, detail=f"Internal Error: {str(exc)}")
+
+
+@router.get("/api/suggested-events", response_model=SuggestedEventsResponse)
+async def get_suggested_events(
+    today: Optional[str] = Query(None, description="ISO date in YYYY-MM-DD format"),
+    auth_ctx: AuthContext = Depends(verify_api_key_flexible),
+):
+    """Suggest commercially relevant events for the next 90 days."""
+    if auth_ctx.key_id is None:
+        raise HTTPException(status_code=403, detail="Managed API key required")
+    return await cloning_metadata_service.generate_suggested_events(today_iso=today)
 
 
 @router.post("/api/tracker/keyword")
