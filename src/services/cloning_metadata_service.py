@@ -40,13 +40,6 @@ def _adobe_stock_category_table_prompt_lines() -> str:
     return "\n".join(f"{cid} — {name}" for cid, name in ADOBE_STOCK_METADATA_CATEGORIES)
 
 
-def _canonical_adobe_category_label(category_id: int) -> Optional[str]:
-    for cid, label in ADOBE_STOCK_METADATA_CATEGORIES:
-        if cid == category_id:
-            return label
-    return None
-
-
 def _adobe_category_id_by_label(name: str) -> Optional[int]:
     n = (name or "").strip().lower()
     if not n:
@@ -599,9 +592,6 @@ class CloningMetadataService:
                 rid = _resolve_adobe_stock_category_id(raw)
                 if rid is not None:
                     out["categoryId"] = rid
-                    label = _canonical_adobe_category_label(rid)
-                    if label:
-                        out["category"] = label
             return out
 
         a = coerce(data.get("optionA") if isinstance(data, dict) else None)
