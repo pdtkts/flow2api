@@ -137,6 +137,10 @@ export function LogDetailStatic({ log }: { log: LogDetail }) {
 
   const code = log.status_code
   const tokenDisplay = log.token_email || log.token_username || "—"
+  const apiKeyDisplay =
+    log.api_key_label || log.api_key_prefix
+      ? [log.api_key_label, log.api_key_prefix ? `(${log.api_key_prefix}…)` : null].filter(Boolean).join(" ")
+      : "—"
   const durationStr = `${Number(log.duration || 0).toFixed(2)} seconds`
   const assets =
     responseBodyObj && typeof responseBodyObj === "object"
@@ -278,6 +282,7 @@ export function LogDetailStatic({ log }: { log: LogDetail }) {
           <BasicInfoRow label="Time taken">{durationStr}</BasicInfoRow>
           <BasicInfoRow label="Time">{formatLogDetailLocalTimestamp(log.created_at)}</BasicInfoRow>
           <BasicInfoRow label="Token">{tokenDisplay}</BasicInfoRow>
+          <BasicInfoRow label="Managed API key">{apiKeyDisplay}</BasicInfoRow>
           <BasicInfoRow label="Log ID">{log.id ?? "—"}</BasicInfoRow>
           <BasicInfoRow label="Progress">{formatLogProgressField(log)}</BasicInfoRow>
         </div>

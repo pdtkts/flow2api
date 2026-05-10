@@ -540,15 +540,3 @@ class TaskTrackerKeywordSearchRequest(BaseModel):
     content_type: Optional[str] = "all"
     pages: Optional[List[int]] = None
     generative_ai: Optional[str] = "all"
-
-
-class SuggestedEventItem(BaseModel):
-    name: str
-    date: str
-    category: str
-    description: str
-    icon: str
-
-
-class SuggestedEventsResponse(BaseModel):
-    events: List[SuggestedEventItem]

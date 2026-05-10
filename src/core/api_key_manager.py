@@ -20,6 +20,9 @@ class AuthContext:
     is_legacy: bool
     allowed_accounts: Set[int]
     scopes: Set[str]
+    adobe_cloning_enabled: bool = True
+    adobe_metadata_enabled: bool = True
+    adobe_tracker_enabled: bool = True
 
 
 class ApiKeyManager:
@@ -49,6 +52,9 @@ class ApiKeyManager:
         account_ids: list[int],
         endpoint_limits: dict[str, dict[str, int]],
         expires_at: Optional[str] = None,
+        adobe_cloning_enabled: bool = True,
+        adobe_metadata_enabled: bool = True,
+        adobe_tracker_enabled: bool = True,
     ) -> dict:
         full_key, key_hash = self.generate_key()
         key_prefix = full_key[:18]
@@ -62,6 +68,9 @@ class ApiKeyManager:
             account_ids=account_ids,
             endpoint_limits=endpoint_limits,
             expires_at=expires_at,
+            adobe_cloning_enabled=adobe_cloning_enabled,
+            adobe_metadata_enabled=adobe_metadata_enabled,
+            adobe_tracker_enabled=adobe_tracker_enabled,
         )
         return {"id": key_id, "api_key": full_key, "key_prefix": key_prefix}
 
@@ -99,12 +108,25 @@ class ApiKeyManager:
 
             await self._enforce_rate_limits(key_id=key_id, endpoint=endpoint)
             await self.db.touch_api_key_usage(key_id)
+
+            def _adobe_flag(col: str) -> bool:
+                v = row.get(col)
+                if v is None:
+                    return True
+                try:
+                    return bool(int(v))
+                except (TypeError, ValueError):
+                    return True
+
             return AuthContext(
                 key_id=key_id,
                 key_label=str(row.get("label") or row.get("key_prefix") or "managed"),
                 is_legacy=False,
                 allowed_accounts=allowed_accounts,
                 scopes=scopes,
+                adobe_cloning_enabled=_adobe_flag("adobe_cloning_enabled"),
+                adobe_metadata_enabled=_adobe_flag("adobe_metadata_enabled"),
+                adobe_tracker_enabled=_adobe_flag("adobe_tracker_enabled"),
             )
 
         # Legacy fallback
@@ -116,6 +138,9 @@ class ApiKeyManager:
                 is_legacy=True,
                 allowed_accounts=set(),
                 scopes={"*"},
+                adobe_cloning_enabled=True,
+                adobe_metadata_enabled=True,
+                adobe_tracker_enabled=True,
             )
 
         raise PermissionError("Invalid API key")

@@ -590,6 +590,9 @@ class Database:
                         is_active BOOLEAN DEFAULT 1,
                         expires_at TIMESTAMP,
                         last_used_at TIMESTAMP,
+                        adobe_cloning_enabled INTEGER DEFAULT 1,
+                        adobe_metadata_enabled INTEGER DEFAULT 1,
+                        adobe_tracker_enabled INTEGER DEFAULT 1,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         FOREIGN KEY (client_id) REFERENCES api_clients(id)
@@ -883,6 +886,9 @@ class Database:
             if await self._table_exists(db, "api_keys"):
                 api_keys_columns_to_add = [
                     ("key_plaintext", "TEXT"),
+                    ("adobe_cloning_enabled", "INTEGER DEFAULT 1"),
+                    ("adobe_metadata_enabled", "INTEGER DEFAULT 1"),
+                    ("adobe_tracker_enabled", "INTEGER DEFAULT 1"),
                 ]
 
                 for col_name, col_type in api_keys_columns_to_add:
@@ -925,6 +931,9 @@ class Database:
 
             await db.execute("CREATE INDEX IF NOT EXISTS idx_projects_api_key_created_at ON projects(api_key_id, created_at DESC)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_request_logs_api_key_id_created_at ON request_logs(api_key_id, created_at DESC)")
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_request_logs_api_key_op_created ON request_logs(api_key_id, operation, created_at DESC)"
+            )
             await db.execute("CREATE INDEX IF NOT EXISTS idx_cache_files_api_key_filename ON cache_files(api_key_id, filename)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_cache_files_api_key_project ON cache_files(api_key_id, flow_project_id)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_extension_worker_bindings_api_key_id ON extension_worker_bindings(api_key_id)")
@@ -1269,6 +1278,9 @@ class Database:
                     is_active BOOLEAN DEFAULT 1,
                     expires_at TIMESTAMP,
                     last_used_at TIMESTAMP,
+                    adobe_cloning_enabled INTEGER DEFAULT 1,
+                    adobe_metadata_enabled INTEGER DEFAULT 1,
+                    adobe_tracker_enabled INTEGER DEFAULT 1,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (client_id) REFERENCES api_clients(id)
@@ -1364,6 +1376,9 @@ class Database:
             await db.execute("CREATE INDEX IF NOT EXISTS idx_request_logs_created_at ON request_logs(created_at DESC)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_request_logs_token_id_created_at ON request_logs(token_id, created_at DESC)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_request_logs_api_key_id_created_at ON request_logs(api_key_id, created_at DESC)")
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_request_logs_api_key_op_created ON request_logs(api_key_id, operation, created_at DESC)"
+            )
             await db.execute("CREATE INDEX IF NOT EXISTS idx_cache_files_api_key_filename ON cache_files(api_key_id, filename)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_cache_files_api_key_project ON cache_files(api_key_id, flow_project_id)")
 
@@ -2701,6 +2716,66 @@ class Database:
             await db.commit()
             return cursor.lastrowid
 
+    async def insert_managed_route_request_log(
+        self,
+        *,
+        api_key_id: int,
+        operation: str,
+        request_body: str,
+        response_body: str,
+        status_code: int,
+        duration: float,
+        status_text: str = "",
+    ) -> int:
+        """Single-row log for managed-key routes without a Flow token (e.g. Adobe tools)."""
+        log = RequestLog(
+            token_id=None,
+            api_key_id=api_key_id,
+            operation=operation,
+            request_body=request_body,
+            response_body=response_body,
+            status_code=status_code,
+            duration=duration,
+            status_text=status_text or ("completed" if status_code == 200 else "failed" if status_code >= 400 else "processing"),
+            progress=100 if status_code == 200 else 0 if status_code >= 400 else 0,
+        )
+        return await self.add_request_log(log)
+
+    async def count_adobe_success_by_month(
+        self,
+        api_key_id: int,
+        months_back: int = 12,
+    ) -> List[Dict[str, Any]]:
+        """Successful Adobe-suite operations per calendar month (from request_logs)."""
+        safe_months = max(1, min(int(months_back or 12), 60))
+        window = f"-{safe_months} months"
+        ops = (
+            "adobe:cloning_prompts",
+            "adobe:cloning_video_prompt",
+            "adobe:metadata",
+            "adobe:tracker_contributor",
+            "adobe:tracker_keyword",
+        )
+        placeholders = ",".join("?" * len(ops))
+        params: List[Any] = [api_key_id, *ops, window]
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                f"""
+                SELECT strftime('%Y-%m', created_at) AS year_month, COUNT(*) AS success_count
+                FROM request_logs
+                WHERE api_key_id = ?
+                  AND status_code = 200
+                  AND operation IN ({placeholders})
+                  AND datetime(created_at) >= datetime('now', ?)
+                GROUP BY 1
+                ORDER BY 1 ASC
+                """,
+                params,
+            )
+            rows = await cursor.fetchall()
+            return [{"year_month": str(r["year_month"]), "success_count": int(r["success_count"])} for r in rows]
+
     async def update_request_log(self, log_id: int, **kwargs):
         """Update an existing request log row."""
         if not kwargs:
@@ -2740,21 +2815,31 @@ class Database:
         self,
         token_id: Optional[int] = None,
         api_key_id: Optional[int] = None,
+        exclude_operations: Optional[List[str]] = None,
     ) -> int:
         """Count rows matching the same filters as get_logs."""
+        exc_ops = [str(x).strip() for x in (exclude_operations or []) if str(x).strip()]
+        exclude_sql = ""
+        if exc_ops:
+            ph = ",".join("?" * len(exc_ops))
+            exclude_sql = f" AND rl.operation NOT IN ({ph})"
         async with self._connect() as db:
+            tail_params: List[Any] = list(exc_ops)
             if token_id is not None:
                 cursor = await db.execute(
-                    "SELECT COUNT(*) FROM request_logs WHERE token_id = ?",
-                    (token_id,),
+                    f"SELECT COUNT(*) FROM request_logs rl WHERE rl.token_id = ?{exclude_sql}",
+                    (token_id, *tail_params),
                 )
             elif api_key_id is not None:
                 cursor = await db.execute(
-                    "SELECT COUNT(*) FROM request_logs WHERE api_key_id = ?",
-                    (api_key_id,),
+                    f"SELECT COUNT(*) FROM request_logs rl WHERE rl.api_key_id = ?{exclude_sql}",
+                    (api_key_id, *tail_params),
                 )
             else:
-                cursor = await db.execute("SELECT COUNT(*) FROM request_logs")
+                cursor = await db.execute(
+                    f"SELECT COUNT(*) FROM request_logs rl WHERE 1=1{exclude_sql}",
+                    tuple(tail_params),
+                )
             row = await cursor.fetchone()
             return int(row[0]) if row and row[0] is not None else 0
 
@@ -2765,9 +2850,18 @@ class Database:
         token_id: Optional[int] = None,
         include_payload: bool = False,
         api_key_id: Optional[int] = None,
+        exclude_operations: Optional[List[str]] = None,
     ):
         """Get request logs with token info, optionally including payload fields"""
         safe_offset = max(0, int(offset or 0))
+        exc_ops = [str(x).strip() for x in (exclude_operations or []) if str(x).strip()]
+        exclude_sql = ""
+        exclude_params: List[Any] = []
+        if exc_ops:
+            ph = ",".join("?" * len(exc_ops))
+            exclude_sql = f" AND rl.operation NOT IN ({ph})"
+            exclude_params = list(exc_ops)
+
         async with self._connect() as db:
             db.row_factory = aiosqlite.Row
             payload_columns = "rl.request_body, rl.response_body," if include_payload else ""
@@ -2778,9 +2872,11 @@ class Database:
             status_text_column = "rl.status_text," if has_status_text else "'' as status_text,"
             progress_column = "rl.progress," if has_progress else "0 as progress,"
             updated_at_column = "rl.updated_at," if has_updated_at else "rl.created_at as updated_at,"
+            key_cols = "k.label AS api_key_label, k.key_prefix AS api_key_prefix,"
 
             if token_id:
-                cursor = await db.execute(f"""
+                cursor = await db.execute(
+                    f"""
                     SELECT
                         rl.id,
                         rl.token_id,
@@ -2794,16 +2890,21 @@ class Database:
                         {progress_column}
                         rl.created_at,
                         {updated_at_column}
+                        {key_cols}
                         t.email as token_email,
                         t.name as token_username
                     FROM request_logs rl
                     LEFT JOIN tokens t ON rl.token_id = t.id
-                    WHERE rl.token_id = ?
+                    LEFT JOIN api_keys k ON rl.api_key_id = k.id
+                    WHERE rl.token_id = ?{exclude_sql}
                     ORDER BY rl.created_at DESC
                     LIMIT ? OFFSET ?
-                """, (token_id, limit, safe_offset))
+                    """,
+                    (token_id, *exclude_params, limit, safe_offset),
+                )
             elif api_key_id is not None:
-                cursor = await db.execute(f"""
+                cursor = await db.execute(
+                    f"""
                     SELECT
                         rl.id,
                         rl.token_id,
@@ -2817,16 +2918,21 @@ class Database:
                         {progress_column}
                         rl.created_at,
                         {updated_at_column}
+                        {key_cols}
                         t.email as token_email,
                         t.name as token_username
                     FROM request_logs rl
                     LEFT JOIN tokens t ON rl.token_id = t.id
-                    WHERE rl.api_key_id = ?
+                    LEFT JOIN api_keys k ON rl.api_key_id = k.id
+                    WHERE rl.api_key_id = ?{exclude_sql}
                     ORDER BY rl.created_at DESC
                     LIMIT ? OFFSET ?
-                """, (api_key_id, limit, safe_offset))
+                    """,
+                    (api_key_id, *exclude_params, limit, safe_offset),
+                )
             else:
-                cursor = await db.execute(f"""
+                cursor = await db.execute(
+                    f"""
                     SELECT
                         rl.id,
                         rl.token_id,
@@ -2840,13 +2946,18 @@ class Database:
                         {progress_column}
                         rl.created_at,
                         {updated_at_column}
+                        {key_cols}
                         t.email as token_email,
                         t.name as token_username
                     FROM request_logs rl
                     LEFT JOIN tokens t ON rl.token_id = t.id
+                    LEFT JOIN api_keys k ON rl.api_key_id = k.id
+                    WHERE 1=1{exclude_sql}
                     ORDER BY rl.created_at DESC
                     LIMIT ? OFFSET ?
-                """, (limit, safe_offset))
+                    """,
+                    (*exclude_params, limit, safe_offset),
+                )
 
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
@@ -2861,8 +2972,10 @@ class Database:
             status_text_column = "rl.status_text," if has_status_text else "'' as status_text,"
             progress_column = "rl.progress," if has_progress else "0 as progress,"
             updated_at_column = "rl.updated_at," if has_updated_at else "rl.created_at as updated_at,"
+            key_cols = "k.label AS api_key_label, k.key_prefix AS api_key_prefix,"
             if api_key_id is None:
-                cursor = await db.execute(f"""
+                cursor = await db.execute(
+                    f"""
                     SELECT
                         rl.id,
                         rl.token_id,
@@ -2876,15 +2989,20 @@ class Database:
                         {progress_column}
                         rl.created_at,
                         {updated_at_column}
+                        {key_cols}
                         t.email as token_email,
                         t.name as token_username
                     FROM request_logs rl
                     LEFT JOIN tokens t ON rl.token_id = t.id
+                    LEFT JOIN api_keys k ON rl.api_key_id = k.id
                     WHERE rl.id = ?
                     LIMIT 1
-                """, (log_id,))
+                    """,
+                    (log_id,),
+                )
             else:
-                cursor = await db.execute(f"""
+                cursor = await db.execute(
+                    f"""
                     SELECT
                         rl.id,
                         rl.token_id,
@@ -2898,13 +3016,17 @@ class Database:
                         {progress_column}
                         rl.created_at,
                         {updated_at_column}
+                        {key_cols}
                         t.email as token_email,
                         t.name as token_username
                     FROM request_logs rl
                     LEFT JOIN tokens t ON rl.token_id = t.id
+                    LEFT JOIN api_keys k ON rl.api_key_id = k.id
                     WHERE rl.id = ? AND rl.api_key_id = ?
                     LIMIT 1
-                """, (log_id, api_key_id))
+                    """,
+                    (log_id, api_key_id),
+                )
             row = await cursor.fetchone()
             return dict(row) if row else None
 
@@ -3985,15 +4107,32 @@ class Database:
         account_ids: List[int],
         endpoint_limits: Dict[str, Dict[str, int]],
         expires_at: Optional[str],
+        adobe_cloning_enabled: bool = True,
+        adobe_metadata_enabled: bool = True,
+        adobe_tracker_enabled: bool = True,
     ) -> int:
         client_id = await self._get_or_create_api_client(client_name)
         async with self._connect(write=True) as db:
             cursor = await db.execute(
                 """
-                INSERT INTO api_keys (client_id, label, key_prefix, key_plaintext, key_hash, scopes, is_active, expires_at)
-                VALUES (?, ?, ?, ?, ?, ?, 1, ?)
+                INSERT INTO api_keys (
+                    client_id, label, key_prefix, key_plaintext, key_hash, scopes, is_active, expires_at,
+                    adobe_cloning_enabled, adobe_metadata_enabled, adobe_tracker_enabled
+                )
+                VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
                 """,
-                (client_id, label, key_prefix, key_plaintext, key_hash, scopes, expires_at),
+                (
+                    client_id,
+                    label,
+                    key_prefix,
+                    key_plaintext,
+                    key_hash,
+                    scopes,
+                    expires_at,
+                    1 if adobe_cloning_enabled else 0,
+                    1 if adobe_metadata_enabled else 0,
+                    1 if adobe_tracker_enabled else 0,
+                ),
             )
             key_id = int(cursor.lastrowid)
 
@@ -4132,6 +4271,9 @@ class Database:
                     k.is_active,
                     k.expires_at,
                     k.last_used_at,
+                    COALESCE(k.adobe_cloning_enabled, 1) AS adobe_cloning_enabled,
+                    COALESCE(k.adobe_metadata_enabled, 1) AS adobe_metadata_enabled,
+                    COALESCE(k.adobe_tracker_enabled, 1) AS adobe_tracker_enabled,
                     k.created_at
                 FROM api_keys k
                 JOIN api_clients c ON c.id = k.client_id
@@ -4172,6 +4314,9 @@ class Database:
         expires_at: Optional[str] = None,
         account_ids: Optional[List[int]] = None,
         endpoint_limits: Optional[Dict[str, Dict[str, int]]] = None,
+        adobe_cloning_enabled: Optional[bool] = None,
+        adobe_metadata_enabled: Optional[bool] = None,
+        adobe_tracker_enabled: Optional[bool] = None,
     ):
         # Resolve client outside the write transaction: _get_or_create_api_client also
         # takes _write_lock; nesting here deadlocks asyncio.Lock until Cloudflare 524.
@@ -4204,6 +4349,21 @@ class Database:
                 await db.execute(
                     "UPDATE api_keys SET expires_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                     (expires_at, key_id),
+                )
+            if adobe_cloning_enabled is not None:
+                await db.execute(
+                    "UPDATE api_keys SET adobe_cloning_enabled = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (1 if adobe_cloning_enabled else 0, key_id),
+                )
+            if adobe_metadata_enabled is not None:
+                await db.execute(
+                    "UPDATE api_keys SET adobe_metadata_enabled = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (1 if adobe_metadata_enabled else 0, key_id),
+                )
+            if adobe_tracker_enabled is not None:
+                await db.execute(
+                    "UPDATE api_keys SET adobe_tracker_enabled = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (1 if adobe_tracker_enabled else 0, key_id),
                 )
             if account_ids is not None:
                 await db.execute("DELETE FROM api_key_accounts WHERE api_key_id = ?", (key_id,))
@@ -4246,6 +4406,9 @@ class Database:
                     k.is_active,
                     k.expires_at,
                     k.last_used_at,
+                    COALESCE(k.adobe_cloning_enabled, 1) AS adobe_cloning_enabled,
+                    COALESCE(k.adobe_metadata_enabled, 1) AS adobe_metadata_enabled,
+                    COALESCE(k.adobe_tracker_enabled, 1) AS adobe_tracker_enabled,
                     k.created_at
                 FROM api_keys k
                 JOIN api_clients c ON c.id = k.client_id

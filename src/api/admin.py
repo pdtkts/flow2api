@@ -7,7 +7,7 @@ import mimetypes
 import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
-from fastapi import APIRouter, Depends, HTTPException, Header, Request
+from fastapi import APIRouter, Depends, HTTPException, Header, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
@@ -696,6 +696,9 @@ class CreateManagedApiKeyRequest(BaseModel):
     account_ids: List[int]
     endpoint_limits: Dict[str, Dict[str, int]] = {}
     expires_at: Optional[str] = None
+    adobe_cloning_enabled: bool = True
+    adobe_metadata_enabled: bool = True
+    adobe_tracker_enabled: bool = True
 
 
 class UpdateManagedApiKeyRequest(BaseModel):
@@ -706,6 +709,9 @@ class UpdateManagedApiKeyRequest(BaseModel):
     expires_at: Optional[str] = None
     account_ids: Optional[List[int]] = None
     endpoint_limits: Optional[Dict[str, Dict[str, int]]] = None
+    adobe_cloning_enabled: Optional[bool] = None
+    adobe_metadata_enabled: Optional[bool] = None
+    adobe_tracker_enabled: Optional[bool] = None
 
 
 class ExtensionWorkerBindRequest(BaseModel):
@@ -1860,13 +1866,22 @@ async def get_stats(token: str = Depends(verify_admin_token)):
 async def get_logs(
     limit: int = 50,
     offset: int = 0,
-    token: str = Depends(verify_admin_token)
+    exclude_operations: Optional[str] = Query(
+        None,
+        description="Comma-separated operation values to exclude (e.g. generate_image,generate_video)",
+    ),
+    token: str = Depends(verify_admin_token),
 ):
     """Get lightweight request logs for list view (paginated)."""
     limit = max(1, min(limit, 100))
     offset = max(0, offset)
-    total = await db.count_request_logs()
-    logs = await db.get_logs(limit=limit, offset=offset, include_payload=False)
+    exclude_list = None
+    if exclude_operations and exclude_operations.strip():
+        exclude_list = [x.strip() for x in exclude_operations.split(",") if x.strip()]
+    total = await db.count_request_logs(exclude_operations=exclude_list)
+    logs = await db.get_logs(
+        limit=limit, offset=offset, include_payload=False, exclude_operations=exclude_list
+    )
 
     result = []
     for log in logs:
@@ -1880,6 +1895,9 @@ async def get_logs(
             "token_id": log.get("token_id"),
             "token_email": log.get("token_email"),
             "token_username": log.get("token_username"),
+            "api_key_id": log.get("api_key_id"),
+            "api_key_label": log.get("api_key_label"),
+            "api_key_prefix": log.get("api_key_prefix"),
             "operation": log.get("operation"),
             "status_code": status_code if status_code is not None else raw_status_code,
             "duration": log.get("duration"),
@@ -1909,6 +1927,9 @@ async def get_log_detail(
         "token_id": log.get("token_id"),
         "token_email": log.get("token_email"),
         "token_username": log.get("token_username"),
+        "api_key_id": log.get("api_key_id"),
+        "api_key_label": log.get("api_key_label"),
+        "api_key_prefix": log.get("api_key_prefix"),
         "operation": log.get("operation"),
         "status_code": log.get("status_code"),
         "duration": log.get("duration"),
@@ -1918,7 +1939,7 @@ async def get_log_detail(
         "updated_at": log.get("updated_at"),
         "error_summary": error_summary,
         "request_body": log.get("request_body"),
-        "response_body": log.get("response_body")
+        "response_body": log.get("response_body"),
     }
 
 
@@ -2012,6 +2033,9 @@ async def create_managed_api_key(
         account_ids=request.account_ids,
         endpoint_limits=request.endpoint_limits or {},
         expires_at=request.expires_at,
+        adobe_cloning_enabled=request.adobe_cloning_enabled,
+        adobe_metadata_enabled=request.adobe_metadata_enabled,
+        adobe_tracker_enabled=request.adobe_tracker_enabled,
     )
     return {
         "success": True,
@@ -2055,8 +2079,26 @@ async def update_managed_api_key(
         expires_at=request.expires_at,
         account_ids=valid_account_ids,
         endpoint_limits=request.endpoint_limits,
+        adobe_cloning_enabled=request.adobe_cloning_enabled,
+        adobe_metadata_enabled=request.adobe_metadata_enabled,
+        adobe_tracker_enabled=request.adobe_tracker_enabled,
     )
     return {"success": True, "message": "Managed API key updated"}
+
+
+@router.get("/api/admin/managed-apikeys/{key_id}/adobe-usage")
+async def get_managed_api_key_adobe_usage(
+    key_id: int,
+    months: int = Query(12, ge=1, le=60),
+    token: str = Depends(verify_admin_token),
+):
+    """Monthly successful Adobe-suite request counts (from request_logs)."""
+    detail = await db.get_api_key_detail(key_id)
+    if not detail:
+        raise HTTPException(status_code=404, detail="Managed API key not found")
+    months = int(months)
+    rows = await db.count_adobe_success_by_month(key_id, months_back=months)
+    return {"success": True, "key_id": key_id, "months": months, "by_month": rows}
 
 
 @router.get("/api/admin/managed-apikeys/audit")

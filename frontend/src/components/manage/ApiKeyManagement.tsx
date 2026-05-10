@@ -27,6 +27,9 @@ type ManagedApiKey = {
   created_at?: string | null
   account_ids: number[]
   can_reveal_plaintext?: number
+  adobe_cloning_enabled?: number | boolean
+  adobe_metadata_enabled?: number | boolean
+  adobe_tracker_enabled?: number | boolean
 }
 type EndpointLimit = { endpoint: string; rpm: number; rph: number; burst: number }
 type ManagedApiKeyDetail = ManagedApiKey & {
@@ -48,6 +51,14 @@ type AuditLog = {
 
 type LimitRow = { endpoint: string; rpm: string; rph: string; burst: string }
 type ScopeOption = { id: string; label: string; description: string }
+
+type AdobeUsageMonthRow = { year_month: string; success_count: number }
+
+function coerceAdobeFlag(v: unknown): boolean {
+  if (v === undefined || v === null) return true
+  if (typeof v === "boolean") return v
+  return Number(v) !== 0
+}
 
 const AUDIT_PAGE_SIZE = 25
 const KEY_PROJECT_PAGE_SIZE = 10
@@ -87,6 +98,11 @@ export function ApiKeyManagement() {
   const [limits, setLimits] = useState<LimitRow[]>([
     { endpoint: "/v1/chat/completions", rpm: "60", rph: "2000", burst: "10" },
   ])
+  const [adobeCloningEnabled, setAdobeCloningEnabled] = useState(true)
+  const [adobeMetadataEnabled, setAdobeMetadataEnabled] = useState(true)
+  const [adobeTrackerEnabled, setAdobeTrackerEnabled] = useState(true)
+  const [adobeUsageRows, setAdobeUsageRows] = useState<AdobeUsageMonthRow[]>([])
+  const [adobeUsageLoading, setAdobeUsageLoading] = useState(false)
   const [createdKey, setCreatedKey] = useState("")
 
   const [keyProjectsPage, setKeyProjectsPage] = useState(0)
@@ -161,6 +177,26 @@ export function ApiKeyManagement() {
     void loadKeyProjects()
   }, [loadKeyProjects])
 
+  const loadAdobeUsage = useCallback(async (keyId: number) => {
+    if (!token) return
+    setAdobeUsageLoading(true)
+    try {
+      const r = await adminJson<{ success?: boolean; by_month?: AdobeUsageMonthRow[] }>(
+        `/api/admin/managed-apikeys/${keyId}/adobe-usage?months=12`,
+        token
+      )
+      if (r.ok && Array.isArray(r.data?.by_month)) {
+        setAdobeUsageRows(r.data.by_month as AdobeUsageMonthRow[])
+      } else {
+        setAdobeUsageRows([])
+      }
+    } catch {
+      setAdobeUsageRows([])
+    } finally {
+      setAdobeUsageLoading(false)
+    }
+  }, [token])
+
   const toggleAccount = (id: number) => {
     setSelectedAccountIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))
   }
@@ -213,6 +249,9 @@ export function ApiKeyManagement() {
           account_ids: selectedAccountIds,
           endpoint_limits: buildLimitsPayload(),
           expires_at: expiresAt.trim() || null,
+          adobe_cloning_enabled: adobeCloningEnabled,
+          adobe_metadata_enabled: adobeMetadataEnabled,
+          adobe_tracker_enabled: adobeTrackerEnabled,
         }),
       })
       if (!res) return
@@ -261,7 +300,11 @@ export function ApiKeyManagement() {
     setNewProjTokenId(accIds.length ? String(accIds[0]) : "")
     setNewProjTitle("")
     setNewProjSetCurrent(true)
+    setAdobeCloningEnabled(coerceAdobeFlag(key.adobe_cloning_enabled))
+    setAdobeMetadataEnabled(coerceAdobeFlag(key.adobe_metadata_enabled))
+    setAdobeTrackerEnabled(coerceAdobeFlag(key.adobe_tracker_enabled))
     setEditOpen(true)
+    void loadAdobeUsage(key.id)
   }
 
   const handleEditOpenChange = (open: boolean) => {
@@ -272,6 +315,7 @@ export function ApiKeyManagement() {
       setKeyProjectRows([])
       setKeyProjectAccounts([])
       setKeyProjectsTotal(0)
+      setAdobeUsageRows([])
       setNewProjTokenId("")
       setNewProjTitle("")
       setNewProjSetCurrent(true)
@@ -342,6 +386,9 @@ export function ApiKeyManagement() {
           expires_at: expiresAt.trim() || null,
           account_ids: selectedAccountIds,
           endpoint_limits: buildLimitsPayload(),
+          adobe_cloning_enabled: adobeCloningEnabled,
+          adobe_metadata_enabled: adobeMetadataEnabled,
+          adobe_tracker_enabled: adobeTrackerEnabled,
         }),
       })
       if (!res) return
@@ -416,7 +463,14 @@ export function ApiKeyManagement() {
             <Button size="icon" variant="outline" onClick={() => loadAll()} disabled={loading}>
               <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
             </Button>
-            <Button onClick={() => setCreateOpen(true)}>
+            <Button
+              onClick={() => {
+                setAdobeCloningEnabled(true)
+                setAdobeMetadataEnabled(true)
+                setAdobeTrackerEnabled(true)
+                setCreateOpen(true)
+              }}
+            >
               <Plus className="h-4 w-4 mr-2" /> New key
             </Button>
           </div>
@@ -595,6 +649,29 @@ export function ApiKeyManagement() {
               </div>
             </div>
 
+            <div className="space-y-3 rounded-md border p-3">
+              <div>
+                <Label className="text-sm font-medium">Adobe tools</Label>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Cloning prompts and video prompt, stock metadata, and task tracker endpoints. Disabled routes return HTTP 403.
+                </p>
+              </div>
+              <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap">
+                <div className="flex min-w-[200px] flex-1 items-center justify-between gap-4 rounded-md border bg-muted/30 px-3 py-2">
+                  <span className="text-sm">Cloning</span>
+                  <Switch checked={adobeCloningEnabled} onCheckedChange={setAdobeCloningEnabled} />
+                </div>
+                <div className="flex min-w-[200px] flex-1 items-center justify-between gap-4 rounded-md border bg-muted/30 px-3 py-2">
+                  <span className="text-sm">Metadata</span>
+                  <Switch checked={adobeMetadataEnabled} onCheckedChange={setAdobeMetadataEnabled} />
+                </div>
+                <div className="flex min-w-[200px] flex-1 items-center justify-between gap-4 rounded-md border bg-muted/30 px-3 py-2">
+                  <span className="text-sm">Task tracker</span>
+                  <Switch checked={adobeTrackerEnabled} onCheckedChange={setAdobeTrackerEnabled} />
+                </div>
+              </div>
+            </div>
+
             <div className="space-y-2 border rounded-md p-3">
               <Label>Assign accounts (server-side routing pool)</Label>
               <div className="max-h-52 overflow-auto space-y-2">
@@ -687,6 +764,73 @@ export function ApiKeyManagement() {
                 <Input className="mt-1" value={expiresAt} onChange={(e) => setExpiresAt(e.target.value)} placeholder="YYYY-MM-DD HH:MM:SS" />
               </div>
             </div>
+
+            <div className="space-y-3 rounded-md border p-3">
+              <div>
+                <Label className="text-sm font-medium">Adobe tools</Label>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Cloning prompts and video prompt, stock metadata, and task tracker endpoints.
+                </p>
+              </div>
+              <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap">
+                <div className="flex min-w-[200px] flex-1 items-center justify-between gap-4 rounded-md border bg-muted/30 px-3 py-2">
+                  <span className="text-sm">Cloning</span>
+                  <Switch checked={adobeCloningEnabled} onCheckedChange={setAdobeCloningEnabled} />
+                </div>
+                <div className="flex min-w-[200px] flex-1 items-center justify-between gap-4 rounded-md border bg-muted/30 px-3 py-2">
+                  <span className="text-sm">Metadata</span>
+                  <Switch checked={adobeMetadataEnabled} onCheckedChange={setAdobeMetadataEnabled} />
+                </div>
+                <div className="flex min-w-[200px] flex-1 items-center justify-between gap-4 rounded-md border bg-muted/30 px-3 py-2">
+                  <span className="text-sm">Task tracker</span>
+                  <Switch checked={adobeTrackerEnabled} onCheckedChange={setAdobeTrackerEnabled} />
+                </div>
+              </div>
+            </div>
+
+            <div className="space-y-2 rounded-md border p-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <Label>Adobe success (HTTP 200) by month</Label>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-8"
+                  disabled={adobeUsageLoading || editingKeyId == null}
+                  onClick={() => editingKeyId != null && void loadAdobeUsage(editingKeyId)}
+                >
+                  <RefreshCw className={`h-3.5 w-3.5 mr-1 ${adobeUsageLoading ? "animate-spin" : ""}`} />
+                  Refresh
+                </Button>
+              </div>
+              {adobeUsageLoading && !adobeUsageRows.length ? (
+                <div className="flex justify-center py-6 text-muted-foreground">
+                  <Loader2 className="h-6 w-6 animate-spin" />
+                </div>
+              ) : adobeUsageRows.length ? (
+                <div className="rounded-md border bg-background">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead className="text-xs">Month</TableHead>
+                        <TableHead className="text-xs">Successful requests</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {adobeUsageRows.map((row) => (
+                        <TableRow key={row.year_month}>
+                          <TableCell className="font-mono text-xs">{row.year_month}</TableCell>
+                          <TableCell className="text-xs tabular-nums">{row.success_count}</TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+              ) : (
+                <p className="text-xs text-muted-foreground py-2">No successful Adobe requests in the selected window yet.</p>
+              )}
+            </div>
+
             <div className="space-y-2 border rounded-md p-3">
               <Label>Assign accounts (server-side routing pool)</Label>
               <div className="max-h-52 overflow-auto space-y-2">

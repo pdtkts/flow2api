@@ -81,6 +81,9 @@ async def verify_api_key_flexible(
             is_legacy=True,
             allowed_accounts=set(),
             scopes={"*"},
+            adobe_cloning_enabled=True,
+            adobe_metadata_enabled=True,
+            adobe_tracker_enabled=True,
         )
 
     try:

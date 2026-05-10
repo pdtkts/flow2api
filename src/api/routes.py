@@ -9,6 +9,7 @@ import json
 import mimetypes
 import random
 import re
+import time
 import uuid
 from urllib.parse import parse_qs, quote, urlparse
 
@@ -22,6 +23,7 @@ from ..core import auth as auth_core
 from ..core.auth import verify_api_key_flexible
 from ..core.api_key_manager import AuthContext
 from ..core.logger import debug_logger
+from ..core.route_log_sanitize import dumps_for_request_log
 from ..core.account_tiers import normalize_user_paygate_tier, supports_model_for_tier
 from ..core.model_resolver import get_base_model_aliases, resolve_model_name
 from ..core.models import (
@@ -34,7 +36,6 @@ from ..core.models import (
     GeminiContent,
     GeminiGenerateContentRequest,
     Project,
-    SuggestedEventsResponse,
     Task,
     TaskTrackerContributorFetchRequest,
     TaskTrackerKeywordSearchRequest,
@@ -125,6 +126,84 @@ def _ensure_generation_handler() -> GenerationHandler:
     if generation_handler is None:
         raise HTTPException(status_code=500, detail="Generation handler not initialized")
     return generation_handler
+
+
+LOG_OP_ADOBE_CLONING_PROMPTS = "adobe:cloning_prompts"
+LOG_OP_ADOBE_CLONING_VIDEO = "adobe:cloning_video_prompt"
+LOG_OP_ADOBE_METADATA = "adobe:metadata"
+LOG_OP_ADOBE_TRACKER_CONTRIBUTOR = "adobe:tracker_contributor"
+LOG_OP_ADOBE_TRACKER_KEYWORD = "adobe:tracker_keyword"
+
+
+def _require_managed_adobe_cloning(auth_ctx: AuthContext) -> None:
+    if auth_ctx.is_legacy:
+        return
+    if not auth_ctx.adobe_cloning_enabled:
+        raise HTTPException(
+            status_code=403,
+            detail="Adobe cloning endpoints are disabled for this API key",
+        )
+
+
+def _require_managed_adobe_metadata(auth_ctx: AuthContext) -> None:
+    if auth_ctx.is_legacy:
+        return
+    if not auth_ctx.adobe_metadata_enabled:
+        raise HTTPException(
+            status_code=403,
+            detail="Adobe metadata endpoint is disabled for this API key",
+        )
+
+
+def _require_managed_adobe_tracker(auth_ctx: AuthContext) -> None:
+    if auth_ctx.is_legacy:
+        return
+    if not auth_ctx.adobe_tracker_enabled:
+        raise HTTPException(
+            status_code=403,
+            detail="Adobe task tracker endpoints are disabled for this API key",
+        )
+
+
+async def _logged_managed_adobe_call(
+    auth_ctx: AuthContext,
+    operation: str,
+    request_payload: Any,
+    coro_factory,
+):
+    """Run async callable and persist one request_logs row (managed keys only)."""
+    handler = _ensure_generation_handler()
+    ldb = handler.db
+    started = time.perf_counter()
+    status_code = 200
+    response_payload: Any = None
+    try:
+        response_payload = await coro_factory()
+        return response_payload
+    except HTTPException as he:
+        status_code = he.status_code
+        response_payload = {"detail": he.detail}
+        raise
+    except Exception as exc:
+        status_code = 500
+        response_payload = {"error": str(exc)}
+        raise
+    finally:
+        duration = max(0.0, time.perf_counter() - started)
+        if auth_ctx.key_id is not None:
+            try:
+                status_text = "completed" if status_code == 200 else f"http_{status_code}"
+                await ldb.insert_managed_route_request_log(
+                    api_key_id=int(auth_ctx.key_id),
+                    operation=operation,
+                    request_body=dumps_for_request_log(request_payload),
+                    response_body=dumps_for_request_log(response_payload if response_payload is not None else {}),
+                    status_code=status_code,
+                    duration=duration,
+                    status_text=status_text,
+                )
+            except Exception as log_exc:
+                debug_logger.log_error(f"Managed Adobe route log insert failed: {log_exc}")
 
 
 def _build_model_description(model_config: Dict[str, Any]) -> str:
@@ -1727,24 +1806,31 @@ async def generate_cloning_prompts(
     """Generate cloning image prompts for one or more images."""
     if auth_ctx.key_id is None:
         raise HTTPException(status_code=403, detail="Managed API key required")
+    _require_managed_adobe_cloning(auth_ctx)
 
-    image_items = []
-    for item in request.images:
-        image_items.append(
-            {
-                "id": item.id,
-                "title": item.title,
-                "image_url": item.image_url,
-                "image_base64": item.image_base64,
-                "mimeType": item.mimeType,
-            }
+    request_payload = request.model_dump()
+
+    async def _run():
+        image_items = []
+        for item in request.images:
+            image_items.append(
+                {
+                    "id": item.id,
+                    "title": item.title,
+                    "image_url": item.image_url,
+                    "image_base64": item.image_base64,
+                    "mimeType": item.mimeType,
+                }
+            )
+        return await cloning_metadata_service.generate_cloning_prompts(
+            images=image_items,
+            provider=request.provider,
+            model=request.model,
+            fallback_models=request.fallbackModels,
         )
 
-    return await cloning_metadata_service.generate_cloning_prompts(
-        images=image_items,
-        provider=request.provider,
-        model=request.model,
-        fallback_models=request.fallbackModels,
+    return await _logged_managed_adobe_call(
+        auth_ctx, LOG_OP_ADOBE_CLONING_PROMPTS, request_payload, _run
     )
 
 
@@ -1756,21 +1842,29 @@ async def generate_cloning_video_prompt(
     """Generate a video cloning prompt JSON string from image clone JSON."""
     if auth_ctx.key_id is None:
         raise HTTPException(status_code=403, detail="Managed API key required")
+    _require_managed_adobe_cloning(auth_ctx)
 
     extras = request.model_extra or {}
-    return await cloning_metadata_service.generate_cloning_video_prompt(
-        payload={
-            "imageClonePrompt": request.imageClonePrompt,
-            "cameraMotion": request.cameraMotion,
-            "duration": request.duration,
-            "negativePrompt": request.negativePrompt or "",
-            "title": request.title or "",
-            "image_base64": request.image_base64,
-            "mimeType": request.mimeType,
-        },
-        provider=extras.get("provider"),
-        model=extras.get("model"),
-        fallback_models=extras.get("fallbackModels"),
+    request_payload = {**request.model_dump(), **(extras or {})}
+
+    async def _run():
+        return await cloning_metadata_service.generate_cloning_video_prompt(
+            payload={
+                "imageClonePrompt": request.imageClonePrompt,
+                "cameraMotion": request.cameraMotion,
+                "duration": request.duration,
+                "negativePrompt": request.negativePrompt or "",
+                "title": request.title or "",
+                "image_base64": request.image_base64,
+                "mimeType": request.mimeType,
+            },
+            provider=extras.get("provider"),
+            model=extras.get("model"),
+            fallback_models=extras.get("fallbackModels"),
+        )
+
+    return await _logged_managed_adobe_call(
+        auth_ctx, LOG_OP_ADOBE_CLONING_VIDEO, request_payload, _run
     )
 
 
@@ -1782,17 +1876,24 @@ async def generate_metadata(
     """Generate stock metadata using request-provided metadata settings."""
     if auth_ctx.key_id is None:
         raise HTTPException(status_code=403, detail="Managed API key required")
+    _require_managed_adobe_metadata(auth_ctx)
 
-    return await cloning_metadata_service.generate_metadata(
-        {
-            "image_url": request.image_url,
-            "image_base64": request.image_base64,
-            "metadataSettings": request.metadataSettings.model_dump(),
-            "dnaNoBgWorkflowActive": request.dnaNoBgWorkflowActive,
-            "backend": request.backend,
-            "model": request.model,
-            "fallbackModels": request.fallbackModels or [],
-        }
+    inner = {
+        "image_url": request.image_url,
+        "image_base64": request.image_base64,
+        "metadataSettings": request.metadataSettings.model_dump(),
+        "dnaNoBgWorkflowActive": request.dnaNoBgWorkflowActive,
+        "backend": request.backend,
+        "model": request.model,
+        "fallbackModels": request.fallbackModels or [],
+    }
+    request_payload = request.model_dump()
+
+    async def _run():
+        return await cloning_metadata_service.generate_metadata(inner)
+
+    return await _logged_managed_adobe_call(
+        auth_ctx, LOG_OP_ADOBE_METADATA, request_payload, _run
     )
 
 
@@ -2282,33 +2383,29 @@ async def fetch_task_tracker_contributor_assets(
     """Fetch TAS contributor-search results via direct HTTPS to tastracker.com (curl-cffi)."""
     if auth_ctx.key_id is None:
         raise HTTPException(status_code=403, detail="Managed API key required")
+    _require_managed_adobe_tracker(auth_ctx)
 
-    try:
-        results = await task_tracker_service.fetch_contributor_assets(
-            search_id=request.search_id,
-            order=request.order or "creation",
-            content_type=request.content_type or "all",
-            pages=request.pages,
-            title_filter=request.title_filter or "",
-            generative_ai=request.generative_ai or "all",
-        )
-        return results
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    except Exception as exc:
-        debug_logger.log_error(f"Tracker contributor fetch failed: {exc}")
-        raise HTTPException(status_code=500, detail=f"Internal Error: {str(exc)}")
+    request_payload = request.model_dump()
 
+    async def _run():
+        try:
+            return await task_tracker_service.fetch_contributor_assets(
+                search_id=request.search_id,
+                order=request.order or "creation",
+                content_type=request.content_type or "all",
+                pages=request.pages,
+                title_filter=request.title_filter or "",
+                generative_ai=request.generative_ai or "all",
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        except Exception as exc:
+            debug_logger.log_error(f"Tracker contributor fetch failed: {exc}")
+            raise HTTPException(status_code=500, detail=f"Internal Error: {str(exc)}")
 
-@router.get("/api/suggested-events", response_model=SuggestedEventsResponse)
-async def get_suggested_events(
-    today: Optional[str] = Query(None, description="ISO date in YYYY-MM-DD format"),
-    auth_ctx: AuthContext = Depends(verify_api_key_flexible),
-):
-    """Suggest commercially relevant events for the next 90 days."""
-    if auth_ctx.key_id is None:
-        raise HTTPException(status_code=403, detail="Managed API key required")
-    return await cloning_metadata_service.generate_suggested_events(today_iso=today)
+    return await _logged_managed_adobe_call(
+        auth_ctx, LOG_OP_ADOBE_TRACKER_CONTRIBUTOR, request_payload, _run
+    )
 
 
 @router.post("/api/tracker/keyword")
@@ -2319,17 +2416,25 @@ async def fetch_task_tracker_keyword_search(
     """Proxy TAS keyword search (GET /api/search); returns upstream JSON (e.g. images array)."""
     if auth_ctx.key_id is None:
         raise HTTPException(status_code=403, detail="Managed API key required")
+    _require_managed_adobe_tracker(auth_ctx)
 
-    try:
-        return await task_tracker_service.fetch_keyword_search(
-            q=request.q,
-            order=request.order or "relevance",
-            content_type=request.content_type or "all",
-            pages=request.pages,
-            generative_ai=request.generative_ai or "all",
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    except Exception as exc:
-        debug_logger.log_error(f"Tracker keyword search failed: {exc}")
-        raise HTTPException(status_code=500, detail=f"Internal Error: {str(exc)}")
+    request_payload = request.model_dump()
+
+    async def _run():
+        try:
+            return await task_tracker_service.fetch_keyword_search(
+                q=request.q,
+                order=request.order or "relevance",
+                content_type=request.content_type or "all",
+                pages=request.pages,
+                generative_ai=request.generative_ai or "all",
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        except Exception as exc:
+            debug_logger.log_error(f"Tracker keyword search failed: {exc}")
+            raise HTTPException(status_code=500, detail=f"Internal Error: {str(exc)}")
+
+    return await _logged_managed_adobe_call(
+        auth_ctx, LOG_OP_ADOBE_TRACKER_KEYWORD, request_payload, _run
+    )

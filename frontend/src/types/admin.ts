@@ -81,6 +81,9 @@ export interface LogListItem {
   token_id?: number | null
   token_email?: string | null
   token_username?: string | null
+  api_key_id?: number | null
+  api_key_label?: string | null
+  api_key_prefix?: string | null
   operation?: string | null
   status_code?: number | null
   duration?: number | null

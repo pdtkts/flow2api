@@ -87,7 +87,6 @@ def _path_allowed_on_api_only_host(path: str) -> bool:
         "/api/generate-cloning-prompts",
         "/api/generate-cloning-video-prompt",
         "/api/generate-metadata",
-        "/api/suggested-events",
     ):
         return True
     return False

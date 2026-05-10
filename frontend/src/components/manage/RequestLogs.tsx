@@ -6,6 +6,8 @@ import { formatLogOutcomeRowClass, formatLogProgressField, logStatusPillClass, s
 import { formatLogStatus, formatOutcome } from "./requestLogUi"
 import { LogDetailStatic } from "./LogDetailStatic"
 import { Card, CardContent, CardHeader, CardTitle } from "../ui/card"
+import { Switch } from "../ui/switch"
+import { Label } from "../ui/label"
 import { Button } from "../ui/button"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../ui/table"
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "../ui/dialog"
@@ -24,13 +26,15 @@ export function RequestLogs() {
   const [detailOpen, setDetailOpen] = useState(false)
   const [detailLoading, setDetailLoading] = useState(false)
   const [detail, setDetail] = useState<LogDetail | null>(null)
+  const [hideGeneration, setHideGeneration] = useState(false)
 
   const fetchLogs = useCallback(async () => {
     if (!token) return
     setLoading(true)
     try {
       const offset = page * LOG_PAGE_SIZE
-      const r = await adminFetch(`/api/logs?limit=${LOG_PAGE_SIZE}&offset=${offset}`, token)
+      const exclude = hideGeneration ? "&exclude_operations=generate_image%2Cgenerate_video" : ""
+      const r = await adminFetch(`/api/logs?limit=${LOG_PAGE_SIZE}&offset=${offset}${exclude}`, token)
       if (!r?.ok) throw new Error("fetch failed")
       const data = (await r.json()) as LogsListResponse | LogListItem[]
       if (Array.isArray(data)) {
@@ -48,7 +52,7 @@ export function RequestLogs() {
     } finally {
       setLoading(false)
     }
-  }, [token, page])
+  }, [token, page, hideGeneration])
 
   useEffect(() => {
     queueMicrotask(() => {
@@ -95,12 +99,27 @@ export function RequestLogs() {
     }
   }
 
-  const colCount = 9
+  const colCount = 10
 
   return (
     <Card>
       <CardHeader className="flex flex-row items-center justify-between gap-4 pb-4 border-b">
-        <CardTitle className="text-lg font-semibold">Request logs</CardTitle>
+        <div className="space-y-1">
+          <CardTitle className="text-lg font-semibold">Request logs</CardTitle>
+          <div className="flex items-center gap-2">
+            <Switch
+              id="hide-gen-logs"
+              checked={hideGeneration}
+              onCheckedChange={(v) => {
+                setHideGeneration(Boolean(v))
+                setPage(0)
+              }}
+            />
+            <Label htmlFor="hide-gen-logs" className="text-xs font-normal text-muted-foreground cursor-pointer">
+              Hide image/video generation rows
+            </Label>
+          </div>
+        </div>
         <div className="flex gap-2">
           <Button
             variant="ghost"
@@ -122,6 +141,7 @@ export function RequestLogs() {
             <TableHeader className="sticky top-0 z-20 bg-background">
               <TableRow className="hover:bg-transparent border-b">
                 <TableHead className="h-10 px-3 text-left font-medium text-muted-foreground">Operation</TableHead>
+                <TableHead className="h-10 px-3 text-left font-medium text-muted-foreground">API key</TableHead>
                 <TableHead className="h-10 px-3 text-left font-medium text-muted-foreground">Token email</TableHead>
                 <TableHead className="h-10 px-3 text-left font-medium text-muted-foreground">Status</TableHead>
                 <TableHead className="h-10 px-3 text-left font-medium text-muted-foreground">Progress</TableHead>
@@ -151,9 +171,18 @@ export function RequestLogs() {
                   const outcome = formatOutcome(log)
                   const outcomePreview = outcome.length > 96 ? `${outcome.slice(0, 93)}…` : outcome
                   const email = log.token_email || "Unknown"
+                  const keyLabel = log.api_key_label || log.api_key_prefix || ""
                   return (
                     <TableRow key={log.id} className="border-border/60">
                       <TableCell className="py-2.5 px-3 text-sm align-top">{log.operation || "-"}</TableCell>
+                      <TableCell className="py-2.5 px-3 text-xs align-top">
+                        <span
+                          className={cn(keyLabel ? "text-foreground" : "text-muted-foreground")}
+                          title={keyLabel || undefined}
+                        >
+                          {keyLabel || "—"}
+                        </span>
+                      </TableCell>
                       <TableCell className="py-2.5 px-3 text-xs align-top">
                         <span className={cn(log.token_email ? "text-primary" : "text-muted-foreground")} title={email}>
                           {email}
