@@ -2097,8 +2097,14 @@ async def get_managed_api_key_adobe_usage(
     if not detail:
         raise HTTPException(status_code=404, detail="Managed API key not found")
     months = int(months)
-    rows = await db.count_adobe_success_by_month(key_id, months_back=months)
-    return {"success": True, "key_id": key_id, "months": months, "by_month": rows}
+    stats = await db.get_adobe_usage_stats(key_id, months_back=months)
+    return {
+        "success": True,
+        "key_id": key_id,
+        "months": months,
+        "by_month": stats.get("by_month") or [],
+        "by_month_by_operation": stats.get("by_month_by_operation") or [],
+    }
 
 
 @router.get("/api/admin/managed-apikeys/audit")

@@ -53,6 +53,7 @@ type LimitRow = { endpoint: string; rpm: string; rph: string; burst: string }
 type ScopeOption = { id: string; label: string; description: string }
 
 type AdobeUsageMonthRow = { year_month: string; success_count: number }
+type AdobeUsageOpRow = { year_month: string; operation: string; success_count: number }
 
 function coerceAdobeFlag(v: unknown): boolean {
   if (v === undefined || v === null) return true
@@ -102,6 +103,7 @@ export function ApiKeyManagement() {
   const [adobeMetadataEnabled, setAdobeMetadataEnabled] = useState(true)
   const [adobeTrackerEnabled, setAdobeTrackerEnabled] = useState(true)
   const [adobeUsageRows, setAdobeUsageRows] = useState<AdobeUsageMonthRow[]>([])
+  const [adobeUsageOpRows, setAdobeUsageOpRows] = useState<AdobeUsageOpRow[]>([])
   const [adobeUsageLoading, setAdobeUsageLoading] = useState(false)
   const [createdKey, setCreatedKey] = useState("")
 
@@ -181,17 +183,23 @@ export function ApiKeyManagement() {
     if (!token) return
     setAdobeUsageLoading(true)
     try {
-      const r = await adminJson<{ success?: boolean; by_month?: AdobeUsageMonthRow[] }>(
-        `/api/admin/managed-apikeys/${keyId}/adobe-usage?months=12`,
-        token
-      )
-      if (r.ok && Array.isArray(r.data?.by_month)) {
-        setAdobeUsageRows(r.data.by_month as AdobeUsageMonthRow[])
+      const r = await adminJson<{
+        success?: boolean
+        by_month?: AdobeUsageMonthRow[]
+        by_month_by_operation?: AdobeUsageOpRow[]
+      }>(`/api/admin/managed-apikeys/${keyId}/adobe-usage?months=12`, token)
+      if (r.ok) {
+        setAdobeUsageRows(Array.isArray(r.data?.by_month) ? (r.data.by_month as AdobeUsageMonthRow[]) : [])
+        setAdobeUsageOpRows(
+          Array.isArray(r.data?.by_month_by_operation) ? (r.data.by_month_by_operation as AdobeUsageOpRow[]) : []
+        )
       } else {
         setAdobeUsageRows([])
+        setAdobeUsageOpRows([])
       }
     } catch {
       setAdobeUsageRows([])
+      setAdobeUsageOpRows([])
     } finally {
       setAdobeUsageLoading(false)
     }
@@ -316,6 +324,7 @@ export function ApiKeyManagement() {
       setKeyProjectAccounts([])
       setKeyProjectsTotal(0)
       setAdobeUsageRows([])
+      setAdobeUsageOpRows([])
       setNewProjTokenId("")
       setNewProjTitle("")
       setNewProjSetCurrent(true)
@@ -788,9 +797,14 @@ export function ApiKeyManagement() {
               </div>
             </div>
 
-            <div className="space-y-2 rounded-md border p-3">
+            <div className="space-y-3 rounded-md border p-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <Label>Adobe success (HTTP 200) by month</Label>
+                <div>
+                  <Label>Adobe success (HTTP 200)</Label>
+                  <p className="mt-0.5 text-xs text-muted-foreground">
+                    Every logged Adobe endpoint (<code className="rounded bg-muted px-1">adobe:*</code> in request logs) in the last 12 months.
+                  </p>
+                </div>
                 <Button
                   type="button"
                   variant="outline"
@@ -803,28 +817,60 @@ export function ApiKeyManagement() {
                   Refresh
                 </Button>
               </div>
-              {adobeUsageLoading && !adobeUsageRows.length ? (
+              {adobeUsageLoading && !adobeUsageRows.length && !adobeUsageOpRows.length ? (
                 <div className="flex justify-center py-6 text-muted-foreground">
                   <Loader2 className="h-6 w-6 animate-spin" />
                 </div>
-              ) : adobeUsageRows.length ? (
-                <div className="rounded-md border bg-background">
-                  <Table>
-                    <TableHeader>
-                      <TableRow>
-                        <TableHead className="text-xs">Month</TableHead>
-                        <TableHead className="text-xs">Successful requests</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {adobeUsageRows.map((row) => (
-                        <TableRow key={row.year_month}>
-                          <TableCell className="font-mono text-xs">{row.year_month}</TableCell>
-                          <TableCell className="text-xs tabular-nums">{row.success_count}</TableCell>
-                        </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
+              ) : adobeUsageRows.length || adobeUsageOpRows.length ? (
+                <div className="space-y-4">
+                  {adobeUsageRows.length ? (
+                    <div>
+                      <p className="mb-1.5 text-xs font-medium text-muted-foreground">Total by month</p>
+                      <div className="rounded-md border bg-background">
+                        <Table>
+                          <TableHeader>
+                            <TableRow>
+                              <TableHead className="text-xs">Month</TableHead>
+                              <TableHead className="text-xs">Successful requests</TableHead>
+                            </TableRow>
+                          </TableHeader>
+                          <TableBody>
+                            {adobeUsageRows.map((row) => (
+                              <TableRow key={row.year_month}>
+                                <TableCell className="font-mono text-xs">{row.year_month}</TableCell>
+                                <TableCell className="text-xs tabular-nums">{row.success_count}</TableCell>
+                              </TableRow>
+                            ))}
+                          </TableBody>
+                        </Table>
+                      </div>
+                    </div>
+                  ) : null}
+                  {adobeUsageOpRows.length ? (
+                    <div>
+                      <p className="mb-1.5 text-xs font-medium text-muted-foreground">By endpoint</p>
+                      <div className="rounded-md border bg-background">
+                        <Table>
+                          <TableHeader>
+                            <TableRow>
+                              <TableHead className="text-xs">Month</TableHead>
+                              <TableHead className="text-xs">Endpoint</TableHead>
+                              <TableHead className="text-xs">Successful requests</TableHead>
+                            </TableRow>
+                          </TableHeader>
+                          <TableBody>
+                            {adobeUsageOpRows.map((row) => (
+                              <TableRow key={`${row.year_month}-${row.operation}`}>
+                                <TableCell className="font-mono text-xs">{row.year_month}</TableCell>
+                                <TableCell className="font-mono text-[11px]">{row.operation}</TableCell>
+                                <TableCell className="text-xs tabular-nums">{row.success_count}</TableCell>
+                              </TableRow>
+                            ))}
+                          </TableBody>
+                        </Table>
+                      </div>
+                    </div>
+                  ) : null}
                 </div>
               ) : (
                 <p className="text-xs text-muted-foreground py-2">No successful Adobe requests in the selected window yet.</p>

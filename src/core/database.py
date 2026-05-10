@@ -2741,40 +2741,43 @@ class Database:
         )
         return await self.add_request_log(log)
 
-    async def count_adobe_success_by_month(
+    async def get_adobe_usage_stats(
         self,
         api_key_id: int,
         months_back: int = 12,
-    ) -> List[Dict[str, Any]]:
-        """Successful Adobe-suite operations per calendar month (from request_logs)."""
+    ) -> Dict[str, Any]:
+        """Successful Adobe requests: all `adobe:%` operations from request_logs, by month and by endpoint."""
         safe_months = max(1, min(int(months_back or 12), 60))
         window = f"-{safe_months} months"
-        ops = (
-            "adobe:cloning_prompts",
-            "adobe:cloning_video_prompt",
-            "adobe:metadata",
-            "adobe:tracker_contributor",
-            "adobe:tracker_keyword",
-        )
-        placeholders = ",".join("?" * len(ops))
-        params: List[Any] = [api_key_id, *ops, window]
+        params: List[Any] = [api_key_id, window]
         async with self._connect() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
-                f"""
-                SELECT strftime('%Y-%m', created_at) AS year_month, COUNT(*) AS success_count
+                """
+                SELECT strftime('%Y-%m', created_at) AS year_month, operation, COUNT(*) AS success_count
                 FROM request_logs
                 WHERE api_key_id = ?
                   AND status_code = 200
-                  AND operation IN ({placeholders})
+                  AND operation LIKE 'adobe:%'
                   AND datetime(created_at) >= datetime('now', ?)
-                GROUP BY 1
-                ORDER BY 1 ASC
+                GROUP BY 1, 2
+                ORDER BY 1 ASC, 2 ASC
                 """,
                 params,
             )
-            rows = await cursor.fetchall()
-            return [{"year_month": str(r["year_month"]), "success_count": int(r["success_count"])} for r in rows]
+            detail_rows = await cursor.fetchall()
+
+        by_op: List[Dict[str, Any]] = []
+        totals_map: Dict[str, int] = {}
+        for r in detail_rows:
+            ym = str(r["year_month"])
+            op = str(r["operation"])
+            cnt = int(r["success_count"])
+            by_op.append({"year_month": ym, "operation": op, "success_count": cnt})
+            totals_map[ym] = totals_map.get(ym, 0) + cnt
+
+        by_month = [{"year_month": ym, "success_count": totals_map[ym]} for ym in sorted(totals_map.keys())]
+        return {"by_month": by_month, "by_month_by_operation": by_op}
 
     async def update_request_log(self, log_id: int, **kwargs):
         """Update an existing request log row."""
