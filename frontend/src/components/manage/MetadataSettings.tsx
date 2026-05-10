@@ -35,19 +35,18 @@ const PRESET_MODELS: Record<string, string[]> = {
   csvgen: [...CSVGEN_METADATA_MODELS],
 }
 
-const METADATA_BACKENDS = [
+const GLOBAL_BACKENDS = [
   "gemini_native",
   "openai",
   "openrouter",
   "third_party_gemini",
   "cloudflare",
-  "csvgen",
 ]
 
 export function MetadataSettings({ active }: { active: boolean }) {
   const { token } = useAuth()
   const [busy, setBusy] = useState(false)
-  const [providerOrder, setProviderOrder] = useState<string[]>(METADATA_BACKENDS)
+  const [providerOrder, setProviderOrder] = useState<string[]>(GLOBAL_BACKENDS)
   const [enabledProviders, setEnabledProviders] = useState<string[]>(["gemini_native"])
   const [useCsvgenOnly, setUseCsvgenOnly] = useState(false)
   const [providerRetryCount, setProviderRetryCount] = useState(1)
@@ -71,35 +70,43 @@ export function MetadataSettings({ active }: { active: boolean }) {
     const resp = await adminJson<{ success?: boolean; config?: Record<string, unknown> }>("/api/config/generation", token)
     if (!resp.ok || !resp.data?.success || !resp.data.config) return
     const c = resp.data.config
-    const legacyBackend = String(c.flow2api_metadata_backend || "gemini_native").trim() || "gemini_native"
-    const orderFromConfig = String(c.flow2api_metadata_provider_order || "")
+    
+    // Check if csvgen is currently active for metadata
+    const legacyBackend = String(c.flow2api_metadata_backend || "gemini_native").trim()
+    const isCsvgenOnly = legacyBackend === "csvgen"
+    setUseCsvgenOnly(isCsvgenOnly)
+
+    // Load global provider order from market (as the unified state) or fallback to metadata
+    const orderFromConfig = String(c.flow2api_market_provider_order || c.flow2api_metadata_provider_order || "")
       .split(",")
       .map((x) => x.trim())
       .filter(Boolean)
-      .filter((x) => METADATA_BACKENDS.includes(x))
+      .filter((x) => GLOBAL_BACKENDS.includes(x))
+    
     const normalizedOrder = [
-      ...(orderFromConfig.length ? orderFromConfig : [legacyBackend]),
-      ...METADATA_BACKENDS.filter((x) => !(orderFromConfig.length ? orderFromConfig : [legacyBackend]).includes(x)),
+      ...(orderFromConfig.length ? orderFromConfig : ["gemini_native"]),
+      ...GLOBAL_BACKENDS.filter((x) => !(orderFromConfig.length ? orderFromConfig : ["gemini_native"]).includes(x)),
     ]
-    const enabledFromConfig = String(c.flow2api_metadata_enabled_providers || "")
+    
+    const enabledFromConfig = String(c.flow2api_market_enabled_providers || "")
       .split(",")
       .map((x) => x.trim())
       .filter(Boolean)
       .filter((x) => normalizedOrder.includes(x))
-    const normalizedEnabledProviders = enabledFromConfig.length ? enabledFromConfig : [legacyBackend]
-    const selectedProvider = normalizedOrder.find((p) => normalizedEnabledProviders.includes(p)) || normalizedOrder[0] || "gemini_native"
-    const isCsvgenOnly = normalizedEnabledProviders.length === 1 && normalizedEnabledProviders[0] === "csvgen"
-    setUseCsvgenOnly(isCsvgenOnly)
+      
+    const normalizedEnabledProviders = enabledFromConfig.length ? enabledFromConfig : ["gemini_native"]
+    
     setProviderOrder(normalizedOrder)
     setEnabledProviders(normalizedEnabledProviders)
     setProviderRetryCount(
-      Math.max(0, Math.min(5, Number(c.flow2api_metadata_provider_retry_count ?? 1) || 1))
+      Math.max(0, Math.min(5, Number(c.flow2api_market_provider_retry_count ?? 1) || 1))
     )
-    setModel(String(c.flow2api_metadata_model || PRESET_MODELS[selectedProvider]?.[0] || "gemini-2.5-flash"))
-    const configuredEnabledRaw = String(c.flow2api_metadata_enabled_models || "").trim()
-    const configuredPrimary = String(c.flow2api_metadata_primary_model || "").trim()
-    const configuredFallbackRaw = String(c.flow2api_metadata_fallback_models || "").trim()
-    const legacyModel = String(c.flow2api_metadata_model || "gemini-2.5-flash").trim() || "gemini-2.5-flash"
+    
+    // Model configuration
+    const configuredEnabledRaw = String(c.flow2api_market_enabled_models || c.flow2api_metadata_enabled_models || "").trim()
+    const configuredPrimary = String(c.flow2api_market_primary_model || c.flow2api_metadata_primary_model || "").trim()
+    const configuredFallbackRaw = String(c.flow2api_market_fallback_models || c.flow2api_metadata_fallback_models || "").trim()
+    const legacyModel = String(c.flow2api_market_model || c.flow2api_metadata_model || "gemini-2.5-flash").trim() || "gemini-2.5-flash"
     const enabled = (configuredEnabledRaw ? configuredEnabledRaw.split(",") : [])
       .map((m) => m.trim())
       .filter(Boolean)
@@ -111,6 +118,7 @@ export function MetadataSettings({ active }: { active: boolean }) {
     setEnabledModels(normalizedEnabled)
     setPrimaryModel(primary)
     setModel(primary)
+    
     setCsvgenCookie(String(c.flow2api_csvgen_cookie || ""))
     setCsvgenApiKeys(String(c.flow2api_csvgen_api_keys || ""))
 
@@ -156,8 +164,6 @@ export function MetadataSettings({ active }: { active: boolean }) {
     })
   }
 
-
-
   const moveModel = (modelName: string, direction: -1 | 1) => {
     setEnabledModels((prev) => {
       const idx = prev.indexOf(modelName)
@@ -184,12 +190,6 @@ export function MetadataSettings({ active }: { active: boolean }) {
 
   const toggleCsvgenOnly = (checked: boolean) => {
     setUseCsvgenOnly(checked)
-    if (checked) {
-      setEnabledProviders(["csvgen"])
-      if (!providerOrder.includes("csvgen")) {
-        setProviderOrder(["csvgen", ...providerOrder.filter(p => p !== "csvgen")])
-      }
-    }
   }
 
   const moveProvider = (providerName: string, direction: -1 | 1) => {
@@ -213,35 +213,48 @@ export function MetadataSettings({ active }: { active: boolean }) {
     return () => window.clearTimeout(timer)
   }, [load])
 
-  useEffect(() => {
-    if (selectedProvider !== "csvgen") return
-    const allowed = new Set(CSVGEN_METADATA_MODELS)
-    setEnabledModels((prev) => {
-      const filtered = prev.filter((m) => allowed.has(m))
-      return filtered.length ? filtered : [...CSVGEN_METADATA_MODELS]
-    })
-    setPrimaryModel((p) => (allowed.has(p) ? p : CSVGEN_METADATA_MODELS[2]))
-    setModel((m) => (allowed.has(m) ? m : CSVGEN_METADATA_MODELS[2]))
-  }, [selectedProvider])
-
   const save = async () => {
     if (!token) return
     setBusy(true)
     try {
+      const metadataProvider = useCsvgenOnly ? "csvgen" : selectedProvider
+      const metadataModel = useCsvgenOnly ? CSVGEN_METADATA_MODELS[2] : model
+      
       const r = await adminFetch("/api/config/generation", token, {
         method: "POST",
         body: JSON.stringify({
-          flow2api_metadata_backend: selectedProvider,
+          // Metadata overrides if any
+          flow2api_metadata_backend: metadataProvider,
           flow2api_metadata_provider_order: providerOrder.join(","),
           flow2api_metadata_enabled_providers: enabledProviders.join(","),
           flow2api_metadata_provider_retry_count: providerRetryCount,
-          flow2api_metadata_model: model,
+          flow2api_metadata_model: metadataModel,
           flow2api_metadata_enabled_models: enabledModels.join(","),
           flow2api_metadata_primary_model: primaryModel,
           flow2api_metadata_fallback_models: fallbackModels.join(","),
+          
+          // Apply as global settings to Market
+          flow2api_market_backend: selectedProvider,
+          flow2api_market_provider_order: providerOrder.join(","),
+          flow2api_market_enabled_providers: enabledProviders.join(","),
+          flow2api_market_provider_retry_count: providerRetryCount,
+          flow2api_market_model: model,
+          flow2api_market_enabled_models: enabledModels.join(","),
+          flow2api_market_primary_model: primaryModel,
+          flow2api_market_fallback_models: fallbackModels.join(","),
+
+          // Apply as global settings to Cloning
+          flow2api_cloning_backend: selectedProvider,
+          flow2api_cloning_provider_order: providerOrder.join(","),
+          flow2api_cloning_enabled_providers: enabledProviders.join(","),
+          flow2api_cloning_provider_retry_count: providerRetryCount,
+          flow2api_cloning_model: model,
+
+          // CSVGen specific keys
           flow2api_csvgen_cookie: csvgenCookie,
           flow2api_csvgen_api_keys: csvgenApiKeys,
 
+          // Global API Keys
           flow2api_gemini_api_keys: geminiKeys,
           flow2api_openai_api_keys: openaiKeys,
           flow2api_openrouter_api_keys: openrouterKeys,
@@ -249,11 +262,22 @@ export function MetadataSettings({ active }: { active: boolean }) {
           flow2api_third_party_gemini_base_url: thirdPartyBaseUrl,
           cloudflare_account_id: cloudflareAccountId,
           cloudflare_api_token: cloudflareApiToken,
+          
+          // Also set the specific keys requested by the original APIs (e.g., Cloning uses specific gemini keys)
+          // To unify them, we simply copy the global keys into the specialized ones so legacy APIs keep working.
+          flow2api_cloning_gemini_api_keys: geminiKeys,
+          flow2api_cloning_openai_api_keys: openaiKeys,
+          flow2api_cloning_third_party_gemini_api_keys: thirdPartyKeys,
+          flow2api_cloning_third_party_gemini_base_url: thirdPartyBaseUrl,
+          flow2api_cloning_openrouter_api_keys: openrouterKeys,
+          flow2api_cloning_cloudflare_account_id: cloudflareAccountId,
+          flow2api_cloning_cloudflare_api_token: cloudflareApiToken,
+          
         }),
       })
       if (!r) return
       const d = await r.json()
-      if (d.success) toast.success("Metadata settings saved")
+      if (d.success) toast.success("Adobe configurations saved")
       else toast.error(d.message || "Failed")
     } finally {
       setBusy(false)
@@ -265,22 +289,20 @@ export function MetadataSettings({ active }: { active: boolean }) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Metadata Settings</CardTitle>
-        <CardDescription>Configure metadata backend, model, and credentials.</CardDescription>
+        <CardTitle>Adobe Model Configurations</CardTitle>
+        <CardDescription>Configure the global generation backend, models, and credentials.</CardDescription>
       </CardHeader>
       <CardContent className="space-y-6">
         <div className="space-y-2">
           <div className="flex items-center justify-between">
-            <Label>Metadata Providers (ranked fallback)</Label>
+            <Label>Providers (ranked fallback)</Label>
             <div className="flex items-center gap-2">
-              <Label htmlFor="csvgen-only" className="cursor-pointer">Use CSVGEN Only</Label>
+              <Label htmlFor="csvgen-only" className="cursor-pointer">Use CSVGEN Only for Metadata</Label>
               <Switch id="csvgen-only" checked={useCsvgenOnly} onCheckedChange={toggleCsvgenOnly} />
             </div>
           </div>
-          {!useCsvgenOnly && (
-            <>
-              <div className="rounded-md border overflow-hidden">
-                <div className="grid grid-cols-[1fr_90px_110px] gap-2 border-b bg-muted/40 px-3 py-2 text-xs font-medium">
+          <div className="rounded-md border overflow-hidden">
+            <div className="grid grid-cols-[1fr_90px_110px] gap-2 border-b bg-muted/40 px-3 py-2 text-xs font-medium">
               <span>Provider</span>
               <span className="text-center">Enabled</span>
               <span className="text-center">Order</span>
@@ -311,9 +333,7 @@ export function MetadataSettings({ active }: { active: boolean }) {
           <p className="text-xs text-muted-foreground">
             Requests use the first enabled provider, then fallback in order.
           </p>
-          </>
-          )}
-          <div className="max-w-xs">
+          <div className="max-w-xs pt-2">
             <Label htmlFor="metadata-provider-retries">Retry per provider before fallback</Label>
             <Input
               id="metadata-provider-retries"
@@ -328,7 +348,7 @@ export function MetadataSettings({ active }: { active: boolean }) {
         </div>
 
         <div className="space-y-2">
-          <Label>Metadata Models (preset)</Label>
+          <Label>Models (preset)</Label>
           <div className="rounded-md border overflow-hidden">
             <div className="grid grid-cols-[1fr_90px_90px_110px] gap-2 border-b bg-muted/40 px-3 py-2 text-xs font-medium">
               <span>Model</span>
@@ -375,7 +395,6 @@ export function MetadataSettings({ active }: { active: boolean }) {
 
           <p className="text-xs text-muted-foreground mt-2">
             Fallback order follows enabled model order excluding primary.
-            {selectedProvider === "csvgen" ? " For CSVGEN, use Workers AI model ids (@cf/…)." : null}
           </p>
         </div>
 
@@ -388,7 +407,7 @@ export function MetadataSettings({ active }: { active: boolean }) {
             <h3 className="font-semibold text-lg flex items-center gap-2">
               <Key className="w-5 h-5 text-primary" /> Provider Credentials
             </h3>
-            <p className="text-xs text-muted-foreground mt-1">Configure your metadata generation provider credentials. You can specify <strong>multiple API keys</strong> separated by commas for load balancing.</p>
+            <p className="text-xs text-muted-foreground mt-1">Configure your generation provider credentials globally. You can specify <strong>multiple API keys</strong> separated by commas for load balancing.</p>
           </div>
           
           <div className="rounded-md border bg-background overflow-hidden">
@@ -450,7 +469,7 @@ export function MetadataSettings({ active }: { active: boolean }) {
                     <Input className="font-mono text-xs h-8 bg-muted/20" placeholder="API Token..." value={cloudflareApiToken} onChange={(e) => setCloudflareApiToken(e.target.value)} />
                   </TableCell>
                 </TableRow>
-                {selectedProvider === 'csvgen' && (
+                {useCsvgenOnly && (
                   <>
                     <TableRow className="bg-primary/5">
                       <TableCell className="font-medium text-primary">CSVGEN</TableCell>
@@ -479,7 +498,7 @@ export function MetadataSettings({ active }: { active: boolean }) {
           </div>
         </div>
         
-        <Button onClick={save} disabled={busy} className="w-full sm:w-auto mt-4">Save metadata settings</Button>
+        <Button onClick={save} disabled={busy} className="w-full sm:w-auto mt-4">Save configurations</Button>
       </CardContent>
     </Card>
   )
