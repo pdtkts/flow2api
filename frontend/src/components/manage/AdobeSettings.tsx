@@ -1,4 +1,4 @@
-import { MetadataSettings } from "./MetadataSettings"
+import { AdobeConfigurations } from "./AdobeConfigurations"
 import { TasTracker } from "./TasTracker"
 
 export function AdobeSettings({ active }: { active: boolean }) {
@@ -6,7 +6,7 @@ export function AdobeSettings({ active }: { active: boolean }) {
 
   return (
     <div className="space-y-6">
-      <MetadataSettings active={active} />
+      <AdobeConfigurations active={active} />
       <div className="grid gap-6 lg:grid-cols-2">
         <TasTracker active={active} />
       </div>

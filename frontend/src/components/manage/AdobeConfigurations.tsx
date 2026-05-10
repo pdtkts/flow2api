@@ -43,7 +43,7 @@ const GLOBAL_BACKENDS = [
   "cloudflare",
 ]
 
-export function MetadataSettings({ active }: { active: boolean }) {
+export function AdobeConfigurations({ active }: { active: boolean }) {
   const { token } = useAuth()
   const [busy, setBusy] = useState(false)
   const [providerOrder, setProviderOrder] = useState<string[]>(GLOBAL_BACKENDS)
@@ -289,7 +289,7 @@ export function MetadataSettings({ active }: { active: boolean }) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Adobe Model Configurations</CardTitle>
+        <CardTitle>Adobe Configurations</CardTitle>
         <CardDescription>Configure the global generation backend, models, and credentials.</CardDescription>
       </CardHeader>
       <CardContent className="space-y-6">
