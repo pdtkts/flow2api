@@ -620,6 +620,12 @@ class CloningMetadataService:
 
         a = coerce(data.get("optionA") if isinstance(data, dict) else None)
         b = coerce(data.get("optionB") if isinstance(data, dict) else None)
+        # csvgen may return a single flat object (title/keywords/description) instead of optionA/optionB.
+        if not any(a.values()) and not any(b.values()) and isinstance(data, dict):
+            flat = coerce(data)
+            if any(flat.values()):
+                a = flat
+                b = deepcopy(flat)
         if not any(a.values()) and any(b.values()):
             a = deepcopy(b)
         if not any(b.values()) and any(a.values()):
