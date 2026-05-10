@@ -446,13 +446,27 @@ class CloningMetadataService:
         payload: Dict[str, Any],
     ) -> Dict[str, Any]:
         explicit_provider = str(payload.get("backend") or "").strip().lower() or None
-        provider_chain = self._llm.resolve_provider_chain(
-            explicit_provider,
-            provider_order_csv=app_config.flow2api_metadata_provider_order,
-            enabled_providers_csv=app_config.flow2api_metadata_enabled_providers,
-            legacy_backend=app_config.flow2api_metadata_backend or "gemini_native",
-            allowed_providers=METADATA_PROVIDERS,
-        )
+        saved_metadata_backend = str(app_config.flow2api_metadata_backend or "").strip().lower()
+        # UI "Use CSVGEN Only for Metadata" sets flow2api_metadata_backend to csvgen but still
+        # persists a ranked provider_order; resolve_provider_chain would otherwise try OpenRouter first.
+        if explicit_provider:
+            provider_chain = self._llm.resolve_provider_chain(
+                explicit_provider,
+                provider_order_csv=app_config.flow2api_metadata_provider_order,
+                enabled_providers_csv=app_config.flow2api_metadata_enabled_providers,
+                legacy_backend=saved_metadata_backend or "gemini_native",
+                allowed_providers=METADATA_PROVIDERS,
+            )
+        elif saved_metadata_backend == "csvgen":
+            provider_chain = ["csvgen"]
+        else:
+            provider_chain = self._llm.resolve_provider_chain(
+                None,
+                provider_order_csv=app_config.flow2api_metadata_provider_order,
+                enabled_providers_csv=app_config.flow2api_metadata_enabled_providers,
+                legacy_backend=saved_metadata_backend or "gemini_native",
+                allowed_providers=METADATA_PROVIDERS,
+            )
         retry_count = normalized_retry_count(app_config.flow2api_metadata_provider_retry_count)
         backend = provider_chain[0] if provider_chain else "gemini_native"
         configured_primary = str(
