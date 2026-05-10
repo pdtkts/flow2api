@@ -176,6 +176,7 @@ class GenerationConfig(BaseModel):
     cloudflare_account_id: str = ""
     cloudflare_api_token: str = ""
     flow2api_csvgen_cookie: str = ""
+    flow2api_csvgen_api_keys: str = ""
     flow2api_cloning_model: str = "gemini-2.5-flash"
     flow2api_metadata_backend: str = "gemini_native"
     flow2api_metadata_provider_order: str = ""

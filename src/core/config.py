@@ -457,6 +457,15 @@ class Config:
         self._config["generation_routing"]["flow2api_csvgen_cookie"] = str(value or "")
 
     @property
+    def flow2api_csvgen_api_keys(self) -> str:
+        return str(self._config.get("generation_routing", {}).get("flow2api_csvgen_api_keys", "") or "")
+
+    def set_flow2api_csvgen_api_keys(self, value: str):
+        if "generation_routing" not in self._config:
+            self._config["generation_routing"] = {}
+        self._config["generation_routing"]["flow2api_csvgen_api_keys"] = str(value or "")
+
+    @property
     def flow2api_cloning_model(self) -> str:
         return str(self._config.get("generation_routing", {}).get("flow2api_cloning_model", "gemini-2.5-flash") or "gemini-2.5-flash")
 

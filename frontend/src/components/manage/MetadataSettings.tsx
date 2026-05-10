@@ -18,13 +18,20 @@ const CLOUDFLARE_MODELS = [
   "@cf/google/gemma-4-26b-a4b-it",
 ]
 
+/** Models sent to csvgen.com /api/generate-metadata (Workers AI ids). */
+const CSVGEN_METADATA_MODELS = [
+  "@cf/meta/llama-4-scout-17b-16e-instruct",
+  "@cf/mistralai/mistral-small-3.1-24b-instruct",
+  "@cf/moonshotai/kimi-k2.5",
+]
+
 const PRESET_MODELS: Record<string, string[]> = {
   gemini_native: ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro", "gemini-1.5-flash", "gemini-1.5-pro"],
   openai: ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "gpt-4.1-mini", "gpt-4.1"],
   openrouter: ["google/gemma-4-26b-a4b-it"],
   third_party_gemini: ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro", "gemini-1.5-flash", "gemini-1.5-pro"],
   cloudflare: CLOUDFLARE_MODELS,
-  csvgen: []
+  csvgen: [...CSVGEN_METADATA_MODELS],
 }
 
 const METADATA_BACKENDS = [
@@ -47,6 +54,7 @@ export function MetadataSettings({ active }: { active: boolean }) {
   const [primaryModel, setPrimaryModel] = useState("gemini-2.5-flash")
 
   const [csvgenCookie, setCsvgenCookie] = useState("")
+  const [csvgenApiKeys, setCsvgenApiKeys] = useState("")
 
   const [geminiKeys, setGeminiKeys] = useState("")
   const [openaiKeys, setOpenaiKeys] = useState("")
@@ -100,6 +108,7 @@ export function MetadataSettings({ active }: { active: boolean }) {
     setPrimaryModel(primary)
     setModel(primary)
     setCsvgenCookie(String(c.flow2api_csvgen_cookie || ""))
+    setCsvgenApiKeys(String(c.flow2api_csvgen_api_keys || ""))
 
     setGeminiKeys(String(c.flow2api_gemini_api_keys || ""))
     setOpenaiKeys(String(c.flow2api_openai_api_keys || ""))
@@ -190,6 +199,17 @@ export function MetadataSettings({ active }: { active: boolean }) {
     return () => window.clearTimeout(timer)
   }, [load])
 
+  useEffect(() => {
+    if (selectedProvider !== "csvgen") return
+    const allowed = new Set(CSVGEN_METADATA_MODELS)
+    setEnabledModels((prev) => {
+      const filtered = prev.filter((m) => allowed.has(m))
+      return filtered.length ? filtered : [...CSVGEN_METADATA_MODELS]
+    })
+    setPrimaryModel((p) => (allowed.has(p) ? p : CSVGEN_METADATA_MODELS[2]))
+    setModel((m) => (allowed.has(m) ? m : CSVGEN_METADATA_MODELS[2]))
+  }, [selectedProvider])
+
   const save = async () => {
     if (!token) return
     setBusy(true)
@@ -206,6 +226,7 @@ export function MetadataSettings({ active }: { active: boolean }) {
           flow2api_metadata_primary_model: primaryModel,
           flow2api_metadata_fallback_models: fallbackModels.join(","),
           flow2api_csvgen_cookie: csvgenCookie,
+          flow2api_csvgen_api_keys: csvgenApiKeys,
 
           flow2api_gemini_api_keys: geminiKeys,
           flow2api_openai_api_keys: openaiKeys,
@@ -282,58 +303,57 @@ export function MetadataSettings({ active }: { active: boolean }) {
           </div>
         </div>
 
-        {selectedProvider !== 'csvgen' && (
-          <div className="space-y-2">
-            <Label>Metadata Models (preset)</Label>
-            <div className="rounded-md border overflow-hidden">
-              <div className="grid grid-cols-[1fr_90px_90px_110px] gap-2 border-b bg-muted/40 px-3 py-2 text-xs font-medium">
-                <span>Model</span>
-                <span className="text-center">Enabled</span>
-                <span className="text-center">Primary</span>
-                <span className="text-center">Order</span>
-              </div>
-              <div className="max-h-[300px] overflow-y-auto">
-                {allModels.map((entry) => {
-                  const enabled = enabledModels.includes(entry)
-                  return (
-                    <div key={entry} className="grid grid-cols-[1fr_90px_90px_110px] items-center gap-2 border-b last:border-0 px-3 py-2 text-sm hover:bg-muted/20 transition-colors">
-                      <span className="font-mono truncate" title={entry}>{entry}</span>
-                      <div className="flex justify-center">
-                        <input
-                          type="checkbox"
-                          className="h-4 w-4 accent-primary rounded cursor-pointer"
-                          checked={enabled}
-                          onChange={(e) => toggleModel(entry, e.target.checked)}
-                        />
-                      </div>
-                      <div className="flex justify-center">
-                        <input
-                          type="radio"
-                          name="primary-model"
-                          className="h-4 w-4 accent-primary"
-                          checked={primaryModel === entry}
-                          disabled={!enabled}
-                          onChange={() => {
-                            setPrimaryModel(entry)
-                            setModel(entry)
-                          }}
-                        />
-                      </div>
-                      <div className="flex gap-1 justify-center">
-                        <Button type="button" size="sm" variant="outline" disabled={!enabled} onClick={() => moveModel(entry, -1)} className="h-7 px-2">Up</Button>
-                        <Button type="button" size="sm" variant="outline" disabled={!enabled} onClick={() => moveModel(entry, 1)} className="h-7 px-2">Down</Button>
-                      </div>
-                    </div>
-                  )
-                })}
-              </div>
+        <div className="space-y-2">
+          <Label>Metadata Models (preset)</Label>
+          <div className="rounded-md border overflow-hidden">
+            <div className="grid grid-cols-[1fr_90px_90px_110px] gap-2 border-b bg-muted/40 px-3 py-2 text-xs font-medium">
+              <span>Model</span>
+              <span className="text-center">Enabled</span>
+              <span className="text-center">Primary</span>
+              <span className="text-center">Order</span>
             </div>
-
-            <p className="text-xs text-muted-foreground mt-2">
-              Fallback order follows enabled model order excluding primary.
-            </p>
+            <div className="max-h-[300px] overflow-y-auto">
+              {allModels.map((entry) => {
+                const enabled = enabledModels.includes(entry)
+                return (
+                  <div key={entry} className="grid grid-cols-[1fr_90px_90px_110px] items-center gap-2 border-b last:border-0 px-3 py-2 text-sm hover:bg-muted/20 transition-colors">
+                    <span className="font-mono truncate" title={entry}>{entry}</span>
+                    <div className="flex justify-center">
+                      <input
+                        type="checkbox"
+                        className="h-4 w-4 accent-primary rounded cursor-pointer"
+                        checked={enabled}
+                        onChange={(e) => toggleModel(entry, e.target.checked)}
+                      />
+                    </div>
+                    <div className="flex justify-center">
+                      <input
+                        type="radio"
+                        name="primary-model"
+                        className="h-4 w-4 accent-primary"
+                        checked={primaryModel === entry}
+                        disabled={!enabled}
+                        onChange={() => {
+                          setPrimaryModel(entry)
+                          setModel(entry)
+                        }}
+                      />
+                    </div>
+                    <div className="flex gap-1 justify-center">
+                      <Button type="button" size="sm" variant="outline" disabled={!enabled} onClick={() => moveModel(entry, -1)} className="h-7 px-2">Up</Button>
+                      <Button type="button" size="sm" variant="outline" disabled={!enabled} onClick={() => moveModel(entry, 1)} className="h-7 px-2">Down</Button>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
           </div>
-        )}
+
+          <p className="text-xs text-muted-foreground mt-2">
+            Fallback order follows enabled model order excluding primary.
+            {selectedProvider === "csvgen" ? " For CSVGEN, use Workers AI model ids (@cf/…)." : null}
+          </p>
+        </div>
 
 
 
@@ -407,13 +427,28 @@ export function MetadataSettings({ active }: { active: boolean }) {
                   </TableCell>
                 </TableRow>
                 {selectedProvider === 'csvgen' && (
-                  <TableRow className="bg-primary/5">
-                    <TableCell className="font-medium text-primary">CSVGEN</TableCell>
-                    <TableCell className="text-muted-foreground font-mono text-[11px]">FLOW2API_CSVGEN_COOKIE</TableCell>
-                    <TableCell>
-                      <Input className="font-mono text-xs h-8 bg-muted/20" placeholder="Cookie string..." value={csvgenCookie} onChange={(e) => setCsvgenCookie(e.target.value)} />
-                    </TableCell>
-                  </TableRow>
+                  <>
+                    <TableRow className="bg-primary/5">
+                      <TableCell className="font-medium text-primary">CSVGEN</TableCell>
+                      <TableCell className="text-muted-foreground font-mono text-[11px]">FLOW2API_CSVGEN_COOKIE</TableCell>
+                      <TableCell>
+                        <Input className="font-mono text-xs h-8 bg-muted/20" placeholder="Cookie string..." value={csvgenCookie} onChange={(e) => setCsvgenCookie(e.target.value)} />
+                      </TableCell>
+                    </TableRow>
+                    <TableRow className="bg-primary/5">
+                      <TableCell className="font-medium text-primary text-xs pl-8">↳ Native API keys</TableCell>
+                      <TableCell className="text-muted-foreground font-mono text-[11px]">FLOW2API_CSVGEN_API_KEYS</TableCell>
+                      <TableCell>
+                        <Textarea
+                          className="font-mono text-xs min-h-[60px] bg-muted/20 resize-y"
+                          placeholder="Comma-separated keys (csvgen Settings → Metadata, Native tab)…"
+                          value={csvgenApiKeys}
+                          onChange={(e) => setCsvgenApiKeys(e.target.value)}
+                        />
+                        <p className="text-[11px] text-muted-foreground mt-1">Required if csvgen returns &quot;At least one API key is required&quot;. Same keys as in the csvgen web app.</p>
+                      </TableCell>
+                    </TableRow>
+                  </>
                 )}
               </TableBody>
             </Table>

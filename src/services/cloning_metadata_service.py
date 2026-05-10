@@ -512,7 +512,24 @@ class CloningMetadataService:
                         if not cookie:
                             raise HTTPException(status_code=400, detail="CSVGEN cookie not configured")
                         b64 = base64.b64encode(image_bytes).decode("ascii")
-                        body = {"base64ImageData": b64, "metadataSettings": metadata_settings}
+                        mt = str(mime_type or "image/jpeg").split(";", 1)[0].strip() or "image/jpeg"
+                        if "/" not in mt:
+                            mt = "image/jpeg"
+                        data_url = f"data:{mt};base64,{b64}"
+                        keys_csv = str(app_config.flow2api_csvgen_api_keys or "")
+                        api_keys_list = [s.strip() for s in keys_csv.split(",") if s.strip()]
+                        settings_payload = (
+                            dict(metadata_settings) if isinstance(metadata_settings, dict) else {}
+                        )
+                        csvgen_model = str(model or "").strip() or "@cf/moonshotai/kimi-k2.5"
+                        body = {
+                            "image": data_url,
+                            "fileType": "image",
+                            "provider": "csvgen",
+                            "model": csvgen_model,
+                            "apiKeys": api_keys_list,
+                            "settings": settings_payload,
+                        }
                         async with AsyncSession() as session:
                             resp = await session.post(
                                 "https://www.csvgen.com/api/generate-metadata",

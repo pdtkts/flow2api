@@ -643,6 +643,7 @@ class GenerationConfigRequest(BaseModel):
     cloudflare_account_id: Optional[str] = None
     cloudflare_api_token: Optional[str] = None
     flow2api_csvgen_cookie: Optional[str] = None
+    flow2api_csvgen_api_keys: Optional[str] = None
     flow2api_cloning_model: Optional[str] = None
     flow2api_metadata_backend: Optional[str] = None
     flow2api_metadata_provider_order: Optional[str] = None
@@ -1570,6 +1571,7 @@ async def get_generation_config(token: str = Depends(verify_admin_token)):
             "cloudflare_account_id": str(getattr(config, "cloudflare_account_id", "") or ""),
             "cloudflare_api_token": str(getattr(config, "cloudflare_api_token", "") or ""),
             "flow2api_csvgen_cookie": str(getattr(config, "flow2api_csvgen_cookie", "") or ""),
+            "flow2api_csvgen_api_keys": str(getattr(config, "flow2api_csvgen_api_keys", "") or ""),
             "flow2api_cloning_model": str(
                 getattr(config, "flow2api_cloning_model", "gemini-2.5-flash")
                 or "gemini-2.5-flash"
@@ -1700,6 +1702,7 @@ async def update_generation_config(
         cloudflare_account_id=request.cloudflare_account_id,
         cloudflare_api_token=request.cloudflare_api_token,
         flow2api_csvgen_cookie=request.flow2api_csvgen_cookie,
+        flow2api_csvgen_api_keys=request.flow2api_csvgen_api_keys,
         flow2api_cloning_model=request.flow2api_cloning_model,
         flow2api_cloning_backend=request.flow2api_cloning_backend,
         flow2api_cloning_provider_order=request.flow2api_cloning_provider_order,
@@ -2479,6 +2482,7 @@ async def update_generation_timeout(
         cloudflare_account_id=request.cloudflare_account_id,
         cloudflare_api_token=request.cloudflare_api_token,
         flow2api_csvgen_cookie=request.flow2api_csvgen_cookie,
+        flow2api_csvgen_api_keys=request.flow2api_csvgen_api_keys,
         flow2api_cloning_model=request.flow2api_cloning_model,
         flow2api_cloning_backend=request.flow2api_cloning_backend,
         flow2api_cloning_provider_order=request.flow2api_cloning_provider_order,

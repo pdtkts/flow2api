@@ -733,6 +733,7 @@ class Database:
                     ("cloudflare_account_id", "TEXT DEFAULT ''"),
                     ("cloudflare_api_token", "TEXT DEFAULT ''"),
                     ("flow2api_csvgen_cookie", "TEXT DEFAULT ''"),
+                    ("flow2api_csvgen_api_keys", "TEXT DEFAULT ''"),
                     ("flow2api_cloning_model", "TEXT DEFAULT 'gemini-2.5-flash'"),
                     ("flow2api_metadata_backend", "TEXT DEFAULT 'gemini_native'"),
                     ("flow2api_metadata_provider_order", "TEXT DEFAULT ''"),
@@ -1126,6 +1127,7 @@ class Database:
                     cloudflare_account_id TEXT DEFAULT '',
                     cloudflare_api_token TEXT DEFAULT '',
                     flow2api_csvgen_cookie TEXT DEFAULT '',
+                    flow2api_csvgen_api_keys TEXT DEFAULT '',
                     flow2api_cloning_model TEXT DEFAULT 'gemini-2.5-flash',
                     flow2api_metadata_backend TEXT DEFAULT 'gemini_native',
                     flow2api_metadata_provider_order TEXT DEFAULT '',
@@ -2191,6 +2193,7 @@ class Database:
         cloudflare_account_id: Optional[str] = None,
         cloudflare_api_token: Optional[str] = None,
         flow2api_csvgen_cookie: Optional[str] = None,
+        flow2api_csvgen_api_keys: Optional[str] = None,
         flow2api_cloning_model: Optional[str] = None,
         flow2api_cloning_backend: Optional[str] = None,
         flow2api_cloning_provider_order: Optional[str] = None,
@@ -2305,6 +2308,11 @@ class Database:
                 str(flow2api_csvgen_cookie)
                 if flow2api_csvgen_cookie is not None
                 else str(current.get("flow2api_csvgen_cookie", "") or "")
+            )
+            normalized_flow2api_csvgen_api_keys = (
+                str(flow2api_csvgen_api_keys)
+                if flow2api_csvgen_api_keys is not None
+                else str(current.get("flow2api_csvgen_api_keys", "") or "")
             )
             if flow2api_cloning_model is not None:
                 raw_cm = str(flow2api_cloning_model).strip()
@@ -2553,6 +2561,7 @@ class Database:
                         cloudflare_account_id = ?,
                         cloudflare_api_token = ?,
                         flow2api_csvgen_cookie = ?,
+                        flow2api_csvgen_api_keys = ?,
                         flow2api_cloning_model = ?,
                         flow2api_cloning_backend = ?,
                         flow2api_cloning_provider_order = ?,
@@ -2606,6 +2615,7 @@ class Database:
                     normalized_cloudflare_account_id,
                     normalized_cloudflare_api_token,
                     normalized_flow2api_csvgen_cookie,
+                    normalized_flow2api_csvgen_api_keys,
                     normalized_flow2api_cloning_model,
                     normalized_flow2api_cloning_backend,
                     normalized_flow2api_cloning_provider_order,
@@ -2661,6 +2671,7 @@ class Database:
                         cloudflare_account_id,
                         cloudflare_api_token,
                         flow2api_csvgen_cookie,
+                        flow2api_csvgen_api_keys,
                         flow2api_cloning_model,
                         flow2api_cloning_backend,
                         flow2api_cloning_provider_order,
@@ -2699,7 +2710,7 @@ class Database:
                         task_tracker_turnstile_token,
                         task_tracker_tls_profile
                     )
-                    VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     normalized_image_timeout,
                     normalized_video_timeout,
@@ -2714,6 +2725,7 @@ class Database:
                     normalized_cloudflare_account_id,
                     normalized_cloudflare_api_token,
                     normalized_flow2api_csvgen_cookie,
+                    normalized_flow2api_csvgen_api_keys,
                     normalized_flow2api_cloning_model,
                     normalized_flow2api_cloning_backend,
                     normalized_flow2api_cloning_provider_order,
@@ -3216,6 +3228,9 @@ class Database:
             )
             config.set_flow2api_csvgen_cookie(
                 str(getattr(generation_config, "flow2api_csvgen_cookie", "") or "")
+            )
+            config.set_flow2api_csvgen_api_keys(
+                str(getattr(generation_config, "flow2api_csvgen_api_keys", "") or "")
             )
             config.set_flow2api_cloning_model(
                 str(getattr(generation_config, "flow2api_cloning_model", "gemini-2.5-flash") or "gemini-2.5-flash")
