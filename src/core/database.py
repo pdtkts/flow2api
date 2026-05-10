@@ -743,14 +743,6 @@ class Database:
                     ("flow2api_metadata_enabled_models", "TEXT DEFAULT ''"),
                     ("flow2api_metadata_primary_model", "TEXT DEFAULT ''"),
                     ("flow2api_metadata_fallback_models", "TEXT DEFAULT ''"),
-                    ("flow2api_market_backend", "TEXT DEFAULT 'gemini_native'"),
-                    ("flow2api_market_provider_order", "TEXT DEFAULT ''"),
-                    ("flow2api_market_enabled_providers", "TEXT DEFAULT ''"),
-                    ("flow2api_market_provider_retry_count", "INTEGER DEFAULT 1"),
-                    ("flow2api_market_model", "TEXT DEFAULT 'gemini-2.5-flash'"),
-                    ("flow2api_market_enabled_models", "TEXT DEFAULT ''"),
-                    ("flow2api_market_primary_model", "TEXT DEFAULT ''"),
-                    ("flow2api_market_fallback_models", "TEXT DEFAULT ''"),
                     ("metadata_system_prompt", "TEXT DEFAULT ''"),
                     ("flow2api_cloning_backend", "TEXT DEFAULT 'gemini_native'"),
                     ("flow2api_cloning_provider_order", "TEXT DEFAULT ''"),
@@ -1137,14 +1129,6 @@ class Database:
                     flow2api_metadata_enabled_models TEXT DEFAULT '',
                     flow2api_metadata_primary_model TEXT DEFAULT '',
                     flow2api_metadata_fallback_models TEXT DEFAULT '',
-                    flow2api_market_backend TEXT DEFAULT 'gemini_native',
-                    flow2api_market_provider_order TEXT DEFAULT '',
-                    flow2api_market_enabled_providers TEXT DEFAULT '',
-                    flow2api_market_provider_retry_count INTEGER DEFAULT 1,
-                    flow2api_market_model TEXT DEFAULT 'gemini-2.5-flash',
-                    flow2api_market_enabled_models TEXT DEFAULT '',
-                    flow2api_market_primary_model TEXT DEFAULT '',
-                    flow2api_market_fallback_models TEXT DEFAULT '',
                     metadata_system_prompt TEXT DEFAULT '',
                     flow2api_cloning_backend TEXT DEFAULT 'gemini_native',
                     flow2api_cloning_provider_order TEXT DEFAULT '',
@@ -2214,14 +2198,6 @@ class Database:
         flow2api_metadata_enabled_models: Optional[str] = None,
         flow2api_metadata_primary_model: Optional[str] = None,
         flow2api_metadata_fallback_models: Optional[str] = None,
-        flow2api_market_backend: Optional[str] = None,
-        flow2api_market_provider_order: Optional[str] = None,
-        flow2api_market_enabled_providers: Optional[str] = None,
-        flow2api_market_provider_retry_count: Optional[int] = None,
-        flow2api_market_model: Optional[str] = None,
-        flow2api_market_enabled_models: Optional[str] = None,
-        flow2api_market_primary_model: Optional[str] = None,
-        flow2api_market_fallback_models: Optional[str] = None,
         metadata_system_prompt: Optional[str] = None,
         cloning_image_system_prompt: Optional[str] = None,
         cloning_video_system_prompt: Optional[str] = None,
@@ -2444,61 +2420,6 @@ class Database:
                 normalized_flow2api_metadata_enabled_models = ",".join(
                     list(dict.fromkeys([m for m in enabled if m]))
                 )
-            normalized_flow2api_market_backend = (
-                str(flow2api_market_backend)
-                if flow2api_market_backend is not None
-                else str(current.get("flow2api_market_backend", "gemini_native") or "gemini_native")
-            )
-            normalized_flow2api_market_provider_order = (
-                str(flow2api_market_provider_order)
-                if flow2api_market_provider_order is not None
-                else str(current.get("flow2api_market_provider_order", "") or "")
-            )
-            normalized_flow2api_market_enabled_providers = (
-                str(flow2api_market_enabled_providers)
-                if flow2api_market_enabled_providers is not None
-                else str(current.get("flow2api_market_enabled_providers", "") or "")
-            )
-            try:
-                normalized_flow2api_market_provider_retry_count = (
-                    max(0, min(5, int(flow2api_market_provider_retry_count)))
-                    if flow2api_market_provider_retry_count is not None
-                    else max(0, min(5, int(current.get("flow2api_market_provider_retry_count", 1) or 1)))
-                )
-            except Exception:
-                normalized_flow2api_market_provider_retry_count = 1
-            normalized_flow2api_market_model = (
-                str(flow2api_market_model)
-                if flow2api_market_model is not None
-                else str(current.get("flow2api_market_model", "gemini-2.5-flash") or "gemini-2.5-flash")
-            )
-            normalized_flow2api_market_enabled_models = (
-                str(flow2api_market_enabled_models)
-                if flow2api_market_enabled_models is not None
-                else str(current.get("flow2api_market_enabled_models", "") or "")
-            )
-            normalized_flow2api_market_primary_model = (
-                str(flow2api_market_primary_model)
-                if flow2api_market_primary_model is not None
-                else str(current.get("flow2api_market_primary_model", "") or "")
-            )
-            normalized_flow2api_market_fallback_models = (
-                str(flow2api_market_fallback_models)
-                if flow2api_market_fallback_models is not None
-                else str(current.get("flow2api_market_fallback_models", "") or "")
-            )
-            if flow2api_market_model is None and flow2api_market_primary_model is not None:
-                normalized_flow2api_market_model = str(flow2api_market_primary_model or "").strip() or normalized_flow2api_market_model
-            if not normalized_flow2api_market_primary_model.strip():
-                normalized_flow2api_market_primary_model = normalized_flow2api_market_model
-            if not normalized_flow2api_market_enabled_models.strip():
-                enabled_m = [normalized_flow2api_market_primary_model]
-                enabled_m.extend(
-                    [m.strip() for m in normalized_flow2api_market_fallback_models.split(",") if m.strip()]
-                )
-                normalized_flow2api_market_enabled_models = ",".join(
-                    list(dict.fromkeys([m for m in enabled_m if m]))
-                )
             normalized_metadata_system_prompt = (
                 str(metadata_system_prompt)
                 if metadata_system_prompt is not None
@@ -2582,14 +2503,6 @@ class Database:
                         flow2api_metadata_enabled_models = ?,
                         flow2api_metadata_primary_model = ?,
                         flow2api_metadata_fallback_models = ?,
-                        flow2api_market_backend = ?,
-                        flow2api_market_provider_order = ?,
-                        flow2api_market_enabled_providers = ?,
-                        flow2api_market_provider_retry_count = ?,
-                        flow2api_market_model = ?,
-                        flow2api_market_enabled_models = ?,
-                        flow2api_market_primary_model = ?,
-                        flow2api_market_fallback_models = ?,
                         metadata_system_prompt = ?,
                         cloning_image_system_prompt = ?,
                         cloning_video_system_prompt = ?,
@@ -2636,14 +2549,6 @@ class Database:
                     normalized_flow2api_metadata_enabled_models,
                     normalized_flow2api_metadata_primary_model,
                     normalized_flow2api_metadata_fallback_models,
-                    normalized_flow2api_market_backend,
-                    normalized_flow2api_market_provider_order,
-                    normalized_flow2api_market_enabled_providers,
-                    normalized_flow2api_market_provider_retry_count,
-                    normalized_flow2api_market_model,
-                    normalized_flow2api_market_enabled_models,
-                    normalized_flow2api_market_primary_model,
-                    normalized_flow2api_market_fallback_models,
                     normalized_metadata_system_prompt,
                     normalized_cloning_image_system_prompt,
                     normalized_cloning_video_system_prompt,
@@ -2692,14 +2597,6 @@ class Database:
                         flow2api_metadata_enabled_models,
                         flow2api_metadata_primary_model,
                         flow2api_metadata_fallback_models,
-                        flow2api_market_backend,
-                        flow2api_market_provider_order,
-                        flow2api_market_enabled_providers,
-                        flow2api_market_provider_retry_count,
-                        flow2api_market_model,
-                        flow2api_market_enabled_models,
-                        flow2api_market_primary_model,
-                        flow2api_market_fallback_models,
                         metadata_system_prompt,
                         cloning_image_system_prompt,
                         cloning_video_system_prompt,
@@ -2710,7 +2607,7 @@ class Database:
                         task_tracker_turnstile_token,
                         task_tracker_tls_profile
                     )
-                    VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     normalized_image_timeout,
                     normalized_video_timeout,
@@ -2746,14 +2643,6 @@ class Database:
                     normalized_flow2api_metadata_enabled_models,
                     normalized_flow2api_metadata_primary_model,
                     normalized_flow2api_metadata_fallback_models,
-                    normalized_flow2api_market_backend,
-                    normalized_flow2api_market_provider_order,
-                    normalized_flow2api_market_enabled_providers,
-                    normalized_flow2api_market_provider_retry_count,
-                    normalized_flow2api_market_model,
-                    normalized_flow2api_market_enabled_models,
-                    normalized_flow2api_market_primary_model,
-                    normalized_flow2api_market_fallback_models,
                     normalized_metadata_system_prompt,
                     normalized_cloning_image_system_prompt,
                     normalized_cloning_video_system_prompt,
@@ -3291,30 +3180,6 @@ class Database:
             )
             config.set_flow2api_metadata_fallback_models(
                 str(getattr(generation_config, "flow2api_metadata_fallback_models", "") or "")
-            )
-            config.set_flow2api_market_backend(
-                str(getattr(generation_config, "flow2api_market_backend", "gemini_native") or "gemini_native")
-            )
-            config.set_flow2api_market_provider_order(
-                str(getattr(generation_config, "flow2api_market_provider_order", "") or "")
-            )
-            config.set_flow2api_market_enabled_providers(
-                str(getattr(generation_config, "flow2api_market_enabled_providers", "") or "")
-            )
-            config.set_flow2api_market_provider_retry_count(
-                int(getattr(generation_config, "flow2api_market_provider_retry_count", 1) or 1)
-            )
-            config.set_flow2api_market_model(
-                str(getattr(generation_config, "flow2api_market_model", "gemini-2.5-flash") or "gemini-2.5-flash")
-            )
-            config.set_flow2api_market_enabled_models(
-                str(getattr(generation_config, "flow2api_market_enabled_models", "") or "")
-            )
-            config.set_flow2api_market_primary_model(
-                str(getattr(generation_config, "flow2api_market_primary_model", "") or "")
-            )
-            config.set_flow2api_market_fallback_models(
-                str(getattr(generation_config, "flow2api_market_fallback_models", "") or "")
             )
             config.set_metadata_system_prompt(
                 str(getattr(generation_config, "metadata_system_prompt", "") or "")
