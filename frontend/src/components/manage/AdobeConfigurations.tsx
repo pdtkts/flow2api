@@ -76,7 +76,7 @@ export function AdobeConfigurations({ active }: { active: boolean }) {
     const isCsvgenOnly = legacyBackend === "csvgen"
     setUseCsvgenOnly(isCsvgenOnly)
 
-    // Load global provider order from market (as the unified state) or fallback to metadata
+    // Load global provider order (metadata is canonical; market keys are not persisted by API yet)
     const orderFromConfig = String(c.flow2api_market_provider_order || c.flow2api_metadata_provider_order || "")
       .split(",")
       .map((x) => x.trim())
@@ -88,19 +88,26 @@ export function AdobeConfigurations({ active }: { active: boolean }) {
       ...GLOBAL_BACKENDS.filter((x) => !(orderFromConfig.length ? orderFromConfig : ["gemini_native"]).includes(x)),
     ]
     
-    const enabledFromConfig = String(c.flow2api_market_enabled_providers || "")
+    const enabledFromConfig = String(
+      c.flow2api_market_enabled_providers ||
+        c.flow2api_metadata_enabled_providers ||
+        c.flow2api_cloning_enabled_providers ||
+        "",
+    )
       .split(",")
       .map((x) => x.trim())
       .filter(Boolean)
       .filter((x) => normalizedOrder.includes(x))
-      
+
     const normalizedEnabledProviders = enabledFromConfig.length ? enabledFromConfig : ["gemini_native"]
-    
+
     setProviderOrder(normalizedOrder)
     setEnabledProviders(normalizedEnabledProviders)
-    setProviderRetryCount(
-      Math.max(0, Math.min(5, Number(c.flow2api_market_provider_retry_count ?? 1) || 1))
-    )
+    const retryRaw =
+      c.flow2api_market_provider_retry_count ??
+      c.flow2api_metadata_provider_retry_count ??
+      c.flow2api_cloning_provider_retry_count
+    setProviderRetryCount(Math.max(0, Math.min(5, Number(retryRaw) || 1)))
     
     // Model configuration
     const configuredEnabledRaw = String(c.flow2api_market_enabled_models || c.flow2api_metadata_enabled_models || "").trim()
@@ -232,18 +239,8 @@ export function AdobeConfigurations({ active }: { active: boolean }) {
           flow2api_metadata_enabled_models: enabledModels.join(","),
           flow2api_metadata_primary_model: primaryModel,
           flow2api_metadata_fallback_models: fallbackModels.join(","),
-          
-          // Apply as global settings to Market
-          flow2api_market_backend: selectedProvider,
-          flow2api_market_provider_order: providerOrder.join(","),
-          flow2api_market_enabled_providers: enabledProviders.join(","),
-          flow2api_market_provider_retry_count: providerRetryCount,
-          flow2api_market_model: model,
-          flow2api_market_enabled_models: enabledModels.join(","),
-          flow2api_market_primary_model: primaryModel,
-          flow2api_market_fallback_models: fallbackModels.join(","),
 
-          // Apply as global settings to Cloning
+          // Cloning (same routing as metadata for this screen)
           flow2api_cloning_backend: selectedProvider,
           flow2api_cloning_provider_order: providerOrder.join(","),
           flow2api_cloning_enabled_providers: enabledProviders.join(","),
