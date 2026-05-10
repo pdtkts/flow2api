@@ -521,6 +521,13 @@ class CloningMetadataService:
                                     "Accept": "*/*",
                                     "Origin": "https://www.csvgen.com",
                                     "Referer": "https://www.csvgen.com/app",
+                                    # csvgen rejects requests without this (and often a browser UA); matches web app.
+                                    "x-csvgen-client": "web-app",
+                                    "User-Agent": (
+                                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                        "Chrome/131.0.0.0 Safari/537.36"
+                                    ),
                                     "Cookie": cookie,
                                 },
                                 json=body,
