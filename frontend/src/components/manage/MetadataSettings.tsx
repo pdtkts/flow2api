@@ -6,6 +6,7 @@ import { Button } from "../ui/button"
 import { Input } from "../ui/input"
 import { Label } from "../ui/label"
 import { Textarea } from "../ui/textarea"
+import { Switch } from "../ui/switch"
 import { toast } from "sonner"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../ui/table"
 import { Key } from "lucide-react"
@@ -48,6 +49,7 @@ export function MetadataSettings({ active }: { active: boolean }) {
   const [busy, setBusy] = useState(false)
   const [providerOrder, setProviderOrder] = useState<string[]>(METADATA_BACKENDS)
   const [enabledProviders, setEnabledProviders] = useState<string[]>(["gemini_native"])
+  const [useCsvgenOnly, setUseCsvgenOnly] = useState(false)
   const [providerRetryCount, setProviderRetryCount] = useState(1)
   const [model, setModel] = useState("gemini-2.5-flash")
   const [enabledModels, setEnabledModels] = useState<string[]>(["gemini-2.5-flash"])
@@ -86,6 +88,8 @@ export function MetadataSettings({ active }: { active: boolean }) {
       .filter((x) => normalizedOrder.includes(x))
     const normalizedEnabledProviders = enabledFromConfig.length ? enabledFromConfig : [legacyBackend]
     const selectedProvider = normalizedOrder.find((p) => normalizedEnabledProviders.includes(p)) || normalizedOrder[0] || "gemini_native"
+    const isCsvgenOnly = normalizedEnabledProviders.length === 1 && normalizedEnabledProviders[0] === "csvgen"
+    setUseCsvgenOnly(isCsvgenOnly)
     setProviderOrder(normalizedOrder)
     setEnabledProviders(normalizedEnabledProviders)
     setProviderRetryCount(
@@ -178,6 +182,16 @@ export function MetadataSettings({ active }: { active: boolean }) {
     })
   }
 
+  const toggleCsvgenOnly = (checked: boolean) => {
+    setUseCsvgenOnly(checked)
+    if (checked) {
+      setEnabledProviders(["csvgen"])
+      if (!providerOrder.includes("csvgen")) {
+        setProviderOrder(["csvgen", ...providerOrder.filter(p => p !== "csvgen")])
+      }
+    }
+  }
+
   const moveProvider = (providerName: string, direction: -1 | 1) => {
     setProviderOrder((prev) => {
       const idx = prev.indexOf(providerName)
@@ -256,9 +270,17 @@ export function MetadataSettings({ active }: { active: boolean }) {
       </CardHeader>
       <CardContent className="space-y-6">
         <div className="space-y-2">
-          <Label>Metadata Providers (ranked fallback)</Label>
-          <div className="rounded-md border overflow-hidden">
-            <div className="grid grid-cols-[1fr_90px_110px] gap-2 border-b bg-muted/40 px-3 py-2 text-xs font-medium">
+          <div className="flex items-center justify-between">
+            <Label>Metadata Providers (ranked fallback)</Label>
+            <div className="flex items-center gap-2">
+              <Label htmlFor="csvgen-only" className="cursor-pointer">Use CSVGEN Only</Label>
+              <Switch id="csvgen-only" checked={useCsvgenOnly} onCheckedChange={toggleCsvgenOnly} />
+            </div>
+          </div>
+          {!useCsvgenOnly && (
+            <>
+              <div className="rounded-md border overflow-hidden">
+                <div className="grid grid-cols-[1fr_90px_110px] gap-2 border-b bg-muted/40 px-3 py-2 text-xs font-medium">
               <span>Provider</span>
               <span className="text-center">Enabled</span>
               <span className="text-center">Order</span>
@@ -289,6 +311,8 @@ export function MetadataSettings({ active }: { active: boolean }) {
           <p className="text-xs text-muted-foreground">
             Requests use the first enabled provider, then fallback in order.
           </p>
+          </>
+          )}
           <div className="max-w-xs">
             <Label htmlFor="metadata-provider-retries">Retry per provider before fallback</Label>
             <Input
