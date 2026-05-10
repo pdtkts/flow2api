@@ -6,10 +6,12 @@ export function AdobeSettings({ active }: { active: boolean }) {
   if (!active) return null
 
   return (
-    <div className="grid gap-6 lg:grid-cols-2">
+    <div className="space-y-6">
       <MetadataSettings active={active} />
-      <TaskTrackerSettings active={active} />
-      <EventCalendarSettings active={active} />
+      <div className="grid gap-6 lg:grid-cols-2">
+        <TaskTrackerSettings active={active} />
+        <EventCalendarSettings active={active} />
+      </div>
     </div>
   )
 }
