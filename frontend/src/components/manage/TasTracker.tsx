@@ -15,8 +15,6 @@ export function TasTracker({ active }: { active: boolean }) {
   const [deviceName, setDeviceName] = useState("")
   const [cookies, setCookies] = useState("")
   const [deviceToken, setDeviceToken] = useState("")
-  const [turnstileToken, setTurnstileToken] = useState("")
-  const [tlsProfile, setTlsProfile] = useState("")
 
   const load = useCallback(async () => {
     if (!token || !active) return
@@ -30,8 +28,6 @@ export function TasTracker({ active }: { active: boolean }) {
     setDeviceName(String(c.task_tracker_device_name || ""))
     setCookies(String(c.task_tracker_cookies || ""))
     setDeviceToken(String(c.task_tracker_device_token || ""))
-    setTurnstileToken(String(c.task_tracker_turnstile_token || ""))
-    setTlsProfile(String(c.task_tracker_tls_profile || ""))
   }, [token, active])
 
   useEffect(() => {
@@ -50,8 +46,6 @@ export function TasTracker({ active }: { active: boolean }) {
           task_tracker_device_name: deviceName.trim(),
           task_tracker_cookies: cookies.trim(),
           task_tracker_device_token: deviceToken.trim(),
-          task_tracker_turnstile_token: turnstileToken.trim(),
-          task_tracker_tls_profile: tlsProfile.trim(),
         }),
       })
       if (!resp || !resp.ok) {
@@ -125,35 +119,6 @@ export function TasTracker({ active }: { active: boolean }) {
           <p className="text-xs text-muted-foreground">
             Full <code>Cookie</code> header from a logged-in browser. Must include{" "}
             <code>__Secure-next-auth.session-token</code>.
-          </p>
-        </div>
-
-        <div className="space-y-2">
-          <Label>Turnstile token (optional)</Label>
-          <Textarea
-            value={turnstileToken}
-            onChange={(e) => setTurnstileToken(e.target.value)}
-            placeholder="Paste x-turnstile-token if upstream requires it"
-            rows={3}
-            className="font-mono text-sm"
-          />
-          <p className="text-xs text-muted-foreground">
-            If set, sent as <code>X-Turnstile-Token</code> on each search request. Expires quickly; refresh when
-            searches fail.
-          </p>
-        </div>
-
-        <div className="space-y-2">
-          <Label>TLS impersonation profile (optional)</Label>
-          <Input
-            value={tlsProfile}
-            onChange={(e) => setTlsProfile(e.target.value)}
-            placeholder="chrome124"
-            className="font-mono text-sm"
-          />
-          <p className="text-xs text-muted-foreground">
-            <code>curl_cffi</code> impersonate label (e.g. <code>chrome124</code>). Leave empty to use built-in default
-            and fallback chain.
           </p>
         </div>
 
