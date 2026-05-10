@@ -8,7 +8,7 @@ import { Label } from "../ui/label"
 import { Textarea } from "../ui/textarea"
 import { toast } from "sonner"
 
-export function TaskTrackerSettings({ active }: { active: boolean }) {
+export function TasTracker({ active }: { active: boolean }) {
   const { token } = useAuth()
   const [busy, setBusy] = useState(false)
   const [deviceId, setDeviceId] = useState("")
@@ -55,9 +55,9 @@ export function TaskTrackerSettings({ active }: { active: boolean }) {
         }),
       })
       if (!resp || !resp.ok) {
-        toast.error("Failed to save Task Tracker settings")
+        toast.error("Failed to save TasTracker settings")
       } else {
-        toast.success("Task Tracker settings saved")
+        toast.success("TasTracker settings saved")
       }
     } catch (e) {
       toast.error(String(e))
@@ -70,7 +70,7 @@ export function TaskTrackerSettings({ active }: { active: boolean }) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Task Tracker Settings</CardTitle>
+        <CardTitle>TasTracker</CardTitle>
         <CardDescription>
           Configure credentials for direct HTTPS fetches to tastracker.com (no browser automation).
         </CardDescription>

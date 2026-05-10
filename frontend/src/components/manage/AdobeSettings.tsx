@@ -1,5 +1,5 @@
 import { MetadataSettings } from "./MetadataSettings"
-import { TaskTrackerSettings } from "./TaskTrackerSettings"
+import { TasTracker } from "./TasTracker"
 import { EventCalendarSettings } from "./EventCalendarSettings"
 
 export function AdobeSettings({ active }: { active: boolean }) {
@@ -9,7 +9,7 @@ export function AdobeSettings({ active }: { active: boolean }) {
     <div className="space-y-6">
       <MetadataSettings active={active} />
       <div className="grid gap-6 lg:grid-cols-2">
-        <TaskTrackerSettings active={active} />
+        <TasTracker active={active} />
         <EventCalendarSettings active={active} />
       </div>
     </div>
