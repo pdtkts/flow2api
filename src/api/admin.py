@@ -692,13 +692,10 @@ class UpdateAPIKeyRequest(BaseModel):
 class CreateManagedApiKeyRequest(BaseModel):
     client_name: str
     label: str = "default"
-    scopes: str = "*"
+    scopes: str
     account_ids: List[int]
     endpoint_limits: Dict[str, Dict[str, int]] = {}
     expires_at: Optional[str] = None
-    adobe_cloning_enabled: bool = True
-    adobe_metadata_enabled: bool = True
-    adobe_tracker_enabled: bool = True
 
 
 class UpdateManagedApiKeyRequest(BaseModel):
@@ -709,9 +706,6 @@ class UpdateManagedApiKeyRequest(BaseModel):
     expires_at: Optional[str] = None
     account_ids: Optional[List[int]] = None
     endpoint_limits: Optional[Dict[str, Dict[str, int]]] = None
-    adobe_cloning_enabled: Optional[bool] = None
-    adobe_metadata_enabled: Optional[bool] = None
-    adobe_tracker_enabled: Optional[bool] = None
 
 
 class ExtensionWorkerBindRequest(BaseModel):
@@ -2026,17 +2020,20 @@ async def create_managed_api_key(
         raise HTTPException(status_code=503, detail="API key manager not initialized")
     if not request.account_ids:
         raise HTTPException(status_code=400, detail="account_ids cannot be empty")
-    created = await api_key_manager.create_api_key(
-        client_name=request.client_name,
-        label=request.label,
-        scopes=request.scopes,
-        account_ids=request.account_ids,
-        endpoint_limits=request.endpoint_limits or {},
-        expires_at=request.expires_at,
-        adobe_cloning_enabled=request.adobe_cloning_enabled,
-        adobe_metadata_enabled=request.adobe_metadata_enabled,
-        adobe_tracker_enabled=request.adobe_tracker_enabled,
-    )
+    scopes_str = (request.scopes or "").strip()
+    if not scopes_str:
+        raise HTTPException(status_code=400, detail="scopes cannot be empty")
+    try:
+        created = await api_key_manager.create_api_key(
+            client_name=request.client_name,
+            label=request.label,
+            scopes=scopes_str,
+            account_ids=request.account_ids,
+            endpoint_limits=request.endpoint_limits or {},
+            expires_at=request.expires_at,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {
         "success": True,
         "message": "Managed API key created",
@@ -2070,18 +2067,21 @@ async def update_managed_api_key(
                 )
         valid_account_ids = cleaned_ids
 
+    scopes_arg = request.scopes
+    if scopes_arg is not None:
+        scopes_arg = scopes_arg.strip()
+        if not scopes_arg:
+            raise HTTPException(status_code=400, detail="scopes cannot be empty when provided")
+
     await db.update_api_key(
         key_id,
         client_name=request.client_name,
         label=request.label,
         is_active=request.is_active,
-        scopes=request.scopes,
+        scopes=scopes_arg,
         expires_at=request.expires_at,
         account_ids=valid_account_ids,
         endpoint_limits=request.endpoint_limits,
-        adobe_cloning_enabled=request.adobe_cloning_enabled,
-        adobe_metadata_enabled=request.adobe_metadata_enabled,
-        adobe_tracker_enabled=request.adobe_tracker_enabled,
     )
     return {"success": True, "message": "Managed API key updated"}
 

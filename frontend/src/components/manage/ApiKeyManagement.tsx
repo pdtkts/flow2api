@@ -55,26 +55,58 @@ type ScopeOption = { id: string; label: string; description: string }
 type AdobeUsageMonthRow = { year_month: string; success_count: number }
 type AdobeUsageOpRow = { year_month: string; operation: string; success_count: number }
 
-function coerceAdobeFlag(v: unknown): boolean {
-  if (v === undefined || v === null) return true
-  if (typeof v === "boolean") return v
-  return Number(v) !== 0
-}
-
 const AUDIT_PAGE_SIZE = 25
 const KEY_PROJECT_PAGE_SIZE = 10
 
 const AVAILABLE_SCOPES: ScopeOption[] = [
-  { id: "*", label: "Full access", description: "Allows all currently supported API actions." },
   { id: "models:read", label: "Read models", description: "Allows `/v1/models`, `/v1/models/aliases`, and Gemini model listing endpoints." },
   { id: "generate:chat", label: "Generate chat", description: "Allows `/v1/chat/completions` (stream and non-stream)." },
   { id: "generate:gemini", label: "Generate gemini", description: "Allows Gemini `generateContent` and `streamGenerateContent` endpoints." },
+  {
+    id: "projects:read",
+    label: "List Flow projects",
+    description: "Allows `GET /v1/projects` to list VideoFX projects for assigned accounts.",
+  },
   {
     id: "projects:write",
     label: "Create Flow projects",
     description: "Allows `POST /v1/projects` to create VideoFX projects for assigned accounts.",
   },
+  {
+    id: "adobe:cloning",
+    label: "Adobe cloning",
+    description: "Allows `POST /api/generate-cloning-prompts` and `POST /api/generate-cloning-video-prompt`.",
+  },
+  {
+    id: "adobe:metadata",
+    label: "Adobe metadata",
+    description: "Allows `POST /api/generate-metadata` (stock metadata from an image).",
+  },
+  {
+    id: "adobe:tracker",
+    label: "Adobe task tracker",
+    description: "Allows `POST /api/tracker/contributor` and `POST /api/tracker/keyword`.",
+  },
 ]
+
+/** All selectable scope ids (no wildcard); used for Select all and legacy `*` expansion. */
+const ALL_MANAGED_SCOPE_IDS: string[] = AVAILABLE_SCOPES.map((s) => s.id)
+
+function parseScopesFromKey(scopesRaw?: string | null): string[] {
+  const parsed = String(scopesRaw || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean)
+  if (!parsed.length) return [...ALL_MANAGED_SCOPE_IDS]
+  const noStar = parsed.filter((s) => s !== "*")
+  if (parsed.includes("*") && noStar.length === 0) {
+    return [...ALL_MANAGED_SCOPE_IDS]
+  }
+  if (parsed.includes("*")) {
+    return noStar.length ? noStar : [...ALL_MANAGED_SCOPE_IDS]
+  }
+  return noStar
+}
 
 export function ApiKeyManagement() {
   const { token } = useAuth()
@@ -93,15 +125,12 @@ export function ApiKeyManagement() {
   const [plainKeyValue, setPlainKeyValue] = useState("")
   const [clientName, setClientName] = useState("")
   const [label, setLabel] = useState("default")
-  const [selectedScopes, setSelectedScopes] = useState<string[]>(["*"])
+  const [selectedScopes, setSelectedScopes] = useState<string[]>(() => [...ALL_MANAGED_SCOPE_IDS])
   const [expiresAt, setExpiresAt] = useState("")
   const [selectedAccountIds, setSelectedAccountIds] = useState<number[]>([])
   const [limits, setLimits] = useState<LimitRow[]>([
     { endpoint: "/v1/chat/completions", rpm: "60", rph: "2000", burst: "10" },
   ])
-  const [adobeCloningEnabled, setAdobeCloningEnabled] = useState(true)
-  const [adobeMetadataEnabled, setAdobeMetadataEnabled] = useState(true)
-  const [adobeTrackerEnabled, setAdobeTrackerEnabled] = useState(true)
   const [adobeUsageRows, setAdobeUsageRows] = useState<AdobeUsageMonthRow[]>([])
   const [adobeUsageOpRows, setAdobeUsageOpRows] = useState<AdobeUsageOpRow[]>([])
   const [adobeUsageLoading, setAdobeUsageLoading] = useState(false)
@@ -116,14 +145,7 @@ export function ApiKeyManagement() {
   const [newProjTitle, setNewProjTitle] = useState("")
   const [newProjSetCurrent, setNewProjSetCurrent] = useState(true)
   const [creatingProj, setCreatingProj] = useState(false)
-
-  const parseScopes = (scopesRaw?: string | null): string[] => {
-    const parsed = String(scopesRaw || "")
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean)
-    return parsed.length ? parsed : ["*"]
-  }
+  const [legacyScopesNotice, setLegacyScopesNotice] = useState(false)
 
   const loadAll = useCallback(async () => {
     if (!token) return
@@ -210,12 +232,7 @@ export function ApiKeyManagement() {
   }
 
   const toggleScope = (scopeId: string) => {
-    setSelectedScopes((prev) => {
-      if (scopeId === "*") return prev.includes("*") ? [] : ["*"]
-      const withoutWildcard = prev.filter((s) => s !== "*")
-      if (withoutWildcard.includes(scopeId)) return withoutWildcard.filter((s) => s !== scopeId)
-      return [...withoutWildcard, scopeId]
-    })
+    setSelectedScopes((prev) => (prev.includes(scopeId) ? prev.filter((s) => s !== scopeId) : [...prev, scopeId]))
   }
 
   const addLimitRow = () => {
@@ -257,9 +274,6 @@ export function ApiKeyManagement() {
           account_ids: selectedAccountIds,
           endpoint_limits: buildLimitsPayload(),
           expires_at: expiresAt.trim() || null,
-          adobe_cloning_enabled: adobeCloningEnabled,
-          adobe_metadata_enabled: adobeMetadataEnabled,
-          adobe_tracker_enabled: adobeTrackerEnabled,
         }),
       })
       if (!res) return
@@ -290,7 +304,8 @@ export function ApiKeyManagement() {
     setKeyProjectsTotal(0)
     setClientName(key.client_name || "")
     setLabel(key.label || "default")
-    setSelectedScopes(parseScopes(key.scopes))
+    setSelectedScopes(parseScopesFromKey(key.scopes))
+    setLegacyScopesNotice(String(key.scopes || "").trim() === "*")
     setExpiresAt(String(key.expires_at || ""))
     setSelectedAccountIds(Array.isArray(key.account_ids) ? key.account_ids : [])
     setLimits(
@@ -308,9 +323,6 @@ export function ApiKeyManagement() {
     setNewProjTokenId(accIds.length ? String(accIds[0]) : "")
     setNewProjTitle("")
     setNewProjSetCurrent(true)
-    setAdobeCloningEnabled(coerceAdobeFlag(key.adobe_cloning_enabled))
-    setAdobeMetadataEnabled(coerceAdobeFlag(key.adobe_metadata_enabled))
-    setAdobeTrackerEnabled(coerceAdobeFlag(key.adobe_tracker_enabled))
     setEditOpen(true)
     void loadAdobeUsage(key.id)
   }
@@ -325,6 +337,7 @@ export function ApiKeyManagement() {
       setKeyProjectsTotal(0)
       setAdobeUsageRows([])
       setAdobeUsageOpRows([])
+      setLegacyScopesNotice(false)
       setNewProjTokenId("")
       setNewProjTitle("")
       setNewProjSetCurrent(true)
@@ -395,9 +408,6 @@ export function ApiKeyManagement() {
           expires_at: expiresAt.trim() || null,
           account_ids: selectedAccountIds,
           endpoint_limits: buildLimitsPayload(),
-          adobe_cloning_enabled: adobeCloningEnabled,
-          adobe_metadata_enabled: adobeMetadataEnabled,
-          adobe_tracker_enabled: adobeTrackerEnabled,
         }),
       })
       if (!res) return
@@ -474,9 +484,7 @@ export function ApiKeyManagement() {
             </Button>
             <Button
               onClick={() => {
-                setAdobeCloningEnabled(true)
-                setAdobeMetadataEnabled(true)
-                setAdobeTrackerEnabled(true)
+                setSelectedScopes([...ALL_MANAGED_SCOPE_IDS])
                 setCreateOpen(true)
               }}
             >
@@ -624,7 +632,23 @@ export function ApiKeyManagement() {
             </div>
             <div className="grid grid-cols-2 gap-3">
               <div>
-                <Label>Scopes</Label>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <Label>Scopes</Label>
+                  <div className="flex flex-wrap gap-1.5">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-8 text-xs"
+                      onClick={() => setSelectedScopes([...ALL_MANAGED_SCOPE_IDS])}
+                    >
+                      Select all
+                    </Button>
+                    <Button type="button" variant="outline" size="sm" className="h-8 text-xs" onClick={() => setSelectedScopes([])}>
+                      Clear all
+                    </Button>
+                  </div>
+                </div>
                 <div className="mt-2 space-y-2 border rounded-md p-3 max-h-44 overflow-auto">
                   {AVAILABLE_SCOPES.map((scope) => (
                     <label key={scope.id} className="flex items-start justify-between gap-3 text-sm">
@@ -655,29 +679,6 @@ export function ApiKeyManagement() {
               <div>
                 <Label>Expires at (optional)</Label>
                 <Input className="mt-1" value={expiresAt} onChange={(e) => setExpiresAt(e.target.value)} placeholder="YYYY-MM-DD HH:MM:SS" />
-              </div>
-            </div>
-
-            <div className="space-y-3 rounded-md border p-3">
-              <div>
-                <Label className="text-sm font-medium">Adobe tools</Label>
-                <p className="mt-1 text-xs text-muted-foreground">
-                  Cloning prompts and video prompt, stock metadata, and task tracker endpoints. Disabled routes return HTTP 403.
-                </p>
-              </div>
-              <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap">
-                <div className="flex min-w-[200px] flex-1 items-center justify-between gap-4 rounded-md border bg-muted/30 px-3 py-2">
-                  <span className="text-sm">Cloning</span>
-                  <Switch checked={adobeCloningEnabled} onCheckedChange={setAdobeCloningEnabled} />
-                </div>
-                <div className="flex min-w-[200px] flex-1 items-center justify-between gap-4 rounded-md border bg-muted/30 px-3 py-2">
-                  <span className="text-sm">Metadata</span>
-                  <Switch checked={adobeMetadataEnabled} onCheckedChange={setAdobeMetadataEnabled} />
-                </div>
-                <div className="flex min-w-[200px] flex-1 items-center justify-between gap-4 rounded-md border bg-muted/30 px-3 py-2">
-                  <span className="text-sm">Task tracker</span>
-                  <Switch checked={adobeTrackerEnabled} onCheckedChange={setAdobeTrackerEnabled} />
-                </div>
               </div>
             </div>
 
@@ -751,7 +752,23 @@ export function ApiKeyManagement() {
             </div>
             <div className="grid grid-cols-2 gap-3">
               <div>
-                <Label>Scopes</Label>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <Label>Scopes</Label>
+                  <div className="flex flex-wrap gap-1.5">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-8 text-xs"
+                      onClick={() => setSelectedScopes([...ALL_MANAGED_SCOPE_IDS])}
+                    >
+                      Select all
+                    </Button>
+                    <Button type="button" variant="outline" size="sm" className="h-8 text-xs" onClick={() => setSelectedScopes([])}>
+                      Clear all
+                    </Button>
+                  </div>
+                </div>
                 <div className="mt-2 space-y-2 border rounded-md p-3 max-h-44 overflow-auto">
                   {AVAILABLE_SCOPES.map((scope) => (
                     <label key={`edit-${scope.id}`} className="flex items-start justify-between gap-3 text-sm">
@@ -767,33 +784,16 @@ export function ApiKeyManagement() {
                     </label>
                   ))}
                 </div>
+                {legacyScopesNotice ? (
+                  <p className="mt-2 text-xs text-amber-800 dark:text-amber-200">
+                    This key used legacy full access (<code className="rounded bg-muted px-1">*</code>). Checkboxes now show explicit
+                    permissions—save to store them on the key.
+                  </p>
+                ) : null}
               </div>
               <div>
                 <Label>Expires at (optional)</Label>
                 <Input className="mt-1" value={expiresAt} onChange={(e) => setExpiresAt(e.target.value)} placeholder="YYYY-MM-DD HH:MM:SS" />
-              </div>
-            </div>
-
-            <div className="space-y-3 rounded-md border p-3">
-              <div>
-                <Label className="text-sm font-medium">Adobe tools</Label>
-                <p className="mt-1 text-xs text-muted-foreground">
-                  Cloning prompts and video prompt, stock metadata, and task tracker endpoints.
-                </p>
-              </div>
-              <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap">
-                <div className="flex min-w-[200px] flex-1 items-center justify-between gap-4 rounded-md border bg-muted/30 px-3 py-2">
-                  <span className="text-sm">Cloning</span>
-                  <Switch checked={adobeCloningEnabled} onCheckedChange={setAdobeCloningEnabled} />
-                </div>
-                <div className="flex min-w-[200px] flex-1 items-center justify-between gap-4 rounded-md border bg-muted/30 px-3 py-2">
-                  <span className="text-sm">Metadata</span>
-                  <Switch checked={adobeMetadataEnabled} onCheckedChange={setAdobeMetadataEnabled} />
-                </div>
-                <div className="flex min-w-[200px] flex-1 items-center justify-between gap-4 rounded-md border bg-muted/30 px-3 py-2">
-                  <span className="text-sm">Task tracker</span>
-                  <Switch checked={adobeTrackerEnabled} onCheckedChange={setAdobeTrackerEnabled} />
-                </div>
               </div>
             </div>
 

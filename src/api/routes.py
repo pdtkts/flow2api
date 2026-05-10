@@ -135,34 +135,16 @@ LOG_OP_ADOBE_TRACKER_CONTRIBUTOR = "adobe:tracker_contributor"
 LOG_OP_ADOBE_TRACKER_KEYWORD = "adobe:tracker_keyword"
 
 
-def _require_managed_adobe_cloning(auth_ctx: AuthContext) -> None:
+def _require_managed_scope(auth_ctx: AuthContext, scope_id: str) -> None:
+    """Managed keys must include scope_id in their assigned scopes (legacy keys bypass)."""
     if auth_ctx.is_legacy:
         return
-    if not auth_ctx.adobe_cloning_enabled:
-        raise HTTPException(
-            status_code=403,
-            detail="Adobe cloning endpoints are disabled for this API key",
-        )
-
-
-def _require_managed_adobe_metadata(auth_ctx: AuthContext) -> None:
-    if auth_ctx.is_legacy:
+    if scope_id in auth_ctx.scopes:
         return
-    if not auth_ctx.adobe_metadata_enabled:
-        raise HTTPException(
-            status_code=403,
-            detail="Adobe metadata endpoint is disabled for this API key",
-        )
-
-
-def _require_managed_adobe_tracker(auth_ctx: AuthContext) -> None:
-    if auth_ctx.is_legacy:
-        return
-    if not auth_ctx.adobe_tracker_enabled:
-        raise HTTPException(
-            status_code=403,
-            detail="Adobe task tracker endpoints are disabled for this API key",
-        )
+    raise HTTPException(
+        status_code=403,
+        detail=f"Missing scope: {scope_id}",
+    )
 
 
 async def _logged_managed_adobe_call(
@@ -1806,7 +1788,7 @@ async def generate_cloning_prompts(
     """Generate cloning image prompts for one or more images."""
     if auth_ctx.key_id is None:
         raise HTTPException(status_code=403, detail="Managed API key required")
-    _require_managed_adobe_cloning(auth_ctx)
+    _require_managed_scope(auth_ctx, "adobe:cloning")
 
     request_payload = request.model_dump()
 
@@ -1842,7 +1824,7 @@ async def generate_cloning_video_prompt(
     """Generate a video cloning prompt JSON string from image clone JSON."""
     if auth_ctx.key_id is None:
         raise HTTPException(status_code=403, detail="Managed API key required")
-    _require_managed_adobe_cloning(auth_ctx)
+    _require_managed_scope(auth_ctx, "adobe:cloning")
 
     extras = request.model_extra or {}
     request_payload = {**request.model_dump(), **(extras or {})}
@@ -1876,7 +1858,7 @@ async def generate_metadata(
     """Generate stock metadata using request-provided metadata settings."""
     if auth_ctx.key_id is None:
         raise HTTPException(status_code=403, detail="Managed API key required")
-    _require_managed_adobe_metadata(auth_ctx)
+    _require_managed_scope(auth_ctx, "adobe:metadata")
 
     inner = {
         "image_url": request.image_url,
@@ -2383,7 +2365,7 @@ async def fetch_task_tracker_contributor_assets(
     """Fetch TAS contributor-search results via direct HTTPS to tastracker.com (curl-cffi)."""
     if auth_ctx.key_id is None:
         raise HTTPException(status_code=403, detail="Managed API key required")
-    _require_managed_adobe_tracker(auth_ctx)
+    _require_managed_scope(auth_ctx, "adobe:tracker")
 
     request_payload = request.model_dump()
 
@@ -2416,7 +2398,7 @@ async def fetch_task_tracker_keyword_search(
     """Proxy TAS keyword search (GET /api/search); returns upstream JSON (e.g. images array)."""
     if auth_ctx.key_id is None:
         raise HTTPException(status_code=403, detail="Managed API key required")
-    _require_managed_adobe_tracker(auth_ctx)
+    _require_managed_scope(auth_ctx, "adobe:tracker")
 
     request_payload = request.model_dump()
 

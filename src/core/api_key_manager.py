@@ -11,6 +11,15 @@ from dataclasses import dataclass
 from typing import Dict, Optional, Set, Tuple
 
 
+def adobe_flags_from_scopes(scopes: Set[str]) -> Tuple[bool, bool, bool]:
+    """Adobe route access is driven only by scope tokens (not legacy api_keys columns at auth time)."""
+    return (
+        "adobe:cloning" in scopes,
+        "adobe:metadata" in scopes,
+        "adobe:tracker" in scopes,
+    )
+
+
 @dataclass
 class AuthContext:
     """Resolved auth context for one request."""
@@ -52,10 +61,10 @@ class ApiKeyManager:
         account_ids: list[int],
         endpoint_limits: dict[str, dict[str, int]],
         expires_at: Optional[str] = None,
-        adobe_cloning_enabled: bool = True,
-        adobe_metadata_enabled: bool = True,
-        adobe_tracker_enabled: bool = True,
     ) -> dict:
+        scopes_norm = (scopes or "").strip()
+        if not scopes_norm:
+            raise ValueError("scopes must be non-empty")
         full_key, key_hash = self.generate_key()
         key_prefix = full_key[:18]
         key_id = await self.db.create_client_api_key(
@@ -64,13 +73,10 @@ class ApiKeyManager:
             key_prefix=key_prefix,
             key_plaintext=full_key,
             key_hash=key_hash,
-            scopes=scopes.strip() or "*",
+            scopes=scopes_norm,
             account_ids=account_ids,
             endpoint_limits=endpoint_limits,
             expires_at=expires_at,
-            adobe_cloning_enabled=adobe_cloning_enabled,
-            adobe_metadata_enabled=adobe_metadata_enabled,
-            adobe_tracker_enabled=adobe_tracker_enabled,
         )
         return {"id": key_id, "api_key": full_key, "key_prefix": key_prefix}
 
@@ -109,14 +115,7 @@ class ApiKeyManager:
             await self._enforce_rate_limits(key_id=key_id, endpoint=endpoint)
             await self.db.touch_api_key_usage(key_id)
 
-            def _adobe_flag(col: str) -> bool:
-                v = row.get(col)
-                if v is None:
-                    return True
-                try:
-                    return bool(int(v))
-                except (TypeError, ValueError):
-                    return True
+            acl, ame, atr = adobe_flags_from_scopes(scopes)
 
             return AuthContext(
                 key_id=key_id,
@@ -124,9 +123,9 @@ class ApiKeyManager:
                 is_legacy=False,
                 allowed_accounts=allowed_accounts,
                 scopes=scopes,
-                adobe_cloning_enabled=_adobe_flag("adobe_cloning_enabled"),
-                adobe_metadata_enabled=_adobe_flag("adobe_metadata_enabled"),
-                adobe_tracker_enabled=_adobe_flag("adobe_tracker_enabled"),
+                adobe_cloning_enabled=acl,
+                adobe_metadata_enabled=ame,
+                adobe_tracker_enabled=atr,
             )
 
         # Legacy fallback

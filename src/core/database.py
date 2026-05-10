@@ -4,10 +4,20 @@ import aiosqlite
 import json
 from contextlib import asynccontextmanager
 from datetime import date, datetime
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 from pathlib import Path
 from .config import DEFAULT_YESCAPTCHA_TASK_TYPE, normalize_yescaptcha_task_type
 from .models import Token, TokenStats, Task, RequestLog, AdminConfig, ProxyConfig, GenerationConfig, CacheConfig, Project, CaptchaConfig, PluginConfig, CallLogicConfig, DebugConfig
+
+
+def derive_adobe_ints_from_scopes_csv(scopes_csv: str) -> Tuple[int, int, int]:
+    """Sync api_keys.adobe_* columns from comma-separated scope tokens (single source: scopes)."""
+    parts = {x.strip() for x in (scopes_csv or "").split(",") if x.strip()}
+    return (
+        1 if "adobe:cloning" in parts else 0,
+        1 if "adobe:metadata" in parts else 0,
+        1 if "adobe:tracker" in parts else 0,
+    )
 
 
 class Database:
@@ -4110,11 +4120,9 @@ class Database:
         account_ids: List[int],
         endpoint_limits: Dict[str, Dict[str, int]],
         expires_at: Optional[str],
-        adobe_cloning_enabled: bool = True,
-        adobe_metadata_enabled: bool = True,
-        adobe_tracker_enabled: bool = True,
     ) -> int:
         client_id = await self._get_or_create_api_client(client_name)
+        ac, am, at_ = derive_adobe_ints_from_scopes_csv(scopes)
         async with self._connect(write=True) as db:
             cursor = await db.execute(
                 """
@@ -4132,9 +4140,9 @@ class Database:
                     key_hash,
                     scopes,
                     expires_at,
-                    1 if adobe_cloning_enabled else 0,
-                    1 if adobe_metadata_enabled else 0,
-                    1 if adobe_tracker_enabled else 0,
+                    ac,
+                    am,
+                    at_,
                 ),
             )
             key_id = int(cursor.lastrowid)
@@ -4317,9 +4325,6 @@ class Database:
         expires_at: Optional[str] = None,
         account_ids: Optional[List[int]] = None,
         endpoint_limits: Optional[Dict[str, Dict[str, int]]] = None,
-        adobe_cloning_enabled: Optional[bool] = None,
-        adobe_metadata_enabled: Optional[bool] = None,
-        adobe_tracker_enabled: Optional[bool] = None,
     ):
         # Resolve client outside the write transaction: _get_or_create_api_client also
         # takes _write_lock; nesting here deadlocks asyncio.Lock until Cloudflare 524.
@@ -4344,29 +4349,18 @@ class Database:
                     (1 if is_active else 0, key_id),
                 )
             if scopes is not None:
+                ac, am, at_ = derive_adobe_ints_from_scopes_csv(scopes)
                 await db.execute(
-                    "UPDATE api_keys SET scopes = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                    (scopes, key_id),
+                    """
+                    UPDATE api_keys SET scopes = ?, adobe_cloning_enabled = ?, adobe_metadata_enabled = ?,
+                    adobe_tracker_enabled = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?
+                    """,
+                    (scopes, ac, am, at_, key_id),
                 )
             if expires_at is not None:
                 await db.execute(
                     "UPDATE api_keys SET expires_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                     (expires_at, key_id),
-                )
-            if adobe_cloning_enabled is not None:
-                await db.execute(
-                    "UPDATE api_keys SET adobe_cloning_enabled = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                    (1 if adobe_cloning_enabled else 0, key_id),
-                )
-            if adobe_metadata_enabled is not None:
-                await db.execute(
-                    "UPDATE api_keys SET adobe_metadata_enabled = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                    (1 if adobe_metadata_enabled else 0, key_id),
-                )
-            if adobe_tracker_enabled is not None:
-                await db.execute(
-                    "UPDATE api_keys SET adobe_tracker_enabled = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                    (1 if adobe_tracker_enabled else 0, key_id),
                 )
             if account_ids is not None:
                 await db.execute("DELETE FROM api_key_accounts WHERE api_key_id = ?", (key_id,))
