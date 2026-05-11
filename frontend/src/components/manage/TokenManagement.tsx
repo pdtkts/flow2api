@@ -611,6 +611,17 @@ export function TokenManagement() {
     }
   }
 
+  const copyWorkerKeyId = async (prefix: string) => {
+    const t = String(prefix || "").trim()
+    if (!t) return
+    try {
+      await navigator.clipboard.writeText(t)
+      toast.success("Key id copied (public id only — not the full login secret)")
+    } catch {
+      toast.error("Copy failed")
+    }
+  }
+
   const generateDedicatedWorkerKey = async () => {
     if (!token || !workerKeyToken) return
     if (!workerKeyAllowCaptcha && !workerKeyAllowSessionRefresh) {
@@ -1106,11 +1117,24 @@ export function TokenManagement() {
                                 }))
                               }
                             />
-                            <p className="font-mono text-[11px] text-muted-foreground break-all pt-1">
-                              Key id: {w.worker_key_prefix}
-                              {!w.is_active ? " · inactive" : ""}
-                              {w.last_seen_at ? ` · last seen ${w.last_seen_at}` : ""}
-                            </p>
+                            <div className="flex flex-wrap items-start gap-2 pt-1">
+                              <p className="font-mono text-[11px] text-muted-foreground break-all min-w-0 flex-1">
+                                Key id: {w.worker_key_prefix}
+                                {!w.is_active ? " · inactive" : ""}
+                                {w.last_seen_at ? ` · last seen ${w.last_seen_at}` : ""}
+                              </p>
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                className="h-7 shrink-0 gap-1 px-2 text-[10px]"
+                                title="Copy key id (truncated public id from server — not enough to log in)"
+                                onClick={() => void copyWorkerKeyId(w.worker_key_prefix)}
+                              >
+                                <Copy className="h-3 w-3" />
+                                Copy id
+                              </Button>
+                            </div>
                             {w.worker_key_plaintext && String(w.worker_key_plaintext).trim() ? (
                               <div className="pt-2 space-y-1">
                                 <Label className="text-[11px] text-muted-foreground">Full registration key</Label>
@@ -1137,8 +1161,11 @@ export function TokenManagement() {
                               </div>
                             ) : (
                               <p className="text-[10px] text-muted-foreground pt-2">
-                                Full registration secret is not stored for this row (usually keys created before the server kept a copy).
-                                Generate a new registration key if you need to copy the secret again.
+                                The full login secret is not stored in the database for this worker (only a hash is kept for auth), so it
+                                cannot be shown or copied here. Use <strong className="text-foreground">Copy id</strong> above to copy the
+                                short public key id for reference. To get a copyable full secret, use{" "}
+                                <strong className="text-foreground">Generate registration key</strong> (new keys are stored for admin
+                                copy) or delete this row and create a new key.
                               </p>
                             )}
                           </div>
