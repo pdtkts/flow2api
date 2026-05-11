@@ -605,21 +605,21 @@ export function TokenManagement() {
     if (!t) return
     try {
       await navigator.clipboard.writeText(t)
-      toast.success("Registration key copied")
+      toast.success("Full registration key copied")
     } catch {
       toast.error("Copy failed")
     }
   }
 
-  const copyWorkerKeyId = async (prefix: string) => {
-    const t = String(prefix || "").trim()
-    if (!t) return
-    try {
-      await navigator.clipboard.writeText(t)
-      toast.success("Key id copied (public id only — not the full login secret)")
-    } catch {
-      toast.error("Copy failed")
+  const copyWorkerFullKeyOrExplain = (w: DedicatedExtensionWorkerRow) => {
+    const full = String(w.worker_key_plaintext || "").trim()
+    if (!full) {
+      toast.error(
+        "No full secret is stored for this worker (older key). Use “Generate registration key” below — new keys are saved so you can copy them anytime."
+      )
+      return
     }
+    void copyWorkerRowPlaintext(full)
   }
 
   const generateDedicatedWorkerKey = async () => {
@@ -1117,57 +1117,36 @@ export function TokenManagement() {
                                 }))
                               }
                             />
-                            <div className="flex flex-wrap items-start gap-2 pt-1">
-                              <p className="font-mono text-[11px] text-muted-foreground break-all min-w-0 flex-1">
-                                Key id: {w.worker_key_prefix}
-                                {!w.is_active ? " · inactive" : ""}
-                                {w.last_seen_at ? ` · last seen ${w.last_seen_at}` : ""}
-                              </p>
-                              <Button
-                                type="button"
-                                variant="outline"
-                                size="sm"
-                                className="h-7 shrink-0 gap-1 px-2 text-[10px]"
-                                title="Copy key id (truncated public id from server — not enough to log in)"
-                                onClick={() => void copyWorkerKeyId(w.worker_key_prefix)}
-                              >
-                                <Copy className="h-3 w-3" />
-                                Copy id
-                              </Button>
-                            </div>
-                            {w.worker_key_plaintext && String(w.worker_key_plaintext).trim() ? (
-                              <div className="pt-2 space-y-1">
-                                <Label className="text-[11px] text-muted-foreground">Full registration key</Label>
-                                <div className="flex gap-2">
-                                  <Textarea
-                                    readOnly
-                                    className="font-mono text-[11px] min-h-[56px] py-1.5"
-                                    value={String(w.worker_key_plaintext).trim()}
-                                  />
-                                  <Button
-                                    type="button"
-                                    variant="outline"
-                                    size="icon"
-                                    className="h-8 w-8 shrink-0"
-                                    title="Copy full key"
-                                    onClick={() => void copyWorkerRowPlaintext(String(w.worker_key_plaintext))}
-                                  >
-                                    <Copy className="h-3.5 w-3.5" />
-                                  </Button>
-                                </div>
-                                <p className="text-[10px] text-muted-foreground">
-                                  Stored for admin display only — protect database backups like any other secret.
-                                </p>
+                            <p className="font-mono text-[11px] text-muted-foreground break-all pt-1">
+                              Key id: {w.worker_key_prefix}
+                              {!w.is_active ? " · inactive" : ""}
+                              {w.last_seen_at ? ` · last seen ${w.last_seen_at}` : ""}
+                            </p>
+                            <div className="pt-2 space-y-1">
+                              <Label className="text-[11px] text-muted-foreground">Registration key (full secret)</Label>
+                              <div className="flex gap-2">
+                                <Textarea
+                                  readOnly
+                                  className="font-mono text-[11px] min-h-[56px] py-1.5"
+                                  value={String(w.worker_key_plaintext || "").trim()}
+                                  placeholder="Not stored for this worker — generate a new key below"
+                                />
+                                <Button
+                                  type="button"
+                                  variant="outline"
+                                  size="icon"
+                                  className="h-8 w-8 shrink-0 mt-0.5"
+                                  title={
+                                    String(w.worker_key_plaintext || "").trim()
+                                      ? "Copy full registration key"
+                                      : "No full key on file — tap for instructions"
+                                  }
+                                  onClick={() => copyWorkerFullKeyOrExplain(w)}
+                                >
+                                  <Copy className="h-3.5 w-3.5" />
+                                </Button>
                               </div>
-                            ) : (
-                              <p className="text-[10px] text-muted-foreground pt-2">
-                                The full login secret is not stored in the database for this worker (only a hash is kept for auth), so it
-                                cannot be shown or copied here. Use <strong className="text-foreground">Copy id</strong> above to copy the
-                                short public key id for reference. To get a copyable full secret, use{" "}
-                                <strong className="text-foreground">Generate registration key</strong> (new keys are stored for admin
-                                copy) or delete this row and create a new key.
-                              </p>
-                            )}
+                            </div>
                           </div>
                           <div className="flex flex-col gap-1 shrink-0">
                             <Button
