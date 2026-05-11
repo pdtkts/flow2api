@@ -559,6 +559,17 @@ export function TokenManagement() {
     }
   }
 
+  const copyStoredWorkerSecret = async (secret: string | null | undefined) => {
+    const t = String(secret ?? "").trim()
+    if (!t) return
+    try {
+      await navigator.clipboard.writeText(t)
+      toast.success("Worker key copied")
+    } catch {
+      toast.error("Copy failed")
+    }
+  }
+
   const saveDedicatedWorkerRow = async (workerId: number) => {
     if (!token || !workerKeyToken) return
     const draft = workerRowDrafts[workerId]
@@ -1022,8 +1033,9 @@ export function TokenManagement() {
             <DialogDescription>
               For token #{workerKeyToken?.id}
               {workerKeyToken?.email ? ` (${workerKeyToken.email})` : ""}. Paste the generated key into the Chrome extension
-              <strong className="font-medium"> Worker</strong> tab. The full secret is shown only once — store it safely. The list
-              below shows the public key prefix only (the full secret cannot be retrieved from the server).
+              <strong className="font-medium"> Worker</strong> tab. After generation, the full key is also saved for admin viewing
+              below (treat the database like a password manager — protect backups). Keys created before this feature may show “not on
+              file”; generate a new key to get a stored copy.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
@@ -1093,6 +1105,33 @@ export function TokenManagement() {
                               {!w.is_active ? " · inactive" : ""}
                               {w.last_seen_at ? ` · last seen ${w.last_seen_at}` : ""}
                             </p>
+                            {w.worker_registration_secret ? (
+                              <div className="pt-2 space-y-1">
+                                <Label className="text-[11px] text-muted-foreground">Full registration key</Label>
+                                <div className="flex gap-2 items-start">
+                                  <Textarea
+                                    readOnly
+                                    className="font-mono text-[11px] min-h-[56px] py-1.5 max-w-full"
+                                    value={w.worker_registration_secret}
+                                  />
+                                  <Button
+                                    type="button"
+                                    variant="outline"
+                                    size="icon"
+                                    className="shrink-0 h-8 w-8"
+                                    onClick={() => void copyStoredWorkerSecret(w.worker_registration_secret)}
+                                    title="Copy full key"
+                                  >
+                                    <Copy className="h-3.5 w-3.5" />
+                                  </Button>
+                                </div>
+                              </div>
+                            ) : (
+                              <p className="text-[11px] text-muted-foreground pt-2 leading-relaxed">
+                                Full key not stored for this row (usually keys created before the server kept a copy). Generate a new
+                                registration key if you need to copy the secret again.
+                              </p>
+                            )}
                           </div>
                           <div className="flex flex-col gap-1 shrink-0">
                             <Button

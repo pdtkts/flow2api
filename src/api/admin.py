@@ -2397,6 +2397,7 @@ async def create_dedicated_extension_worker(
         route_key=(request.route_key or "").strip() or None,
         allow_captcha=bool(request.allow_captcha),
         allow_session_refresh=bool(request.allow_session_refresh),
+        worker_registration_secret=worker_key,
     )
     worker = await db.get_dedicated_extension_worker(worker_id)
     return {"success": True, "worker": worker, "worker_registration_key": worker_key}

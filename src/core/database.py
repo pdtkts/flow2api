@@ -570,6 +570,7 @@ class Database:
                         last_error TEXT,
                         allow_captcha INTEGER NOT NULL DEFAULT 1,
                         allow_session_refresh INTEGER NOT NULL DEFAULT 1,
+                        worker_registration_secret TEXT,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         FOREIGN KEY (token_id) REFERENCES tokens(id)
@@ -937,6 +938,7 @@ class Database:
                         print(f"  ✗ Failed to add column 'flow_project_id' to cache_files: {e}")
 
             await self._ensure_dedicated_extension_worker_capability_columns(db)
+            await self._ensure_dedicated_extension_worker_secret_column(db)
 
             # ========== Step 3: Ensure all config tables have default rows ==========
             # Note: This will NOT overwrite existing config rows
@@ -1334,6 +1336,7 @@ class Database:
                     last_error TEXT,
                     allow_captcha INTEGER NOT NULL DEFAULT 1,
                     allow_session_refresh INTEGER NOT NULL DEFAULT 1,
+                    worker_registration_secret TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (token_id) REFERENCES tokens(id)
@@ -1372,6 +1375,7 @@ class Database:
             await self._ensure_api_key_ownership_columns(db)
             await self._ensure_task_async_columns(db)
             await self._ensure_dedicated_extension_worker_capability_columns(db)
+            await self._ensure_dedicated_extension_worker_secret_column(db)
 
             # Create indexes
             await db.execute("CREATE INDEX IF NOT EXISTS idx_task_id ON tasks(task_id)")
@@ -1423,6 +1427,22 @@ class Database:
                         print(f"  ✗ Failed to add column '{col_name}' to dedicated_extension_workers: {e}")
         except Exception as e:
             print(f"  ✗ dedicated_extension_workers capability column migration failed: {e}")
+
+    async def _ensure_dedicated_extension_worker_secret_column(self, db) -> None:
+        """Store full worker registration secret for admin reveal (nullable for keys created before this column)."""
+        try:
+            if not await self._table_exists(db, "dedicated_extension_workers"):
+                return
+            if not await self._column_exists(db, "dedicated_extension_workers", "worker_registration_secret"):
+                try:
+                    await db.execute(
+                        "ALTER TABLE dedicated_extension_workers ADD COLUMN worker_registration_secret TEXT"
+                    )
+                    print("  ✓ Added column 'worker_registration_secret' to dedicated_extension_workers table")
+                except Exception as e:
+                    print(f"  ✗ Failed to add column 'worker_registration_secret' to dedicated_extension_workers: {e}")
+        except Exception as e:
+            print(f"  ✗ dedicated_extension_workers secret column migration failed: {e}")
 
     async def _ensure_api_key_ownership_columns(self, db):
         """Add api_key_id to core tables when upgrading from older schemas (before indexes on those columns)."""
@@ -4632,14 +4652,15 @@ class Database:
         route_key: Optional[str] = None,
         allow_captcha: bool = True,
         allow_session_refresh: bool = True,
+        worker_registration_secret: Optional[str] = None,
     ) -> int:
         async with self._connect(write=True) as db:
             cursor = await db.execute(
                 """
                 INSERT INTO dedicated_extension_workers (
                     worker_key_prefix, worker_key_hash, label, token_id, route_key,
-                    allow_captcha, allow_session_refresh
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    allow_captcha, allow_session_refresh, worker_registration_secret
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     (worker_key_prefix or "").strip(),
@@ -4649,6 +4670,7 @@ class Database:
                     (route_key or "").strip() or None,
                     1 if allow_captcha else 0,
                     1 if allow_session_refresh else 0,
+                    (worker_registration_secret or "").strip() or None,
                 ),
             )
             await db.commit()
