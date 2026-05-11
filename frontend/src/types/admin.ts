@@ -46,6 +46,8 @@ export interface DedicatedExtensionWorkerRow {
   last_seen_at?: string | null
   last_instance_id?: string | null
   token_email?: string | null
+  allow_captcha?: boolean | number | null
+  allow_session_refresh?: boolean | number | null
 }
 
 export interface CreateDedicatedWorkerResponse {

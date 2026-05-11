@@ -568,6 +568,8 @@ class Database:
                         is_active BOOLEAN DEFAULT 1,
                         last_seen_at TIMESTAMP,
                         last_error TEXT,
+                        allow_captcha INTEGER NOT NULL DEFAULT 1,
+                        allow_session_refresh INTEGER NOT NULL DEFAULT 1,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         FOREIGN KEY (token_id) REFERENCES tokens(id)
@@ -933,6 +935,8 @@ class Database:
                         print("  ✓ Added column 'flow_project_id' to cache_files table")
                     except Exception as e:
                         print(f"  ✗ Failed to add column 'flow_project_id' to cache_files: {e}")
+
+            await self._ensure_dedicated_extension_worker_capability_columns(db)
 
             # ========== Step 3: Ensure all config tables have default rows ==========
             # Note: This will NOT overwrite existing config rows
@@ -1328,6 +1332,8 @@ class Database:
                     is_active BOOLEAN DEFAULT 1,
                     last_seen_at TIMESTAMP,
                     last_error TEXT,
+                    allow_captcha INTEGER NOT NULL DEFAULT 1,
+                    allow_session_refresh INTEGER NOT NULL DEFAULT 1,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (token_id) REFERENCES tokens(id)
@@ -1365,6 +1371,7 @@ class Database:
             # Existing DBs: tables were created before api_key_id; CREATE IF NOT EXISTS does not add columns.
             await self._ensure_api_key_ownership_columns(db)
             await self._ensure_task_async_columns(db)
+            await self._ensure_dedicated_extension_worker_capability_columns(db)
 
             # Create indexes
             await db.execute("CREATE INDEX IF NOT EXISTS idx_task_id ON tasks(task_id)")
@@ -1396,6 +1403,26 @@ class Database:
             await db.execute("CREATE INDEX IF NOT EXISTS idx_token_stats_token_id ON token_stats(token_id)")
 
             await db.commit()
+
+    async def _ensure_dedicated_extension_worker_capability_columns(self, db) -> None:
+        """Add allow_captcha / allow_session_refresh when upgrading older dedicated_extension_workers schemas."""
+        try:
+            if not await self._table_exists(db, "dedicated_extension_workers"):
+                return
+            for col_name, col_def in (
+                ("allow_captcha", "INTEGER NOT NULL DEFAULT 1"),
+                ("allow_session_refresh", "INTEGER NOT NULL DEFAULT 1"),
+            ):
+                if not await self._column_exists(db, "dedicated_extension_workers", col_name):
+                    try:
+                        await db.execute(
+                            f"ALTER TABLE dedicated_extension_workers ADD COLUMN {col_name} {col_def}"
+                        )
+                        print(f"  ✓ Added column '{col_name}' to dedicated_extension_workers table")
+                    except Exception as e:
+                        print(f"  ✗ Failed to add column '{col_name}' to dedicated_extension_workers: {e}")
+        except Exception as e:
+            print(f"  ✗ dedicated_extension_workers capability column migration failed: {e}")
 
     async def _ensure_api_key_ownership_columns(self, db):
         """Add api_key_id to core tables when upgrading from older schemas (before indexes on those columns)."""
@@ -4603,13 +4630,16 @@ class Database:
         label: str = "",
         token_id: Optional[int] = None,
         route_key: Optional[str] = None,
+        allow_captcha: bool = True,
+        allow_session_refresh: bool = True,
     ) -> int:
         async with self._connect(write=True) as db:
             cursor = await db.execute(
                 """
                 INSERT INTO dedicated_extension_workers (
-                    worker_key_prefix, worker_key_hash, label, token_id, route_key
-                ) VALUES (?, ?, ?, ?, ?)
+                    worker_key_prefix, worker_key_hash, label, token_id, route_key,
+                    allow_captcha, allow_session_refresh
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     (worker_key_prefix or "").strip(),
@@ -4617,6 +4647,8 @@ class Database:
                     (label or "").strip(),
                     int(token_id) if token_id is not None else None,
                     (route_key or "").strip() or None,
+                    1 if allow_captcha else 0,
+                    1 if allow_session_refresh else 0,
                 ),
             )
             await db.commit()
@@ -4634,12 +4666,20 @@ class Database:
         last_error: Optional[str] = None,
         mark_seen: bool = False,
         clear_token_binding: bool = False,
+        allow_captcha: Optional[bool] = None,
+        allow_session_refresh: Optional[bool] = None,
     ) -> None:
         updates: list[str] = ["updated_at = CURRENT_TIMESTAMP"]
         values: list[Any] = []
         if label is not None:
             updates.append("label = ?")
             values.append((label or "").strip())
+        if allow_captcha is not None:
+            updates.append("allow_captcha = ?")
+            values.append(1 if allow_captcha else 0)
+        if allow_session_refresh is not None:
+            updates.append("allow_session_refresh = ?")
+            values.append(1 if allow_session_refresh else 0)
         if token_id is not None:
             updates.append("token_id = ?")
             values.append(int(token_id))

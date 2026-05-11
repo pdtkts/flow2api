@@ -73,6 +73,9 @@ const runtimeState = {
     recentGenerationJobs: [],
     generationInFlight: false,
     generationLastPollFallbackReason: "",
+    /** Dedicated worker capabilities from server register_ack (end-user mode: both true). */
+    allowCaptcha: true,
+    allowSessionRefresh: true,
 };
 
 function inferConnectionMode(stored) {
@@ -523,6 +526,8 @@ function resetRuntimeStatePartial() {
     runtimeState.recentGenerationJobs = [];
     runtimeState.generationInFlight = false;
     runtimeState.generationLastPollFallbackReason = "";
+    runtimeState.allowCaptcha = true;
+    runtimeState.allowSessionRefresh = true;
 }
 
 async function closeWorkerTabIfAny() {
@@ -1238,6 +1243,10 @@ async function connectWS() {
             runtimeState.managedApiKeyId = String(data.managed_api_key_id || "");
             runtimeState.dedicatedWorkerId = String(data.dedicated_worker_id || "");
             runtimeState.dedicatedTokenId = String(data.dedicated_token_id || "");
+            const ac = data.allow_captcha;
+            const ar = data.allow_session_refresh;
+            runtimeState.allowCaptcha = ac !== false && ac !== 0 && ac !== "0";
+            runtimeState.allowSessionRefresh = ar !== false && ar !== 0 && ar !== "0";
             if (ackStatus === "error") {
                 runtimeState.wsStatus = "open_register_error";
                 runtimeState.lastError = ackError || "register_failed";
@@ -1254,7 +1263,11 @@ async function connectWS() {
                     "managed_api_key_id=",
                     runtimeState.managedApiKeyId || "-",
                     "binding_source=",
-                    runtimeState.bindingSource || "-"
+                    runtimeState.bindingSource || "-",
+                    "allowCaptcha=",
+                    runtimeState.allowCaptcha,
+                    "allowSessionRefresh=",
+                    runtimeState.allowSessionRefresh
                 );
                 stopWorkerSessionRefreshScheduler();
             }
@@ -1315,6 +1328,19 @@ async function connectWS() {
 }
 
 async function handleGetToken(data) {
+    if (runtimeState.connectionMode === "worker" && runtimeState.allowCaptcha === false) {
+        if (ws && ws.readyState === WebSocket.OPEN && data.req_id) {
+            ws.send(
+                JSON.stringify({
+                    req_id: data.req_id,
+                    status: "error",
+                    error: "captcha_disabled_for_worker_key",
+                })
+            );
+        }
+        pushEvent("get_token_blocked", "Captcha disabled for this worker key", "warn");
+        return;
+    }
     const action = data.action || "IMAGE_GENERATION";
     const result = await generateTokenForCaptcha(action);
     recordCaptchaJobCompletion(data.req_id, action, result.success, result.error || "");
@@ -1379,6 +1405,19 @@ async function warmupLabsForSessionRefresh() {
 }
 
 async function handleRefreshSessionToken(data) {
+    if (runtimeState.connectionMode === "worker" && runtimeState.allowSessionRefresh === false) {
+        if (ws && ws.readyState === WebSocket.OPEN && data && data.req_id) {
+            ws.send(
+                JSON.stringify({
+                    req_id: data.req_id,
+                    status: "error",
+                    error: "session_refresh_disabled_for_worker_key",
+                })
+            );
+        }
+        pushEvent("refresh_st_blocked", "Session refresh disabled for this worker key", "warn");
+        return;
+    }
     await performSessionRefresh({ reason: "server_request", reqId: data && data.req_id ? data.req_id : null });
 }
 

@@ -62,6 +62,12 @@ function formatExpiryDisplay(atExpires: string | null | undefined): ReactNode {
   )
 }
 
+function asDedicatedWorkerBool(v: unknown, defaultTrue = true): boolean {
+  if (v === undefined || v === null) return defaultTrue
+  if (v === false || v === 0 || v === "0") return false
+  return true
+}
+
 function accountTierBadge(tier: string | null | undefined) {
   if (!tier || tier === "PAYGATE_TIER_NOT_PAID")
     return <span className="inline-flex rounded px-2 py-0.5 text-xs bg-muted text-muted-foreground">Free</span>
@@ -129,6 +135,12 @@ export function TokenManagement() {
   const [workerKeyList, setWorkerKeyList] = useState<DedicatedExtensionWorkerRow[]>([])
   const [workerKeyListLoading, setWorkerKeyListLoading] = useState(false)
   const [workerKeyDeletingId, setWorkerKeyDeletingId] = useState<number | null>(null)
+  const [workerKeyAllowCaptcha, setWorkerKeyAllowCaptcha] = useState(true)
+  const [workerKeyAllowSessionRefresh, setWorkerKeyAllowSessionRefresh] = useState(true)
+  const [workerRowDrafts, setWorkerRowDrafts] = useState<
+    Record<number, { label: string; allow_captcha: boolean; allow_session_refresh: boolean }>
+  >({})
+  const [workerRowSavingId, setWorkerRowSavingId] = useState<number | null>(null)
 
   const loadStats = useCallback(async () => {
     if (!token) return
@@ -457,9 +469,20 @@ export function TokenManagement() {
       const { ok, data } = await adminJson<ListDedicatedWorkersResponse>("/api/admin/dedicated-extension/workers", token)
       if (!ok || !data?.workers) {
         setWorkerKeyList([])
+        setWorkerRowDrafts({})
         return
       }
-      setWorkerKeyList(data.workers.filter((w) => w.token_id === tid))
+      const filtered = data.workers.filter((w) => w.token_id === tid)
+      setWorkerKeyList(filtered)
+      const drafts: Record<number, { label: string; allow_captcha: boolean; allow_session_refresh: boolean }> = {}
+      for (const w of filtered) {
+        drafts[w.id] = {
+          label: (w.label ?? "").trim(),
+          allow_captcha: asDedicatedWorkerBool(w.allow_captcha),
+          allow_session_refresh: asDedicatedWorkerBool(w.allow_session_refresh),
+        }
+      }
+      setWorkerRowDrafts(drafts)
     } catch {
       setWorkerKeyList([])
     } finally {
@@ -473,6 +496,8 @@ export function TokenManagement() {
     setWorkerKeyLabel(baseLabel ? `Worker: ${baseLabel}` : `Worker: ${t.id}`)
     setWorkerKeyRouteKey((t.extension_route_key || "").trim())
     setWorkerKeyGenerated(null)
+    setWorkerKeyAllowCaptcha(true)
+    setWorkerKeyAllowSessionRefresh(true)
     setWorkerKeyOpen(true)
     void loadDedicatedWorkersForToken(t.id)
   }
@@ -483,7 +508,9 @@ export function TokenManagement() {
       setWorkerKeyToken(null)
       setWorkerKeyGenerated(null)
       setWorkerKeyList([])
+      setWorkerRowDrafts({})
       setWorkerKeyDeletingId(null)
+      setWorkerRowSavingId(null)
     }
   }
 
@@ -532,14 +559,60 @@ export function TokenManagement() {
     }
   }
 
+  const saveDedicatedWorkerRow = async (workerId: number) => {
+    if (!token || !workerKeyToken) return
+    const draft = workerRowDrafts[workerId]
+    if (!draft) return
+    if (!draft.allow_captcha && !draft.allow_session_refresh) {
+      toast.error("At least one of Captcha or Refresh AT/ST must stay enabled")
+      return
+    }
+    setWorkerRowSavingId(workerId)
+    try {
+      const { ok, status, data } = await adminJson<{ success?: boolean; detail?: string }>(
+        `/api/admin/dedicated-extension/workers/${workerId}`,
+        token,
+        {
+          method: "PATCH",
+          body: JSON.stringify({
+            label: draft.label.trim() || `Worker: ${workerId}`,
+            allow_captcha: draft.allow_captcha,
+            allow_session_refresh: draft.allow_session_refresh,
+          }),
+        }
+      )
+      if (ok && data?.success) {
+        toast.success("Worker updated — reconnect extension to apply capability changes.")
+        await loadDedicatedWorkersForToken(workerKeyToken.id)
+      } else {
+        const msg = typeof data?.detail === "string" ? data.detail : `Failed (${status})`
+        toast.error(msg)
+      }
+    } finally {
+      setWorkerRowSavingId(null)
+    }
+  }
+
   const generateDedicatedWorkerKey = async () => {
     if (!token || !workerKeyToken) return
+    if (!workerKeyAllowCaptcha && !workerKeyAllowSessionRefresh) {
+      toast.error("Enable at least one of Captcha or Refresh AT/ST")
+      return
+    }
     setWorkerKeySaving(true)
     setWorkerKeyGenerated(null)
     try {
-      const body: { label: string; token_id: number; route_key?: string | null } = {
+      const body: {
+        label: string
+        token_id: number
+        route_key?: string | null
+        allow_captcha: boolean
+        allow_session_refresh: boolean
+      } = {
         label: workerKeyLabel.trim() || `Worker: ${workerKeyToken.id}`,
         token_id: workerKeyToken.id,
+        allow_captcha: workerKeyAllowCaptcha,
+        allow_session_refresh: workerKeyAllowSessionRefresh,
       }
       const rk = workerKeyRouteKey.trim()
       if (rk) body.route_key = rk
@@ -943,13 +1016,14 @@ export function TokenManagement() {
       </Dialog>
 
       <Dialog open={workerKeyOpen} onOpenChange={closeWorkerKeyDialog}>
-        <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
+        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>Extension worker key</DialogTitle>
             <DialogDescription>
               For token #{workerKeyToken?.id}
               {workerKeyToken?.email ? ` (${workerKeyToken.email})` : ""}. Paste the generated key into the Chrome extension
-              <strong className="font-medium"> Worker</strong> tab. The full secret is shown only once.
+              <strong className="font-medium"> Worker</strong> tab. The full secret is shown only once — store it safely. The list
+              below shows the public key prefix only (the full secret cannot be retrieved from the server).
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
@@ -966,6 +1040,28 @@ export function TokenManagement() {
                 placeholder="Leave empty if you only use dedicated worker binding"
               />
             </div>
+            <div className="rounded-md border bg-muted/40 p-3 space-y-2">
+              <p className="text-sm font-medium text-foreground">Capabilities for new key</p>
+              <label className="flex items-center gap-2 text-sm cursor-pointer">
+                <input
+                  type="checkbox"
+                  className="h-4 w-4 rounded border border-input"
+                  checked={workerKeyAllowCaptcha}
+                  onChange={(e) => setWorkerKeyAllowCaptcha(e.target.checked)}
+                />
+                <span>Captcha (reCAPTCHA / get_token)</span>
+              </label>
+              <label className="flex items-center gap-2 text-sm cursor-pointer">
+                <input
+                  type="checkbox"
+                  className="h-4 w-4 rounded border border-input"
+                  checked={workerKeyAllowSessionRefresh}
+                  onChange={(e) => setWorkerKeyAllowSessionRefresh(e.target.checked)}
+                />
+                <span>Refresh AT/ST (session token via extension)</span>
+              </label>
+              <p className="text-xs text-muted-foreground">At least one must stay checked. Use captcha-only on untrusted machines.</p>
+            </div>
             <div className="rounded-md border bg-muted/40 p-3 text-sm text-muted-foreground">
               <p className="font-medium text-foreground mb-2">Workers already linked to this token</p>
               {workerKeyListLoading ? (
@@ -973,34 +1069,90 @@ export function TokenManagement() {
               ) : workerKeyList.length === 0 ? (
                 <p className="text-xs">None yet. Generate a key below.</p>
               ) : (
-                <ul className="space-y-2 text-xs">
-                  {workerKeyList.map((w) => (
-                    <li
-                      key={w.id}
-                      className="flex flex-wrap items-center justify-between gap-2 rounded border border-border/60 bg-background px-2 py-1.5 font-mono"
-                    >
-                      <span className="min-w-0 break-all text-muted-foreground">
-                        #{w.id} {w.worker_key_prefix}
-                        {!w.is_active ? " (inactive)" : ""}
-                        {w.last_seen_at ? ` · last seen ${w.last_seen_at}` : ""}
-                      </span>
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="destructive"
-                        className="h-7 shrink-0 gap-1 px-2 text-[11px]"
-                        disabled={workerKeyDeletingId !== null || workerKeyListLoading}
-                        onClick={() => void deleteDedicatedWorkerForToken(w.id)}
-                      >
-                        {workerKeyDeletingId === w.id ? (
-                          <Loader2 className="h-3 w-3 animate-spin" />
-                        ) : (
-                          <Trash2 className="h-3 w-3" />
-                        )}
-                        Delete
-                      </Button>
-                    </li>
-                  ))}
+                <ul className="space-y-3 text-xs">
+                  {workerKeyList.map((w) => {
+                    const draft = workerRowDrafts[w.id]
+                    if (!draft) return null
+                    return (
+                      <li key={w.id} className="rounded border border-border/60 bg-background p-3 space-y-2">
+                        <div className="flex flex-wrap gap-2 justify-between items-start">
+                          <div className="space-y-1 min-w-0 flex-1">
+                            <Label className="text-[11px] text-muted-foreground">Name</Label>
+                            <Input
+                              className="h-8 text-sm font-normal"
+                              value={draft.label}
+                              onChange={(e) =>
+                                setWorkerRowDrafts((prev) => ({
+                                  ...prev,
+                                  [w.id]: { ...draft, label: e.target.value },
+                                }))
+                              }
+                            />
+                            <p className="font-mono text-[11px] text-muted-foreground break-all pt-1">
+                              Key id: {w.worker_key_prefix}
+                              {!w.is_active ? " · inactive" : ""}
+                              {w.last_seen_at ? ` · last seen ${w.last_seen_at}` : ""}
+                            </p>
+                          </div>
+                          <div className="flex flex-col gap-1 shrink-0">
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="secondary"
+                              className="h-8 text-[11px]"
+                              disabled={
+                                workerRowSavingId !== null || workerKeyDeletingId !== null || workerKeyListLoading
+                              }
+                              onClick={() => void saveDedicatedWorkerRow(w.id)}
+                            >
+                              {workerRowSavingId === w.id ? <Loader2 className="h-3 w-3 animate-spin" /> : "Save"}
+                            </Button>
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="destructive"
+                              className="h-8 gap-1 text-[11px]"
+                              disabled={workerKeyDeletingId !== null || workerKeyListLoading}
+                              onClick={() => void deleteDedicatedWorkerForToken(w.id)}
+                            >
+                              {workerKeyDeletingId === w.id ? <Loader2 className="h-3 w-3 animate-spin" /> : <Trash2 className="h-3 w-3" />}
+                              Delete
+                            </Button>
+                          </div>
+                        </div>
+                        <div className="flex flex-wrap gap-4 pt-1">
+                          <label className="flex items-center gap-2 text-xs cursor-pointer">
+                            <input
+                              type="checkbox"
+                              className="h-3.5 w-3.5 rounded border border-input"
+                              checked={draft.allow_captcha}
+                              onChange={(e) =>
+                                setWorkerRowDrafts((prev) => ({
+                                  ...prev,
+                                  [w.id]: { ...draft, allow_captcha: e.target.checked },
+                                }))
+                              }
+                            />
+                            Captcha
+                          </label>
+                          <label className="flex items-center gap-2 text-xs cursor-pointer">
+                            <input
+                              type="checkbox"
+                              className="h-3.5 w-3.5 rounded border border-input"
+                              checked={draft.allow_session_refresh}
+                              onChange={(e) =>
+                                setWorkerRowDrafts((prev) => ({
+                                  ...prev,
+                                  [w.id]: { ...draft, allow_session_refresh: e.target.checked },
+                                }))
+                              }
+                            />
+                            Refresh AT/ST
+                          </label>
+                        </div>
+                      </li>
+                    )
+                  })}
                 </ul>
               )}
             </div>

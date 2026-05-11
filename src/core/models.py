@@ -327,6 +327,8 @@ class DedicatedExtensionWorker(BaseModel):
     is_active: bool = True
     last_seen_at: Optional[datetime] = None
     last_error: Optional[str] = None
+    allow_captcha: bool = True
+    allow_session_refresh: bool = True
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 

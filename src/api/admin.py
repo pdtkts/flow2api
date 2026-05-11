@@ -725,6 +725,8 @@ class DedicatedWorkerCreateRequest(BaseModel):
     label: str = ""
     token_id: Optional[int] = None
     route_key: Optional[str] = None
+    allow_captcha: bool = True
+    allow_session_refresh: bool = True
 
 
 class DedicatedWorkerUpdateRequest(BaseModel):
@@ -732,6 +734,8 @@ class DedicatedWorkerUpdateRequest(BaseModel):
     token_id: Optional[int] = None
     route_key: Optional[str] = None
     is_active: Optional[bool] = None
+    allow_captcha: Optional[bool] = None
+    allow_session_refresh: Optional[bool] = None
 
 
 class UpdateDebugConfigRequest(BaseModel):
@@ -2374,6 +2378,11 @@ async def create_dedicated_extension_worker(
     request: DedicatedWorkerCreateRequest,
     token: str = Depends(verify_admin_token),
 ):
+    if not request.allow_captcha and not request.allow_session_refresh:
+        raise HTTPException(
+            status_code=400,
+            detail="At least one of allow_captcha or allow_session_refresh must be true",
+        )
     token_id = int(request.token_id) if request.token_id is not None else None
     if token_id is not None:
         existing_token = await db.get_token(token_id)
@@ -2386,6 +2395,8 @@ async def create_dedicated_extension_worker(
         label=(request.label or "").strip(),
         token_id=token_id,
         route_key=(request.route_key or "").strip() or None,
+        allow_captcha=bool(request.allow_captcha),
+        allow_session_refresh=bool(request.allow_session_refresh),
     )
     worker = await db.get_dedicated_extension_worker(worker_id)
     return {"success": True, "worker": worker, "worker_registration_key": worker_key}
@@ -2404,12 +2415,23 @@ async def update_dedicated_extension_worker(
         token_obj = await db.get_token(int(request.token_id))
         if not token_obj:
             raise HTTPException(status_code=404, detail="Token not found")
+    cur_captcha = bool(int(existing.get("allow_captcha") or 1))
+    cur_refresh = bool(int(existing.get("allow_session_refresh") or 1))
+    next_captcha = cur_captcha if request.allow_captcha is None else bool(request.allow_captcha)
+    next_refresh = cur_refresh if request.allow_session_refresh is None else bool(request.allow_session_refresh)
+    if not next_captcha and not next_refresh:
+        raise HTTPException(
+            status_code=400,
+            detail="At least one of allow_captcha or allow_session_refresh must remain true",
+        )
     await db.update_dedicated_extension_worker(
         worker_id,
         label=request.label,
         token_id=request.token_id,
         route_key=request.route_key,
         is_active=request.is_active,
+        allow_captcha=request.allow_captcha,
+        allow_session_refresh=request.allow_session_refresh,
     )
     updated = await db.get_dedicated_extension_worker(worker_id)
     return {"success": True, "worker": updated}
