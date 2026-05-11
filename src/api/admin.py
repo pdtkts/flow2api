@@ -20,7 +20,7 @@ from urllib.parse import urlparse
 from curl_cffi.requests import AsyncSession
 from ..core.auth import AuthManager
 from ..core.api_key_manager import ApiKeyManager
-from ..core.database import Database
+from ..core.database import Database, _DEDICATED_WORKER_UPDATE_OMIT
 from ..core.config import config, get_yescaptcha_min_score, normalize_yescaptcha_task_type
 from ..core.models import GenerationConfig
 from ..core.monitoring import build_public_health_snapshot
@@ -2397,7 +2397,7 @@ async def create_dedicated_extension_worker(
         route_key=(request.route_key or "").strip() or None,
         allow_captcha=bool(request.allow_captcha),
         allow_session_refresh=bool(request.allow_session_refresh),
-        worker_registration_secret=worker_key,
+        worker_key_plaintext=worker_key.strip(),
     )
     worker = await db.get_dedicated_extension_worker(worker_id)
     return {"success": True, "worker": worker, "worker_registration_key": worker_key}
@@ -2425,14 +2425,15 @@ async def update_dedicated_extension_worker(
             status_code=400,
             detail="At least one of allow_captcha or allow_session_refresh must remain true",
         )
+    fs = request.model_fields_set
     await db.update_dedicated_extension_worker(
         worker_id,
-        label=request.label,
-        token_id=request.token_id,
-        route_key=request.route_key,
-        is_active=request.is_active,
-        allow_captcha=request.allow_captcha,
-        allow_session_refresh=request.allow_session_refresh,
+        label=request.label if "label" in fs else _DEDICATED_WORKER_UPDATE_OMIT,
+        token_id=request.token_id if "token_id" in fs else _DEDICATED_WORKER_UPDATE_OMIT,
+        route_key=request.route_key if "route_key" in fs else _DEDICATED_WORKER_UPDATE_OMIT,
+        is_active=request.is_active if "is_active" in fs else _DEDICATED_WORKER_UPDATE_OMIT,
+        allow_captcha=request.allow_captcha if "allow_captcha" in fs else _DEDICATED_WORKER_UPDATE_OMIT,
+        allow_session_refresh=request.allow_session_refresh if "allow_session_refresh" in fs else _DEDICATED_WORKER_UPDATE_OMIT,
     )
     updated = await db.get_dedicated_extension_worker(worker_id)
     return {"success": True, "worker": updated}

@@ -10,6 +10,15 @@ from .config import DEFAULT_YESCAPTCHA_TASK_TYPE, normalize_yescaptcha_task_type
 from .models import Token, TokenStats, Task, RequestLog, AdminConfig, ProxyConfig, GenerationConfig, CacheConfig, Project, CaptchaConfig, PluginConfig, CallLogicConfig, DebugConfig
 
 
+class _DedicatedWorkerUpdateOmit:
+    """Sentinel: PATCH / internal call did not supply this column — skip in UPDATE."""
+
+    __slots__ = ()
+
+
+_DEDICATED_WORKER_UPDATE_OMIT = _DedicatedWorkerUpdateOmit()
+
+
 def derive_adobe_ints_from_scopes_csv(scopes_csv: str) -> Tuple[int, int, int]:
     """Sync api_keys.adobe_* columns from comma-separated scope tokens (single source: scopes)."""
     parts = {x.strip() for x in (scopes_csv or "").split(",") if x.strip()}
@@ -570,7 +579,7 @@ class Database:
                         last_error TEXT,
                         allow_captcha INTEGER NOT NULL DEFAULT 1,
                         allow_session_refresh INTEGER NOT NULL DEFAULT 1,
-                        worker_registration_secret TEXT,
+                        worker_key_plaintext TEXT,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         FOREIGN KEY (token_id) REFERENCES tokens(id)
@@ -938,7 +947,6 @@ class Database:
                         print(f"  ✗ Failed to add column 'flow_project_id' to cache_files: {e}")
 
             await self._ensure_dedicated_extension_worker_capability_columns(db)
-            await self._ensure_dedicated_extension_worker_secret_column(db)
 
             # ========== Step 3: Ensure all config tables have default rows ==========
             # Note: This will NOT overwrite existing config rows
@@ -1336,7 +1344,7 @@ class Database:
                     last_error TEXT,
                     allow_captcha INTEGER NOT NULL DEFAULT 1,
                     allow_session_refresh INTEGER NOT NULL DEFAULT 1,
-                    worker_registration_secret TEXT,
+                    worker_key_plaintext TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (token_id) REFERENCES tokens(id)
@@ -1375,7 +1383,6 @@ class Database:
             await self._ensure_api_key_ownership_columns(db)
             await self._ensure_task_async_columns(db)
             await self._ensure_dedicated_extension_worker_capability_columns(db)
-            await self._ensure_dedicated_extension_worker_secret_column(db)
 
             # Create indexes
             await db.execute("CREATE INDEX IF NOT EXISTS idx_task_id ON tasks(task_id)")
@@ -1416,6 +1423,7 @@ class Database:
             for col_name, col_def in (
                 ("allow_captcha", "INTEGER NOT NULL DEFAULT 1"),
                 ("allow_session_refresh", "INTEGER NOT NULL DEFAULT 1"),
+                ("worker_key_plaintext", "TEXT"),
             ):
                 if not await self._column_exists(db, "dedicated_extension_workers", col_name):
                     try:
@@ -1427,22 +1435,6 @@ class Database:
                         print(f"  ✗ Failed to add column '{col_name}' to dedicated_extension_workers: {e}")
         except Exception as e:
             print(f"  ✗ dedicated_extension_workers capability column migration failed: {e}")
-
-    async def _ensure_dedicated_extension_worker_secret_column(self, db) -> None:
-        """Store full worker registration secret for admin reveal (nullable for keys created before this column)."""
-        try:
-            if not await self._table_exists(db, "dedicated_extension_workers"):
-                return
-            if not await self._column_exists(db, "dedicated_extension_workers", "worker_registration_secret"):
-                try:
-                    await db.execute(
-                        "ALTER TABLE dedicated_extension_workers ADD COLUMN worker_registration_secret TEXT"
-                    )
-                    print("  ✓ Added column 'worker_registration_secret' to dedicated_extension_workers table")
-                except Exception as e:
-                    print(f"  ✗ Failed to add column 'worker_registration_secret' to dedicated_extension_workers: {e}")
-        except Exception as e:
-            print(f"  ✗ dedicated_extension_workers secret column migration failed: {e}")
 
     async def _ensure_api_key_ownership_columns(self, db):
         """Add api_key_id to core tables when upgrading from older schemas (before indexes on those columns)."""
@@ -4652,14 +4644,14 @@ class Database:
         route_key: Optional[str] = None,
         allow_captcha: bool = True,
         allow_session_refresh: bool = True,
-        worker_registration_secret: Optional[str] = None,
+        worker_key_plaintext: Optional[str] = None,
     ) -> int:
         async with self._connect(write=True) as db:
             cursor = await db.execute(
                 """
                 INSERT INTO dedicated_extension_workers (
                     worker_key_prefix, worker_key_hash, label, token_id, route_key,
-                    allow_captcha, allow_session_refresh, worker_registration_secret
+                    allow_captcha, allow_session_refresh, worker_key_plaintext
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
@@ -4670,7 +4662,7 @@ class Database:
                     (route_key or "").strip() or None,
                     1 if allow_captcha else 0,
                     1 if allow_session_refresh else 0,
-                    (worker_registration_secret or "").strip() or None,
+                    (worker_key_plaintext or "").strip() or None,
                 ),
             )
             await db.commit()
@@ -4680,37 +4672,37 @@ class Database:
         self,
         worker_id: int,
         *,
-        label: Optional[str] = None,
-        token_id: Optional[int] = None,
-        route_key: Optional[str] = None,
-        is_active: Optional[bool] = None,
+        label: Any = _DEDICATED_WORKER_UPDATE_OMIT,
+        token_id: Any = _DEDICATED_WORKER_UPDATE_OMIT,
+        route_key: Any = _DEDICATED_WORKER_UPDATE_OMIT,
+        is_active: Any = _DEDICATED_WORKER_UPDATE_OMIT,
         last_instance_id: Optional[str] = None,
         last_error: Optional[str] = None,
         mark_seen: bool = False,
         clear_token_binding: bool = False,
-        allow_captcha: Optional[bool] = None,
-        allow_session_refresh: Optional[bool] = None,
+        allow_captcha: Any = _DEDICATED_WORKER_UPDATE_OMIT,
+        allow_session_refresh: Any = _DEDICATED_WORKER_UPDATE_OMIT,
     ) -> None:
         updates: list[str] = ["updated_at = CURRENT_TIMESTAMP"]
         values: list[Any] = []
-        if label is not None:
+        if label is not _DEDICATED_WORKER_UPDATE_OMIT:
             updates.append("label = ?")
             values.append((label or "").strip())
-        if allow_captcha is not None:
+        if allow_captcha is not _DEDICATED_WORKER_UPDATE_OMIT:
             updates.append("allow_captcha = ?")
             values.append(1 if allow_captcha else 0)
-        if allow_session_refresh is not None:
+        if allow_session_refresh is not _DEDICATED_WORKER_UPDATE_OMIT:
             updates.append("allow_session_refresh = ?")
             values.append(1 if allow_session_refresh else 0)
-        if token_id is not None:
+        if token_id is not _DEDICATED_WORKER_UPDATE_OMIT and token_id is not None:
             updates.append("token_id = ?")
             values.append(int(token_id))
         elif clear_token_binding:
             updates.append("token_id = NULL")
-        if route_key is not None:
+        if route_key is not _DEDICATED_WORKER_UPDATE_OMIT:
             updates.append("route_key = ?")
             values.append((route_key or "").strip() or None)
-        if is_active is not None:
+        if is_active is not _DEDICATED_WORKER_UPDATE_OMIT:
             updates.append("is_active = ?")
             values.append(bool(is_active))
         if last_instance_id is not None:

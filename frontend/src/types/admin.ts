@@ -48,8 +48,8 @@ export interface DedicatedExtensionWorkerRow {
   token_email?: string | null
   allow_captcha?: boolean | number | null
   allow_session_refresh?: boolean | number | null
-  /** Full wk_… secret when stored server-side (null for keys created before storage upgrade). */
-  worker_registration_secret?: string | null
+  /** Full registration secret when stored at creation (admin-only; protect DB backups). */
+  worker_key_plaintext?: string | null
 }
 
 export interface CreateDedicatedWorkerResponse {

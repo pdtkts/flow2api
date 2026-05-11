@@ -329,7 +329,7 @@ class DedicatedExtensionWorker(BaseModel):
     last_error: Optional[str] = None
     allow_captcha: bool = True
     allow_session_refresh: bool = True
-    worker_registration_secret: Optional[str] = None
+    worker_key_plaintext: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 

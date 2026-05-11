@@ -401,9 +401,13 @@ class ExtensionCaptchaService:
             conn.allow_session_refresh = bool(int(authenticated_worker.get("allow_session_refresh") or 1))
             try:
                 if self.db and hasattr(self.db, "update_dedicated_extension_worker"):
+                    rk = (conn.route_key or authenticated_worker.get("route_key") or "").strip() or None
+                    extra: Dict[str, Any] = {}
+                    if rk is not None:
+                        extra["route_key"] = rk
                     await self.db.update_dedicated_extension_worker(
                         conn.dedicated_worker_id,
-                        route_key=(conn.route_key or authenticated_worker.get("route_key") or None),
+                        **extra,
                         last_instance_id=conn.instance_id or None,
                         mark_seen=True,
                         last_error="",
@@ -765,9 +769,13 @@ class ExtensionCaptchaService:
                     conn.instance_id = (payload.get("instance_id") or conn.instance_id or "").strip()
                     if conn.dedicated_worker_id and self.db and hasattr(self.db, "update_dedicated_extension_worker"):
                         try:
+                            rk = (conn.route_key or "").strip() or None
+                            extra: Dict[str, Any] = {}
+                            if rk is not None:
+                                extra["route_key"] = rk
                             await self.db.update_dedicated_extension_worker(
                                 conn.dedicated_worker_id,
-                                route_key=conn.route_key or None,
+                                **extra,
                                 last_instance_id=conn.instance_id or None,
                                 mark_seen=True,
                                 last_error="",
