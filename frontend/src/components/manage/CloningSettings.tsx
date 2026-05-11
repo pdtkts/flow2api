@@ -23,7 +23,7 @@ const CLOUDFLARE_MODELS = [
 const PRESET_MODELS: Record<string, string[]> = {
   gemini_native: ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro", "gemini-1.5-flash", "gemini-1.5-pro"],
   openai: ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "gpt-4.1-mini", "gpt-4.1"],
-  openrouter: ["google/gemma-4-26b-a4b-it"],
+  openrouter: ["moonshotai/kimi-k2.6", "google/gemma-4-26b-a4b-it"],
   third_party_gemini: ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro", "gemini-1.5-flash", "gemini-1.5-pro"],
   cloudflare: CLOUDFLARE_MODELS
 }
