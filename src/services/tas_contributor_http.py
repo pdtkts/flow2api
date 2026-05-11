@@ -3,16 +3,32 @@ Direct HTTP client for tastracker.com contributor-search (no browser).
 
 Mirrors upstream secureHeaders / csr-token flow (webpack 7548).
 Used by TaskTrackerService and optionally scripts/fetch_contributor_tas.py.
+
+Contributor keywords enrichment (HAR / ContributorDataLoader, module ~3038):
+GET /api/contributor-search returns images[] with empty keywords and optional
+encodedEnrichment (Base64). XOR bytes with UTF-8(enrichmentKey), JSON-parse to
+a map keyed by asset id; each entry {d,k,c} merges into downloads, keywords,
+creatorId. Key matches the logged-in session user id (NextAuth).
 """
 
 from __future__ import annotations
 
+import base64
 import json
+import logging
+import os
+import re
 import time
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode
 
 from curl_cffi import requests as curl_requests
+
+logger = logging.getLogger(__name__)
+
+_UUID_RE = re.compile(
+    r"(?i)\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z"
+)
 
 HOST = "tastracker.com"
 BASE = f"https://{HOST}"
@@ -125,6 +141,153 @@ def looks_unauthorized(body: Any) -> bool:
         or ("please" in err and "log" in err)
         or "session expired" in err
     )
+
+
+def decode_tas_enrichment(encoded_b64: str, enrichment_key: str) -> Optional[Dict[str, Any]]:
+    """Base64 → XOR with UTF-8 key (repeating) → UTF-8 JSON object keyed by asset id."""
+    try:
+        raw = base64.b64decode(encoded_b64, validate=False)
+        key_bytes = enrichment_key.encode("utf-8")
+        if not key_bytes:
+            return None
+        kl = len(key_bytes)
+        out = bytes(raw[i] ^ key_bytes[i % kl] for i in range(len(raw)))
+        parsed = json.loads(out.decode("utf-8"))
+        return parsed if isinstance(parsed, dict) else None
+    except Exception:
+        return None
+
+
+def _apply_enrichment_patch(img: Dict[str, Any], patch: Dict[str, Any]) -> Dict[str, Any]:
+    out = dict(img)
+    if "d" in patch:
+        out["downloads"] = patch["d"]
+    if "k" in patch:
+        out["keywords"] = patch["k"]
+    if "c" in patch:
+        out["creatorId"] = patch["c"]
+    return out
+
+
+def merge_contributor_images(body: Dict[str, Any], enrichment_key: Optional[str]) -> List[Dict[str, Any]]:
+    """Merge encodedEnrichment into images; unchanged if blob or key missing or decode fails."""
+    imgs = body.get("images")
+    if not isinstance(imgs, list) or not imgs:
+        return list(imgs) if isinstance(imgs, list) else []
+
+    enc = str(body.get("encodedEnrichment") or "").strip()
+    key = (enrichment_key or "").strip()
+
+    if not enc:
+        return list(imgs)
+
+    if not key:
+        logger.warning(
+            "contributor-search has encodedEnrichment but no enrichment key; keywords left unchanged"
+        )
+        return [dict(row) if isinstance(row, dict) else row for row in imgs]
+
+    payload = decode_tas_enrichment(enc, key)
+    if payload is None:
+        logger.warning(
+            "contributor-search encodedEnrichment could not be decoded (wrong key or corrupt blob); "
+            "keywords left unchanged"
+        )
+        return [dict(row) if isinstance(row, dict) else row for row in imgs]
+
+    out: List[Dict[str, Any]] = []
+    for row in imgs:
+        if not isinstance(row, dict):
+            continue
+        rid = str(row.get("id") or row.get("assetId") or "").strip()
+        patch: Any = None
+        if rid:
+            patch = payload.get(rid)
+        if patch is None and row.get("id") is not None:
+            patch = payload.get(str(row.get("id")))
+        if patch is None and isinstance(row.get("id"), int):
+            patch = payload.get(row["id"])
+        if isinstance(patch, dict) and patch:
+            out.append(_apply_enrichment_patch(row, patch))
+        else:
+            out.append(dict(row))
+    return out
+
+
+def _uuid_string(value: Any) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    s = value.strip()
+    return s if _UUID_RE.match(s) else None
+
+
+def extract_enrichment_key_from_session_body(data: Any) -> Optional[str]:
+    """
+    NextAuth /api/auth/session: prefer user.id, user.sub, then top-level id/sub,
+    then depth-first search for a UUID-shaped string.
+    """
+    if not isinstance(data, dict):
+        return None
+    user = data.get("user")
+    if isinstance(user, dict):
+        for k in ("id", "sub", "userId"):
+            u = _uuid_string(user.get(k))
+            if u:
+                return u
+    for k in ("sub", "userId", "id"):
+        u = _uuid_string(data.get(k))
+        if u:
+            return u
+    stack: List[Any] = [data]
+    while stack:
+        cur = stack.pop()
+        if isinstance(cur, dict):
+            for v in cur.values():
+                if isinstance(v, str):
+                    u = _uuid_string(v)
+                    if u:
+                        return u
+                elif isinstance(v, (dict, list)):
+                    stack.append(v)
+        elif isinstance(cur, list):
+            stack.extend(cur)
+    return None
+
+
+def fetch_enrichment_key_from_session(
+    cookie: str,
+    device_id: str,
+    impersonate: str,
+) -> Tuple[Optional[str], str]:
+    """GET /api/auth/session with contributor-style device headers."""
+    headers: Dict[str, str] = {
+        "Accept": "*/*",
+        "Cookie": cookie,
+        "Referer": f"{BASE}/",
+        "User-Agent": DEFAULT_UA,
+        "x-device-id": device_id,
+        "X-Device-Id": device_id,
+    }
+    try:
+        r = request_with_fallback(
+            "get",
+            f"{BASE}/api/auth/session",
+            headers=headers,
+            impersonate=impersonate,
+            timeout=60,
+        )
+    except Exception as exc:
+        return None, str(exc)
+    if not r.ok:
+        return None, f"session HTTP {r.status_code}"
+    try:
+        data = r.json()
+    except Exception:
+        return None, "session response is not JSON"
+    key = extract_enrichment_key_from_session_body(data)
+    if not key:
+        return None, "session JSON had no UUID-shaped user id"
+    return key, ""
 
 
 class CsrTokenCache:
@@ -282,14 +445,22 @@ def fetch_contributor_raw_images(
     tls_profile: str,
     csr_cache: CsrTokenCache,
     csr_token_override: Optional[str] = None,
+    enrichment_key: Optional[str] = None,
 ) -> Tuple[List[Dict[str, Any]], str]:
     """
     Fetch all pages; return flattened list of raw image dicts from API, or ([], error).
+
+    enrichment_key: explicit XOR key; else TAS_ENRICHMENT_KEY env; else response
+    enrichmentKey; else one GET /api/auth/session (cached for the run).
     """
     if not pages:
         return [], "no pages"
     impersonate = (tls_profile or "").strip() or DEFAULT_TLS_PROFILE
     csr_referer = build_referer(search_id, order, pages[0], generative_ai, content_type)
+    resolved_key = (enrichment_key or "").strip() or None
+    if not resolved_key:
+        resolved_key = (os.environ.get("TAS_ENRICHMENT_KEY") or "").strip() or None
+    session_fetched = False
     all_images: List[Dict[str, Any]] = []
     for page in pages:
         csr, err = ensure_csr_token(
@@ -312,7 +483,24 @@ def fetch_contributor_raw_images(
         if err:
             return [], f"page={page}: {err}"
         assert body is not None
-        imgs = body.get("images")
-        if isinstance(imgs, list):
-            all_images.extend(imgs)
+        if not isinstance(body, dict):
+            return [], f"page={page}: response body is not an object"
+
+        merge_key = resolved_key
+        if not merge_key:
+            ek = body.get("enrichmentKey")
+            if isinstance(ek, str) and ek.strip():
+                merge_key = ek.strip()
+
+        enc_raw = body.get("encodedEnrichment")
+        enc_str = str(enc_raw).strip() if enc_raw else ""
+        if enc_str and not merge_key and not session_fetched:
+            session_fetched = True
+            sk, _sess_err = fetch_enrichment_key_from_session(cookie, device_id, impersonate)
+            if sk:
+                merge_key = sk
+                resolved_key = sk
+
+        merged = merge_contributor_images(body, merge_key)
+        all_images.extend(merged)
     return all_images, ""
