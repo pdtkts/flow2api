@@ -4,11 +4,11 @@ Direct HTTP client for tastracker.com contributor-search (no browser).
 Mirrors upstream secureHeaders / csr-token flow (webpack 7548).
 Used by TaskTrackerService and optionally scripts/fetch_contributor_tas.py.
 
-Contributor keywords enrichment (HAR / ContributorDataLoader, module ~3038):
-GET /api/contributor-search returns images[] with empty keywords and optional
-encodedEnrichment (Base64). XOR bytes with UTF-8(enrichmentKey), JSON-parse to
-a map keyed by asset id; each entry {d,k,c} merges into downloads, keywords,
-creatorId. Key matches the logged-in session user id (NextAuth).
+Keywords enrichment (HAR / ContributorDataLoader, module ~3038): contributor
+GET /api/contributor-search and keyword GET /api/search may return images[] with
+empty keywords plus encodedEnrichment (Base64). XOR with UTF-8(enrichmentKey),
+JSON-parse to a map keyed by asset id; each entry {d,k,c} merges into downloads,
+keywords, creatorId. Key matches the logged-in session user id (NextAuth).
 """
 
 from __future__ import annotations
@@ -183,15 +183,14 @@ def merge_contributor_images(body: Dict[str, Any], enrichment_key: Optional[str]
 
     if not key:
         logger.warning(
-            "contributor-search has encodedEnrichment but no enrichment key; keywords left unchanged"
+            "TAS response has encodedEnrichment but no enrichment key; keywords left unchanged"
         )
         return [dict(row) if isinstance(row, dict) else row for row in imgs]
 
     payload = decode_tas_enrichment(enc, key)
     if payload is None:
         logger.warning(
-            "contributor-search encodedEnrichment could not be decoded (wrong key or corrupt blob); "
-            "keywords left unchanged"
+            "TAS encodedEnrichment could not be decoded (wrong key or corrupt blob); keywords left unchanged"
         )
         return [dict(row) if isinstance(row, dict) else row for row in imgs]
 
@@ -212,6 +211,38 @@ def merge_contributor_images(body: Dict[str, Any], enrichment_key: Optional[str]
         else:
             out.append(dict(row))
     return out
+
+
+def resolve_tas_enrichment_merge_key(
+    body: Dict[str, Any],
+    resolved_key: Optional[str],
+    session_fetched: bool,
+    cookie: str,
+    device_id: str,
+    impersonate: str,
+) -> Tuple[Optional[str], Optional[str], bool]:
+    """
+    Per-page merge key for XOR decode. Order: cached resolved_key → body
+    enrichmentKey → (if blob present) one session fetch. Updates cache when a
+    new key is discovered.
+    """
+    merge_key = resolved_key
+    new_resolved = resolved_key
+    if not merge_key:
+        ek = body.get("enrichmentKey")
+        if isinstance(ek, str) and ek.strip():
+            merge_key = ek.strip()
+            new_resolved = merge_key
+    enc_raw = body.get("encodedEnrichment")
+    enc_str = str(enc_raw).strip() if enc_raw else ""
+    new_sess = session_fetched
+    if enc_str and not merge_key and not session_fetched:
+        new_sess = True
+        sk, _ = fetch_enrichment_key_from_session(cookie, device_id, impersonate)
+        if sk:
+            merge_key = sk
+            new_resolved = sk
+    return merge_key, new_resolved, new_sess
 
 
 def _uuid_string(value: Any) -> Optional[str]:
@@ -486,21 +517,9 @@ def fetch_contributor_raw_images(
         if not isinstance(body, dict):
             return [], f"page={page}: response body is not an object"
 
-        merge_key = resolved_key
-        if not merge_key:
-            ek = body.get("enrichmentKey")
-            if isinstance(ek, str) and ek.strip():
-                merge_key = ek.strip()
-
-        enc_raw = body.get("encodedEnrichment")
-        enc_str = str(enc_raw).strip() if enc_raw else ""
-        if enc_str and not merge_key and not session_fetched:
-            session_fetched = True
-            sk, _sess_err = fetch_enrichment_key_from_session(cookie, device_id, impersonate)
-            if sk:
-                merge_key = sk
-                resolved_key = sk
-
+        merge_key, resolved_key, session_fetched = resolve_tas_enrichment_merge_key(
+            body, resolved_key, session_fetched, cookie, device_id, impersonate
+        )
         merged = merge_contributor_images(body, merge_key)
         all_images.extend(merged)
     return all_images, ""

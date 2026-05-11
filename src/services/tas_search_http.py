@@ -2,12 +2,15 @@
 Direct HTTP client for tastracker.com keyword search (GET /api/search).
 
 Mirrors browser Referer on /search?... and reuses CSR / device / Turnstile
-headers from tas_contributor_http.
+headers from tas_contributor_http. Keyword responses may include
+encodedEnrichment; merge into images the same way as contributor-search
+(see tas_contributor_http).
 """
 
 from __future__ import annotations
 
 import copy
+import os
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode
 
@@ -18,8 +21,10 @@ from .tas_contributor_http import (
     DEFAULT_UA,
     ensure_csr_token,
     looks_unauthorized,
+    merge_contributor_images,
     normalize_generative_ai,
     request_with_fallback,
+    resolve_tas_enrichment_merge_key,
 )
 
 
@@ -138,14 +143,23 @@ def fetch_tas_search_raw(
     tls_profile: str,
     csr_cache: CsrTokenCache,
     csr_token_override: Optional[str] = None,
+    enrichment_key: Optional[str] = None,
 ) -> Tuple[Dict[str, Any], str]:
     """
-    Fetch one or more search pages; merge ``images``; return upstream-shaped dict.
+    Fetch one or more search pages; merge ``images`` (including encodedEnrichment
+    XOR merge per page); return upstream-shaped dict.
+
+    enrichment_key: explicit XOR key; else TAS_ENRICHMENT_KEY env; else response
+    enrichmentKey; else one GET /api/auth/session (cached for the run).
     """
     if not pages:
         return {}, "no pages"
     impersonate = (tls_profile or "").strip() or DEFAULT_TLS_PROFILE
     csr_referer = build_search_referer(q, order, pages[0], content_type_csv, generative_ai)
+    resolved_key = (enrichment_key or "").strip() or None
+    if not resolved_key:
+        resolved_key = (os.environ.get("TAS_ENRICHMENT_KEY") or "").strip() or None
+    session_fetched = False
     merged: Optional[Dict[str, Any]] = None
     all_images: List[Dict[str, Any]] = []
 
@@ -170,17 +184,21 @@ def fetch_tas_search_raw(
         if err:
             return {}, f"page={page}: {err}"
         assert body is not None
+        if not isinstance(body, dict):
+            return {}, f"page={page}: response body is not an object"
+
+        merge_key, resolved_key, session_fetched = resolve_tas_enrichment_merge_key(
+            body, resolved_key, session_fetched, cookie, device_id, impersonate
+        )
+        page_images = merge_contributor_images(body, merge_key)
+
         if merged is None:
             merged = copy.deepcopy(body)
-            imgs = body.get("images")
-            if isinstance(imgs, list):
-                all_images.extend(imgs)
-        else:
-            imgs = body.get("images")
-            if isinstance(imgs, list):
-                all_images.extend(imgs)
+        all_images.extend(page_images)
 
     if merged is None:
         return {}, "empty response"
     merged["images"] = all_images
+    merged.pop("encodedEnrichment", None)
+    merged.pop("enrichmentKey", None)
     return merged, ""
