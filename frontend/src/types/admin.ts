@@ -71,6 +71,14 @@ export interface DeleteDedicatedWorkerResponse {
   detail?: string
 }
 
+/** Response from POST /api/admin/dedicated-extension/workers/kill-sessions */
+export interface KillDedicatedWorkerSessionsResponse {
+  success?: boolean
+  killed_count?: number
+  message?: string
+  detail?: string
+}
+
 /** Paginated list from GET /api/logs */
 export interface LogsListResponse {
   logs: LogListItem[]

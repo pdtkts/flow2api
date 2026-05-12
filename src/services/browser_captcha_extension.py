@@ -1471,6 +1471,44 @@ class ExtensionCaptchaService:
         self.disconnect(target.websocket)
         return True
 
+    async def kill_dedicated_worker_sessions_for_token(self, token_id: int) -> int:
+        """Close all extension websockets for dedicated workers bound to this token (Worker tab / registration keys)."""
+        tid = int(token_id)
+        worker_ids: set[int] = set()
+        if self.db and hasattr(self.db, "list_dedicated_extension_workers"):
+            try:
+                rows = await self.db.list_dedicated_extension_workers()
+                for w in rows or []:
+                    if w.get("token_id") is None or int(w["token_id"]) != tid:
+                        continue
+                    wid = w.get("id")
+                    if wid is not None:
+                        worker_ids.add(int(wid))
+            except Exception as exc:
+                debug_logger.log_warning(
+                    f"[Extension Captcha] kill_dedicated_worker_sessions_for_token: list workers failed: {exc}"
+                )
+
+        killed = 0
+        for conn in list(self.active_connections):
+            match = False
+            if conn.dedicated_worker_id is not None and int(conn.dedicated_worker_id) in worker_ids:
+                match = True
+            elif conn.dedicated_token_id is not None and int(conn.dedicated_token_id) == tid:
+                match = True
+            if not match:
+                continue
+            try:
+                await conn.websocket.close(
+                    code=1000,
+                    reason="Dedicated worker sessions terminated by admin",
+                )
+            except Exception:
+                pass
+            self.disconnect(conn.websocket)
+            killed += 1
+        return killed
+
     async def bind_route_key(self, route_key: str, managed_api_key_id: int) -> None:
         normalized_route = (route_key or "").strip()
         if not normalized_route:

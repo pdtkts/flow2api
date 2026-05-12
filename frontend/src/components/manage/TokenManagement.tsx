@@ -11,7 +11,7 @@ import { Input } from "../ui/input"
 import { Label } from "../ui/label"
 import { Textarea } from "../ui/textarea"
 import { toast } from "sonner"
-import { RefreshCw, Download, Upload, Plus, Loader2, RefreshCcw, Pencil, Trash2, FolderPlus, KeyRound, Copy } from "lucide-react"
+import { RefreshCw, Download, Upload, Plus, Loader2, RefreshCcw, Pencil, Trash2, FolderPlus, KeyRound, Copy, Unplug } from "lucide-react"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select"
 import type {
   CreateProjectResponse,
@@ -19,6 +19,7 @@ import type {
   ListDedicatedWorkersResponse,
   CreateDedicatedWorkerResponse,
   DeleteDedicatedWorkerResponse,
+  KillDedicatedWorkerSessionsResponse,
 } from "../../types/admin"
 
 function formatExpiryDisplay(atExpires: string | null | undefined): ReactNode {
@@ -141,6 +142,7 @@ export function TokenManagement() {
     Record<number, { label: string; allow_captcha: boolean; allow_session_refresh: boolean }>
   >({})
   const [workerRowSavingId, setWorkerRowSavingId] = useState<number | null>(null)
+  const [workerKeyKillAllBusy, setWorkerKeyKillAllBusy] = useState(false)
   const workerRowDraftsRef = useRef(workerRowDrafts)
   workerRowDraftsRef.current = workerRowDrafts
 
@@ -513,6 +515,7 @@ export function TokenManagement() {
       setWorkerRowDrafts({})
       setWorkerKeyDeletingId(null)
       setWorkerRowSavingId(null)
+      setWorkerKeyKillAllBusy(false)
     }
   }
 
@@ -620,6 +623,42 @@ export function TokenManagement() {
       return
     }
     void copyWorkerRowPlaintext(full)
+  }
+
+  const killAllDedicatedWorkerSessions = async () => {
+    if (!token || !workerKeyToken) return
+    if (
+      !confirm(
+        "Terminate every active Worker-mode extension connection for this token? Each browser using a dedicated registration key for this token will disconnect (they may reconnect automatically)."
+      )
+    ) {
+      return
+    }
+    setWorkerKeyKillAllBusy(true)
+    try {
+      const { ok, data } = await adminJson<KillDedicatedWorkerSessionsResponse>(
+        "/api/admin/dedicated-extension/workers/kill-sessions",
+        token,
+        { method: "POST", body: JSON.stringify({ token_id: workerKeyToken.id }) }
+      )
+      if (ok && data?.success) {
+        toast.success(
+          typeof data.message === "string" ? data.message : `${data.killed_count ?? 0} session(s) closed`
+        )
+      } else {
+        const d = data as KillDedicatedWorkerSessionsResponse & { detail?: unknown }
+        const detail = d?.detail
+        const msg =
+          typeof detail === "string"
+            ? detail
+            : Array.isArray(detail) && detail[0] && typeof (detail[0] as { msg?: string }).msg === "string"
+              ? (detail[0] as { msg: string }).msg
+              : "Kill sessions failed"
+        toast.error(msg)
+      }
+    } finally {
+      setWorkerKeyKillAllBusy(false)
+    }
   }
 
   const generateDedicatedWorkerKey = async () => {
@@ -1092,7 +1131,27 @@ export function TokenManagement() {
               <p className="text-xs text-muted-foreground">At least one must stay checked. Use captcha-only on untrusted machines.</p>
             </div>
             <div className="rounded-md border bg-muted/40 p-3 text-sm text-muted-foreground">
-              <p className="font-medium text-foreground mb-2">Workers already linked to this token</p>
+              <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+                <p className="font-medium text-foreground">Workers already linked to this token</p>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  className="h-7 text-[11px] gap-1 border-destructive/60 text-destructive hover:bg-destructive/10"
+                  disabled={
+                    !workerKeyToken ||
+                    workerKeyKillAllBusy ||
+                    workerKeyListLoading ||
+                    workerRowSavingId !== null ||
+                    workerKeyDeletingId !== null
+                  }
+                  title="Disconnect all extension clients using dedicated registration keys for this token"
+                  onClick={() => void killAllDedicatedWorkerSessions()}
+                >
+                  {workerKeyKillAllBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Unplug className="h-3 w-3" />}
+                  Kill all sessions
+                </Button>
+              </div>
               {workerKeyListLoading ? (
                 <p className="text-xs">Loading…</p>
               ) : workerKeyList.length === 0 ? (

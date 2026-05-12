@@ -738,6 +738,10 @@ class DedicatedWorkerUpdateRequest(BaseModel):
     allow_session_refresh: Optional[bool] = None
 
 
+class DedicatedWorkerKillSessionsRequest(BaseModel):
+    token_id: int
+
+
 class UpdateDebugConfigRequest(BaseModel):
     enabled: bool
 
@@ -2371,6 +2375,27 @@ async def kill_extension_worker(
 async def list_dedicated_extension_workers(token: str = Depends(verify_admin_token)):
     workers = await db.list_dedicated_extension_workers()
     return {"success": True, "workers": workers}
+
+
+@router.post("/api/admin/dedicated-extension/workers/kill-sessions")
+async def kill_dedicated_extension_worker_sessions(
+    request: DedicatedWorkerKillSessionsRequest,
+    token: str = Depends(verify_admin_token),
+):
+    """Disconnect all Worker-mode (dedicated registration key) extension clients for this token."""
+    from ..services.browser_captcha_extension import ExtensionCaptchaService
+
+    tid = int(request.token_id)
+    token_obj = await db.get_token(tid)
+    if not token_obj:
+        raise HTTPException(status_code=404, detail="Token not found")
+    service = await ExtensionCaptchaService.get_instance(db=db)
+    killed = await service.kill_dedicated_worker_sessions_for_token(tid)
+    return {
+        "success": True,
+        "killed_count": killed,
+        "message": f"Terminated {killed} active session(s)" if killed else "No active dedicated worker sessions for this token",
+    }
 
 
 @router.post("/api/admin/dedicated-extension/workers")
