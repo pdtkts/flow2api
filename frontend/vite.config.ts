@@ -1,6 +1,6 @@
-import { defineConfig } from 'vite'
-import react from '@vitejs/plugin-react'
-import path from "path"
+import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
+import path from "path";
 
 // https://vite.dev/config/
 export default defineConfig({
@@ -12,18 +12,18 @@ export default defineConfig({
   },
   server: {
     proxy: {
-      '/api': {
-        target: 'http://127.0.0.1:8000',
+      "/api": {
+        target: "http://127.0.0.1:38000",
         changeOrigin: true,
       },
-      '/v1': {
-        target: 'http://127.0.0.1:8000',
+      "/v1": {
+        target: "http://127.0.0.1:38000",
         changeOrigin: true,
       },
-      '/tmp': {
-        target: 'http://127.0.0.1:8000',
+      "/tmp": {
+        target: "http://127.0.0.1:38000",
         changeOrigin: true,
       },
-    }
-  }
-})
+    },
+  },
+});

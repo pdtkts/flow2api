@@ -45,6 +45,9 @@ ENV/
 *~
 .DS_Store
 
+# Node
+node_modules/
+
 # Project specific
 data/*.db
 data/*.db-journal
