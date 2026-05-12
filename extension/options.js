@@ -79,7 +79,15 @@ function inferConnectionMode(stored) {
 function setStatus(message, isError = false) {
   const status = $("status");
   status.textContent = message;
-  status.style.color = isError ? "#b91c1c" : "#065f46";
+  status.style.color = isError ? "var(--bad)" : "var(--ok)";
+  status.classList.add("active");
+  
+  // Auto-hide success messages after 5 seconds, keep errors visible
+  if (!isError) {
+    setTimeout(() => {
+      status.classList.remove("active");
+    }, 5000);
+  }
 }
 
 function isValidWsUrl(value) {
@@ -616,13 +624,37 @@ function sendWorkerMessage(type, okMsg) {
   });
 }
 
-function wireTabs() {
+function wireAuthTabs() {
   $("tabEndUser").addEventListener("click", () => setActiveMode("endUser"));
   $("tabWorker").addEventListener("click", () => setActiveMode("worker"));
 }
 
+function wireMainTabs() {
+  const tabs = document.querySelectorAll(".main-tab");
+  const panels = document.querySelectorAll(".panel");
+
+  tabs.forEach(tab => {
+    tab.addEventListener("click", () => {
+      const target = tab.getAttribute("data-tab");
+
+      // Update tabs
+      tabs.forEach(t => t.classList.remove("active"));
+      tab.classList.add("active");
+
+      // Update panels
+      panels.forEach(p => {
+        p.classList.remove("active");
+        if (p.id === target) {
+          p.classList.add("active");
+        }
+      });
+    });
+  });
+}
+
 document.addEventListener("DOMContentLoaded", () => {
-  wireTabs();
+  wireMainTabs();
+  wireAuthTabs();
   loadSettings();
   $("saveBtn").addEventListener("click", saveSettings);
   $("saveWorkerBtn").addEventListener("click", saveWorkerSettings);

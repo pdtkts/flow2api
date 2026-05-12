@@ -3,422 +3,480 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Flow2API Captcha Worker Settings</title>
+  <title>Flow2API Settings</title>
   <style>
-    body {
-      margin: 0;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      background: #f7f8fa;
-      color: #111827;
-    }
-    .wrap {
-      max-width: 920px;
-      margin: 0 auto;
-      padding: 24px;
-    }
-    .panel {
-      background: #fff;
-      border: 1px solid #e5e7eb;
-      border-radius: 12px;
-      padding: 20px;
-      box-shadow: 0 8px 24px rgba(15, 23, 42, 0.06);
-    }
-    h1 {
-      font-size: 20px;
-      margin: 0 0 8px;
-    }
-    h2 {
-      font-size: 15px;
-      margin: 20px 0 10px;
-      color: #111827;
-    }
-    p {
-      color: #4b5563;
-      line-height: 1.5;
-    }
-    label {
-      display: block;
-      margin: 16px 0 8px;
-      font-weight: 600;
-    }
-    input[type="text"],
-    input[type="password"] {
-      width: 100%;
-      box-sizing: border-box;
-      padding: 10px 12px;
-      border: 1px solid #d1d5db;
-      border-radius: 10px;
-      font-size: 14px;
-    }
-    button {
-      margin-top: 18px;
-      border: 0;
-      border-radius: 10px;
-      background: #111827;
-      color: #fff;
-      padding: 10px 16px;
-      font-size: 14px;
-      cursor: pointer;
-    }
-    button.secondary {
-      background: #374151;
-    }
-    button.danger {
-      background: #b91c1c;
-    }
-    button:disabled {
-      opacity: 0.55;
-      cursor: not-allowed;
-    }
-    .btn-row {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-      align-items: center;
-      margin-top: 12px;
-    }
-    .btn-row button {
-      margin-top: 0;
-    }
-    .hint {
-      margin-top: 12px;
-      font-size: 13px;
-      color: #6b7280;
-    }
-    .metrics-grid {
-      margin-top: 12px;
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 10px;
-    }
-    @media (min-width: 640px) {
-      .metrics-grid {
-        grid-template-columns: repeat(4, minmax(0, 1fr));
-      }
-    }
-    .metric-card {
-      border: 1px solid #e5e7eb;
-      background: linear-gradient(180deg, #fafafa 0%, #fff 100%);
-      border-radius: 10px;
-      padding: 12px;
-      min-height: 72px;
-    }
-    .metric-label {
-      display: block;
-      font-size: 11px;
-      color: #6b7280;
-      text-transform: uppercase;
-      letter-spacing: 0.04em;
-      margin-bottom: 6px;
-    }
-    .metric-value {
-      font-size: 22px;
-      font-weight: 700;
-      color: #111827;
-      line-height: 1.2;
-    }
-    .metric-value.ok { color: #047857; }
-    .metric-value.bad { color: #b91c1c; }
-    .metric-sub {
-      font-size: 12px;
-      color: #6b7280;
-      margin-top: 4px;
-    }
-    .status-grid {
-      margin-top: 12px;
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 10px;
-    }
-    @media (min-width: 720px) {
-      .status-grid {
-        grid-template-columns: repeat(3, minmax(0, 1fr));
-      }
-    }
-    .status-card {
-      border: 1px solid #e5e7eb;
-      background: #fafafa;
-      border-radius: 10px;
-      padding: 10px;
-      min-height: 64px;
-    }
-    .status-label {
-      display: block;
-      font-size: 11px;
-      color: #6b7280;
-      margin-bottom: 6px;
-      text-transform: uppercase;
-      letter-spacing: 0.02em;
-    }
-    .status-value {
-      display: block;
-      font-size: 13px;
-      font-weight: 600;
-      color: #111827;
-      line-height: 1.3;
-      word-break: break-word;
-    }
-    .status-value.error {
-      color: #b91c1c;
-    }
-    .status-meta {
-      margin-top: 10px;
-      font-size: 12px;
-      color: #6b7280;
-    }
-    .event-wrap {
-      margin-top: 12px;
-      border: 1px solid #e5e7eb;
-      border-radius: 10px;
-      overflow: hidden;
-      background: #fff;
-    }
-    .event-head {
-      padding: 8px 10px;
-      font-size: 12px;
-      font-weight: 600;
-      border-bottom: 1px solid #e5e7eb;
-      background: #f8fafc;
-      color: #374151;
-      display: flex;
-      flex-wrap: wrap;
-      align-items: center;
-      gap: 10px;
-      justify-content: space-between;
-    }
-    .event-head label {
-      margin: 0;
-      font-weight: 500;
-      font-size: 12px;
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-    }
-    .event-head select {
-      font-size: 12px;
-      padding: 4px 8px;
-      border-radius: 8px;
-      border: 1px solid #d1d5db;
-    }
-    .event-list {
-      max-height: 220px;
-      overflow-y: auto;
-      padding: 0;
-      margin: 0;
-      list-style: none;
-    }
-    .event-list.tall {
-      max-height: 280px;
-    }
-    .event-item {
-      border-bottom: 1px solid #f1f5f9;
-      padding: 8px 10px;
-      font-size: 12px;
-      color: #374151;
-      line-height: 1.35;
-    }
-    .event-item:last-child {
-      border-bottom: 0;
-    }
-    #sessionTokenHistoryList code {
-      word-break: break-all;
-      white-space: pre-wrap;
-    }
-    .job-table {
-      width: 100%;
-      border-collapse: collapse;
-      font-size: 12px;
-    }
-    .job-table th,
-    .job-table td {
-      padding: 8px 10px;
-      text-align: left;
-      border-bottom: 1px solid #f1f5f9;
-      vertical-align: top;
-    }
-    .job-table th {
-      background: #f8fafc;
-      color: #64748b;
-      font-weight: 600;
-      font-size: 11px;
-      text-transform: uppercase;
-      letter-spacing: 0.03em;
-    }
-    .job-ok { color: #047857; font-weight: 600; }
-    .job-fail { color: #b91c1c; font-weight: 600; }
-    .event-time {
-      color: #6b7280;
-      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-      margin-right: 8px;
-    }
-    .event-level {
-      display: inline-block;
-      font-size: 10px;
-      font-weight: 700;
-      border-radius: 999px;
-      padding: 1px 7px;
-      margin-right: 8px;
-      vertical-align: middle;
-      border: 1px solid transparent;
-    }
-    .event-level.info {
-      color: #1e40af;
-      background: #dbeafe;
-      border-color: #bfdbfe;
-    }
-    .event-level.warn {
-      color: #92400e;
-      background: #fef3c7;
-      border-color: #fde68a;
-    }
-    .event-level.error {
-      color: #991b1b;
-      background: #fee2e2;
-      border-color: #fecaca;
-    }
-    .status {
-      margin-top: 12px;
-      min-height: 20px;
-      font-size: 13px;
-      color: #065f46;
-    }
-    code {
-      background: #f3f4f6;
-      border-radius: 6px;
-      padding: 1px 6px;
-    }
-    .tabs {
-      display: flex;
-      gap: 0;
-      margin: 20px 0 0;
-      border-bottom: 1px solid #e5e7eb;
-    }
-    .tab {
-      flex: 1;
-      padding: 12px 16px;
-      font-size: 14px;
-      font-weight: 600;
-      color: #6b7280;
-      background: #f9fafb;
-      border: 1px solid #e5e7eb;
-      border-bottom: none;
-      border-radius: 10px 10px 0 0;
-      cursor: pointer;
-      margin-bottom: -1px;
-    }
-    .tab + .tab {
-      margin-left: -1px;
-    }
-    .tab[aria-selected="true"] {
-      color: #111827;
-      background: #fff;
-      border-bottom-color: #fff;
-      z-index: 1;
-      position: relative;
-    }
-    .tabpanel {
-      display: none;
-      padding-top: 8px;
-    }
-    .tabpanel[aria-hidden="false"] {
-      display: block;
-    }
-    .shared-block {
-      padding-bottom: 4px;
-      border-bottom: 1px solid #f3f4f6;
-      margin-bottom: 8px;
-    }
-    .checkbox-row {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      margin-top: 12px;
-    }
-    .checkbox-row input[type="checkbox"] {
-      width: 18px;
-      height: 18px;
-    }
-    .checkbox-row label {
-      margin: 0;
-      font-weight: 500;
-    }
-    .section-border {
-      margin-top: 20px;
-      padding-top: 16px;
-      border-top: 1px solid #e5e7eb;
-    }
     :root {
       --bg: #0b1020;
       --panel: #11182b;
       --panel-soft: #0f172a;
       --muted: #94a3b8;
       --text: #e2e8f0;
-      --accent: #60a5fa;
+      --accent: #3b82f6;
+      --accent-hover: #2563eb;
       --border: #24324a;
       --ok: #34d399;
       --bad: #f87171;
+      --nav-bg: #070b16;
     }
+
     body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       background: radial-gradient(circle at 20% 0%, #1a2442 0%, #0b1020 45%, #070b16 100%);
       color: var(--text);
+      min-height: 100vh;
     }
+
+    .wrap {
+      max-width: 1000px;
+      margin: 0 auto;
+      padding: 24px;
+    }
+
+    /* Header & Navigation */
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 24px;
+    }
+
+    header h1 {
+      font-size: 24px;
+      margin: 0;
+      background: linear-gradient(135deg, #fff 0%, #94a3b8 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      font-weight: 800;
+    }
+
+    .main-nav {
+      display: flex;
+      background: var(--nav-bg);
+      padding: 4px;
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      margin-bottom: 24px;
+    }
+
+    .main-tab {
+      flex: 1;
+      padding: 10px 16px;
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--muted);
+      background: transparent;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+
+    .main-tab:hover {
+      color: var(--text);
+      background: rgba(255, 255, 255, 0.05);
+    }
+
+    .main-tab.active {
+      color: #fff;
+      background: var(--panel);
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+    }
+
+    /* Panels */
     .panel {
       background: linear-gradient(180deg, rgba(17, 24, 43, 0.98) 0%, rgba(11, 16, 32, 0.98) 100%);
       border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 24px;
       box-shadow: 0 18px 44px rgba(2, 6, 23, 0.45);
+      display: none;
     }
-    p, .hint, .status-meta, .status-label, .metric-label, .event-time { color: var(--muted); }
-    h1, h2, .status-value, .metric-value, .event-item, .event-head { color: var(--text); }
-    input[type="text"], input[type="password"], input[type="number"], .event-head select {
-      background: #0b1327;
+
+    .panel.active {
+      display: block;
+      animation: fadeIn 0.3s ease-out;
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(10px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    h2 {
+      font-size: 18px;
+      margin: 0 0 16px;
       color: var(--text);
-      border-color: var(--border);
+      display: flex;
+      align-items: center;
+      gap: 10px;
     }
-    .metric-card, .status-card, .event-wrap {
+
+    h2::after {
+      content: "";
+      flex: 1;
+      height: 1px;
+      background: var(--border);
+    }
+
+    p {
+      color: var(--muted);
+      line-height: 1.6;
+      font-size: 14px;
+      margin-bottom: 20px;
+    }
+
+    /* Metrics Grid */
+    .metrics-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+
+    .metric-card {
       background: var(--panel-soft);
-      border-color: var(--border);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 16px;
+      transition: transform 0.2s ease;
     }
-    .event-head, .job-table th, .tab { background: #0b1327; border-color: var(--border); color: var(--muted); }
-    .job-table td, .job-table th, .event-item { border-bottom-color: rgba(148, 163, 184, 0.15); }
-    .metric-value.ok, .job-ok { color: var(--ok); }
-    .metric-value.bad, .job-fail, .status-value.error { color: var(--bad); }
+
+    .metric-card:hover {
+      transform: translateY(-2px);
+      border-color: var(--accent);
+    }
+
+    .metric-label {
+      display: block;
+      font-size: 11px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 8px;
+    }
+
+    .metric-value {
+      font-size: 26px;
+      font-weight: 700;
+      color: var(--text);
+      line-height: 1;
+    }
+
+    .metric-value.ok { color: var(--ok); }
+    .metric-value.bad { color: var(--bad); }
+
+    .metric-sub {
+      font-size: 12px;
+      color: var(--muted);
+      margin-top: 8px;
+    }
+
+    /* Tables */
+    .table-wrap {
+      background: var(--panel-soft);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      overflow: hidden;
+      margin-bottom: 24px;
+    }
+
+    .table-head {
+      padding: 12px 16px;
+      background: rgba(255, 255, 255, 0.03);
+      border-bottom: 1px solid var(--border);
+      font-size: 14px;
+      font-weight: 600;
+    }
+
+    .job-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+
+    .job-table th, .job-table td {
+      padding: 12px 16px;
+      text-align: left;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .job-table th {
+      background: rgba(255, 255, 255, 0.02);
+      color: var(--muted);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .job-table tr:last-child td { border-bottom: none; }
+    .job-table tr:hover td { background: rgba(255, 255, 255, 0.02); }
+
+    .job-ok { color: var(--ok); font-weight: 600; }
+    .job-fail { color: var(--bad); font-weight: 600; }
+
+    /* Forms */
+    .form-group {
+      margin-bottom: 20px;
+    }
+
+    label {
+      display: block;
+      margin-bottom: 8px;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text);
+    }
+
+    input[type="text"],
+    input[type="password"],
+    input[type="number"],
+    select {
+      width: 100%;
+      box-sizing: border-box;
+      padding: 12px;
+      background: #0b1327;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      color: var(--text);
+      font-size: 14px;
+      transition: border-color 0.2s ease;
+    }
+
+    input:focus, select:focus {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2);
+    }
+
+    .hint {
+      font-size: 12px;
+      color: var(--muted);
+      margin-top: 6px;
+    }
+
     code {
       background: #0b1327;
       color: #bfdbfe;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 12px;
     }
+
+    /* Tabs (Inner) */
+    .inner-tabs {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 20px;
+      background: var(--nav-bg);
+      padding: 4px;
+      border-radius: 10px;
+      width: fit-content;
+    }
+
+    .inner-tab {
+      padding: 8px 16px;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--muted);
+      background: transparent;
+      border: none;
+      border-radius: 7px;
+      cursor: pointer;
+    }
+
+    .inner-tab[aria-selected="true"] {
+      color: #fff;
+      background: var(--panel);
+    }
+
+    .tabpanel {
+      display: none;
+      padding: 16px;
+      background: var(--panel-soft);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      margin-bottom: 20px;
+    }
+
+    .tabpanel[aria-hidden="false"] { display: block; }
+
+    /* Buttons */
+    .btn-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-top: 24px;
+    }
+
     button {
-      background: linear-gradient(180deg, #2563eb 0%, #1d4ed8 100%);
-      color: #eff6ff;
+      background: linear-gradient(180deg, var(--accent) 0%, var(--accent-hover) 100%);
+      color: #fff;
+      border: none;
+      border-radius: 10px;
+      padding: 12px 20px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
     }
-    button.secondary { background: #1e293b; }
-    button.danger { background: #7f1d1d; }
-    .tabs { border-bottom-color: var(--border); }
-    .tab[aria-selected="true"] {
-      color: #dbeafe;
-      background: #11182b;
-      border-bottom-color: #11182b;
+
+    button:hover:not(:disabled) {
+      transform: translateY(-1px);
+      box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3);
     }
-    .shared-block, .section-border {
-      border-top-color: var(--border);
-      border-bottom-color: var(--border);
+
+    button:active:not(:disabled) { transform: translateY(0); }
+
+    button.secondary {
+      background: #1e293b;
+      color: var(--text);
+      border: 1px solid var(--border);
     }
+
+    button.secondary:hover {
+      background: #2d3748;
+    }
+
+    button.danger {
+      background: #7f1d1d;
+    }
+
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    /* Status Cards */
+    .status-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+      gap: 12px;
+    }
+
+    .status-card {
+      background: var(--panel-soft);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px;
+    }
+
+    .status-label {
+      display: block;
+      font-size: 10px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 4px;
+    }
+
+    .status-value {
+      font-size: 13px;
+      font-weight: 600;
+      word-break: break-all;
+    }
+
+    .status-value.error { color: var(--bad); }
+
+    /* Log List */
+    .event-list {
+      list-style: none;
+      padding: 0;
+      margin: 0;
+      max-height: 500px;
+      overflow-y: auto;
+    }
+
+    .event-item {
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--border);
+      font-size: 13px;
+      display: flex;
+      gap: 12px;
+      align-items: flex-start;
+    }
+
+    .event-time { color: var(--muted); font-family: monospace; min-width: 80px; }
+    .event-level {
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+
+    .event-level.info { background: #1e40af; color: #dbeafe; }
+    .event-level.warn { background: #92400e; color: #fef3c7; }
+    .event-level.error { background: #991b1b; color: #fee2e2; }
+
+    .checkbox-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 16px;
+      cursor: pointer;
+    }
+
+    .checkbox-row input[type="checkbox"] {
+      width: 18px;
+      height: 18px;
+      cursor: pointer;
+    }
+
+    .status-msg {
+      margin-top: 16px;
+      font-size: 14px;
+      font-weight: 500;
+      padding: 12px;
+      border-radius: 8px;
+      display: none;
+    }
+
+    .status-msg.active { display: block; }
   </style>
 </head>
 <body>
   <div class="wrap">
-    <div class="panel">
+    <header>
       <h1>Flow2API Captcha Worker</h1>
-      <p>
-        Choose <strong>End user</strong> (managed API key + label) or <strong>Worker</strong> (dedicated registration key only).
-        Only one mode is active at a time after you save.
-      </p>
+      <div id="statusMeta" class="hint">Last update: —</div>
+    </header>
 
-      <h2>Captcha jobs</h2>
+    <nav class="main-nav" role="tablist">
+      <button type="button" class="main-tab active" data-tab="dashboard">Dashboard</button>
+      <button type="button" class="main-tab" data-tab="history">Jobs History</button>
+      <button type="button" class="main-tab" data-tab="logs">Activity Log</button>
+      <button type="button" class="main-tab" data-tab="config">Configuration</button>
+    </nav>
+
+    <!-- Dashboard Tab -->
+    <div id="dashboard" class="panel active">
+      <h2>Status Overview</h2>
+      <div class="status-grid" id="statusCards"></div>
+
+      <h2 style="margin-top: 32px;">Captcha Metrics</h2>
       <div class="metrics-grid" id="metricsGrid"></div>
 
-      <h2>Job history</h2>
-      <div class="event-wrap">
-        <div class="event-head">Recent server captcha jobs (newest first)</div>
+      <h2>Generation Metrics</h2>
+      <div class="metrics-grid" id="generationMetricsGrid"></div>
+
+      <h2>Recent Session Tokens</h2>
+      <div class="table-wrap">
+        <div class="table-head">Flow session tokens (last 3)</div>
+        <ul class="event-list" id="sessionTokenHistoryList" style="max-height: 200px;">
+          <li class="event-item">No captures yet</li>
+        </ul>
+      </div>
+    </div>
+
+    <!-- History Tab -->
+    <div id="history" class="panel">
+      <h2>Captcha Job History</h2>
+      <div class="table-wrap">
+        <div class="table-head">Recent server captcha jobs</div>
         <div style="overflow-x: auto;">
           <table class="job-table" id="jobHistoryTable">
             <thead>
@@ -435,10 +493,9 @@
         </div>
       </div>
 
-      <h2>Generation jobs</h2>
-      <div class="metrics-grid" id="generationMetricsGrid"></div>
-      <div class="event-wrap">
-        <div class="event-head">Recent generation submit/poll jobs (newest first)</div>
+      <h2 style="margin-top: 32px;">Generation Job History</h2>
+      <div class="table-wrap">
+        <div class="table-head">Recent generation jobs</div>
         <div style="overflow-x: auto;">
           <table class="job-table" id="generationHistoryTable">
             <thead>
@@ -456,102 +513,109 @@
           </table>
         </div>
       </div>
+    </div>
 
-      <div class="shared-block section-border">
+    <!-- Logs Tab -->
+    <div id="logs" class="panel">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+        <h2 style="margin: 0;">Activity Log</h2>
+        <select id="eventLogFilter" style="width: auto; padding: 6px 12px; font-size: 12px;">
+          <option value="all">All Events</option>
+          <option value="issues">Errors &amp; Warnings Only</option>
+        </select>
+      </div>
+      <div class="table-wrap">
+        <ul class="event-list tall" id="eventLogList">
+          <li class="event-item">No recent events</li>
+        </ul>
+      </div>
+    </div>
+
+    <!-- Configuration Tab -->
+    <div id="config" class="panel">
+      <h2>WebSocket Connection</h2>
+      <div class="form-group">
         <label for="serverUrl">WebSocket URL</label>
         <input id="serverUrl" type="text" placeholder="wss://example.com/captcha_ws">
-        <p class="hint" style="margin-top:8px;margin-bottom:0;">
-          Use <code>wss://</code> for HTTPS APIs (e.g. <code>flow-api.prismacreative.online</code>). Plain <code>ws://</code> on a public host is auto-upgraded to <code>wss://</code>; localhost stays <code>ws://</code>.
-          Remote hosts require host access in the extension manifest; if you see <strong>WebSocket transport error</strong> after changing only the URL, reload the extension on <code>chrome://extensions</code> (Refresh) so updated permissions apply.
+        <p class="hint">
+          Use <code>wss://</code> for production APIs. WebSocket URL is shared across modes.
         </p>
       </div>
 
-      <div class="tabs" role="tablist">
-        <button type="button" class="tab" id="tabEndUser" role="tab" aria-selected="true" aria-controls="panelEndUser">End user</button>
-        <button type="button" class="tab" id="tabWorker" role="tab" aria-selected="false" aria-controls="panelWorker">Worker</button>
+      <h2>Authentication Mode</h2>
+      <p>Choose <strong>End user</strong> (managed API key) or <strong>Worker</strong> (dedicated registration key).</p>
+      <div class="inner-tabs" role="tablist">
+        <button type="button" class="inner-tab" id="tabEndUser" role="tab" aria-selected="true" aria-controls="panelEndUser">End User</button>
+        <button type="button" class="inner-tab" id="tabWorker" role="tab" aria-selected="false" aria-controls="panelWorker">Worker</button>
       </div>
 
       <div id="panelEndUser" class="tabpanel" role="tabpanel" aria-hidden="false">
-        <label for="clientLabel">Client Label</label>
-        <input id="clientLabel" type="text" placeholder="e.g. huzaifa main">
-
-        <label for="routeKey">Route Key</label>
-        <input id="routeKey" type="text" placeholder="e.g. 9223 (optional, managed routing)">
-
-        <label for="apiKey">API Key</label>
-        <input id="apiKey" type="password" placeholder="Paste managed API key here">
+        <div class="form-group">
+          <label for="clientLabel">Client Label</label>
+          <input id="clientLabel" type="text" placeholder="e.g. main-worker">
+        </div>
+        <div class="form-group">
+          <label for="routeKey">Route Key</label>
+          <input id="routeKey" type="text" placeholder="e.g. 9223 (optional)">
+        </div>
+        <div class="form-group">
+          <label for="apiKey">API Key</label>
+          <input id="apiKey" type="password" placeholder="Paste managed API key here">
+        </div>
       </div>
 
       <div id="panelWorker" class="tabpanel" role="tabpanel" aria-hidden="true">
-        <label for="workerAuthKey">Worker Registration Key</label>
-        <input id="workerAuthKey" type="password" placeholder="Paste dedicated worker key here">
+        <div class="form-group">
+          <label for="workerAuthKey">Worker Registration Key</label>
+          <input id="workerAuthKey" type="password" placeholder="Paste dedicated worker key here">
+        </div>
       </div>
 
-      <button id="saveBtn" type="button">Save connection</button>
-      <button id="reconnectBtn" type="button" class="secondary" style="margin-left:8px;">Reconnect Now</button>
-      <button id="testBtn" type="button" class="secondary" style="margin-left:8px;">Test Token</button>
-      <button id="resetBtn" type="button" class="danger" style="margin-left:8px;">Reset extension</button>
-      <div class="status" id="status"></div>
+      <div class="btn-row">
+        <button id="saveBtn" type="button">Save Connection</button>
+        <button id="reconnectBtn" type="button" class="secondary">Reconnect Now</button>
+        <button id="testBtn" type="button" class="secondary">Test Token</button>
+      </div>
 
-      <h2 class="section-border">Worker tab (Labs / Flow)</h2>
-      <p class="hint" style="margin-top:0;">
-        Optional: keep one background tab for reCAPTCHA instead of opening a new tab every job.
-        Worker page URL must stay on <code>https://labs.google/...</code> so the extension can script the page.
-        With a persistent tab, each successful captcha only runs injected script on that tab (no full reload).
-        Auto-recycle closes the tab and opens a new one only after a failed local solve or upstream captcha rejection (when enabled).
-      </p>
-      <label for="workerPageUrl">Worker page URL</label>
-      <input id="workerPageUrl" type="text" placeholder="https://labs.google/fx/tools/flow">
-      <label for="workerRecaptchaSettleMs">reCAPTCHA page settle delay (milliseconds)</label>
-      <input id="workerRecaptchaSettleMs" type="number" min="0" max="120000" step="100" value="1200">
-      <p class="hint" style="margin-top:0;">
-        After the worker tab finishes loading (<code>complete</code>), wait this long before running reCAPTCHA so <code>enterprise.js</code> / <code>grecaptcha</code> can initialize. Increase on slow hardware or networks; <code>0</code> skips the delay (not recommended).
-      </p>
+      <h2 style="margin-top: 40px;">Worker Tab (Labs / Flow)</h2>
+      <p class="hint">Keep a background tab for reCAPTCHA to avoid repeated reloads.</p>
+      
+      <div class="form-group">
+        <label for="workerPageUrl">Worker Page URL</label>
+        <input id="workerPageUrl" type="text" placeholder="https://labs.google/fx/tools/flow">
+      </div>
+      
+      <div class="form-group">
+        <label for="workerRecaptchaSettleMs">reCAPTCHA Settle Delay (ms)</label>
+        <input id="workerRecaptchaSettleMs" type="number" min="0" max="120000" step="100" value="1200">
+        <p class="hint">Wait time before running reCAPTCHA scripts.</p>
+      </div>
+
       <div class="checkbox-row">
         <input type="checkbox" id="usePersistentWorkerTab">
         <label for="usePersistentWorkerTab">Use persistent worker tab</label>
       </div>
       <div class="checkbox-row">
         <input type="checkbox" id="autoRecycleWorkerTabOnCaptchaFailure">
-        <label for="autoRecycleWorkerTabOnCaptchaFailure">Auto-recycle worker tab after captcha failure</label>
+        <label for="autoRecycleWorkerTabOnCaptchaFailure">Auto-recycle tab after failure</label>
       </div>
+
       <div class="btn-row">
-        <button type="button" id="saveWorkerBtn" class="secondary">Save worker tab settings</button>
-        <button type="button" id="workerOpenBtn" class="secondary">Open worker tab</button>
-        <button type="button" id="workerCloseBtn" class="secondary">Close worker tab</button>
-        <button type="button" id="workerRecycleBtn" class="secondary">Recycle worker tab</button>
+        <button type="button" id="saveWorkerBtn" class="secondary">Save Worker Settings</button>
+        <button type="button" id="workerOpenBtn" class="secondary">Open Tab</button>
+        <button type="button" id="workerCloseBtn" class="secondary">Close Tab</button>
+        <button type="button" id="workerRecycleBtn" class="secondary">Recycle Tab</button>
       </div>
 
-      <h2 class="section-border">Connection status</h2>
-      <div class="status-grid" id="statusCards"></div>
-      <div class="status-meta" id="statusMeta">Last update: —</div>
-
-      <div class="event-wrap">
-        <div class="event-head">Recent Flow session tokens (last 3, newest first)</div>
-        <ul class="event-list" id="sessionTokenHistoryList">
-          <li class="event-item">No captures yet (server-requested session refresh only)</li>
-        </ul>
-      </div>
-      <div class="event-wrap">
-        <div class="event-head">
-          <span>Activity log</span>
-          <label>
-            Show
-            <select id="eventLogFilter" aria-label="Filter activity log">
-              <option value="all">All</option>
-              <option value="issues">Errors &amp; warnings</option>
-            </select>
-          </label>
-        </div>
-        <ul class="event-list tall" id="eventLogList">
-          <li class="event-item">No recent events</li>
-        </ul>
-      </div>
-      <div class="hint">
-        WebSocket URL is shared. Saving <strong>connection</strong> as End user clears the worker key; saving as Worker clears API key, client label, and route key.
-        <strong>Reset extension</strong> clears connection keys, worker tab settings, captcha job stats, job history, session refresh counters, the last-3 Flow session token history, worker tab id, generates a new instance id, and reconnects with defaults.
+      <div style="margin-top: 48px; padding-top: 24px; border-top: 1px solid var(--border);">
+        <button id="resetBtn" type="button" class="danger">Reset Extension</button>
+        <p class="hint" style="margin-top: 12px;">
+          <strong>Warning:</strong> This will clear all settings, keys, and history.
+        </p>
       </div>
     </div>
+
+    <div class="status-msg" id="status"></div>
   </div>
   <script src="options.js"></script>
 </body>
