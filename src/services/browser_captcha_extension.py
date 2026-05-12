@@ -39,6 +39,14 @@ class DedicatedWorkerStats:
 
 
 @dataclass
+class ExtensionStRefreshResult:
+    """Outcome of extension-based ST refresh for a dedicated token (no cross-profile fallback)."""
+
+    session_token: Optional[str] = None
+    failure_code: Optional[str] = None
+
+
+@dataclass
 class ExtensionConnection:
     websocket: WebSocket
     worker_session_id: str = field(default_factory=lambda: uuid.uuid4().hex)
@@ -560,6 +568,8 @@ class ExtensionCaptchaService:
                 )
                 if picked is not None:
                     return picked
+                if for_session_refresh:
+                    return None
             else:
                 for conn in pool:
                     if exclude_worker_session_ids and conn.worker_session_id in exclude_worker_session_ids:
@@ -568,6 +578,8 @@ class ExtensionCaptchaService:
                         if for_session_refresh and not self._conn_eligible_for_session_refresh(conn):
                             continue
                         return conn
+                if for_session_refresh:
+                    return None
         normalized_key = (route_key or "").strip()
         candidate_connections = pool
         if managed_api_key_id is not None:
@@ -1311,19 +1323,57 @@ class ExtensionCaptchaService:
         finally:
             self.pending_requests.pop(req_id, None)
 
+    async def _classify_extension_st_refresh_no_connection(self, token_id: int) -> str:
+        """Reason code when no eligible dedicated websocket exists for ST refresh (strict routing)."""
+        tid = int(token_id)
+        dedicated_for_token = [
+            c
+            for c in self.active_connections
+            if c.dedicated_token_id is not None and int(c.dedicated_token_id) == tid
+        ]
+        if dedicated_for_token and not any(self._conn_eligible_for_session_refresh(c) for c in dedicated_for_token):
+            return "extension_session_refresh_disabled"
+
+        if not self.db or not hasattr(self.db, "list_dedicated_extension_workers"):
+            return "extension_worker_offline"
+
+        try:
+            all_workers = await self.db.list_dedicated_extension_workers()
+        except Exception as exc:
+            debug_logger.log_warning(
+                f"[Extension Captcha] list_dedicated_extension_workers failed for ST routing: {exc}"
+            )
+            return "extension_no_worker_or_empty"
+
+        rows = [
+            w
+            for w in (all_workers or [])
+            if w.get("token_id") is not None and int(w["token_id"]) == tid
+        ]
+        if not rows:
+            return "extension_no_dedicated_worker"
+
+        def row_allows_refresh(w: Dict[str, Any]) -> bool:
+            return bool(int(w.get("allow_session_refresh") or 1))
+
+        if not any(row_allows_refresh(w) for w in rows):
+            return "extension_session_refresh_disabled"
+
+        return "extension_worker_offline"
+
     async def refresh_session_token(
         self,
         *,
         token_id: int,
         timeout: int = 45,
-    ) -> Optional[str]:
+    ) -> ExtensionStRefreshResult:
         """ST refresh is always sent to the extension bound for this token (dedicated if present).
 
         Intentionally no fallback to other extension connections: session cookies must not be
         read or refreshed on a different browser profile than the account's dedicated worker.
         """
         if token_id is None:
-            return None
+            return ExtensionStRefreshResult(failure_code="extension_no_worker_or_empty")
         conn = self._select_connection(
             route_key="",
             managed_api_key_id=None,
@@ -1332,9 +1382,13 @@ class ExtensionCaptchaService:
             for_session_refresh=True,
         )
         if conn is None:
-            return None
+            code = await self._classify_extension_st_refresh_no_connection(int(token_id))
+            return ExtensionStRefreshResult(failure_code=code)
         async with conn.dispatch_lock:
-            return await self._extension_refresh_st_once(conn, token_id=token_id, timeout=timeout)
+            st = await self._extension_refresh_st_once(conn, token_id=token_id, timeout=timeout)
+        if not st:
+            return ExtensionStRefreshResult(failure_code="extension_no_worker_or_empty")
+        return ExtensionStRefreshResult(session_token=st)
 
     async def report_flow_error(self, project_id: str, error_reason: str, error_message: str = ""):
         _ = project_id, error_message

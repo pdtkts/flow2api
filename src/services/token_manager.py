@@ -704,6 +704,7 @@ class TokenManager:
             extension_mode_active = captcha_mode == "extension"
             dedicated_extension_effective = dedicated_extension_enabled or extension_mode_active
             extension_attempted = False
+            ext_routing_failure_code: Optional[str] = None
             if dedicated_extension_effective:
                 try:
                     from .browser_captcha_extension import ExtensionCaptchaService
@@ -713,17 +714,26 @@ class TokenManager:
                     )
                     extension_service = await ExtensionCaptchaService.get_instance(self.db)
                     extension_attempted = True
-                    extension_st = await asyncio.wait_for(
+                    ext_res = await asyncio.wait_for(
                         extension_service.refresh_session_token(
                             token_id=token_id,
                             timeout=max(10, int(extension_timeout)),
                         ),
                         timeout=max(10.0, extension_timeout + 5.0),
                     )
-                    persisted_extension = await _persist_if_new(extension_st, "dedicated_extension")
-                    if persisted_extension:
-                        return persisted_extension
-                    self._set_st_refresh_reason(token_id, "extension_no_worker_or_empty")
+                    if ext_res.session_token is None:
+                        code = ext_res.failure_code or "extension_no_worker_or_empty"
+                        self._set_st_refresh_reason(token_id, code)
+                        if code in (
+                            "extension_worker_offline",
+                            "extension_session_refresh_disabled",
+                            "extension_no_dedicated_worker",
+                        ):
+                            ext_routing_failure_code = code
+                    else:
+                        persisted_extension = await _persist_if_new(ext_res.session_token, "dedicated_extension")
+                        if persisted_extension:
+                            return persisted_extension
                 except asyncio.TimeoutError:
                     debug_logger.log_warning(
                         f"[ST_REFRESH] Token {token_id}: dedicated extension ST refresh timeout"
@@ -752,7 +762,12 @@ class TokenManager:
                     f"[ST_REFRESH] Token {token_id}: 本地浏览器刷新 ST 超时 ({refresh_timeout_seconds:.0f}s)"
                 )
                 if extension_attempted:
-                    self._set_st_refresh_reason(token_id, "local_timeout_after_extension")
+                    if ext_routing_failure_code not in (
+                        "extension_worker_offline",
+                        "extension_session_refresh_disabled",
+                        "extension_no_dedicated_worker",
+                    ):
+                        self._set_st_refresh_reason(token_id, "local_timeout_after_extension")
                 else:
                     self._set_st_refresh_reason(token_id, "local_timeout")
                 record_token_refresh("st", "failure")
@@ -762,13 +777,26 @@ class TokenManager:
                     f"[ST_REFRESH] Token {token_id}: 本地浏览器刷新 ST 失败: {local_err}"
                 )
                 if extension_attempted:
-                    self._set_st_refresh_reason(token_id, "local_error_after_extension")
+                    if ext_routing_failure_code not in (
+                        "extension_worker_offline",
+                        "extension_session_refresh_disabled",
+                        "extension_no_dedicated_worker",
+                    ):
+                        self._set_st_refresh_reason(token_id, "local_error_after_extension")
                 else:
                     self._set_st_refresh_reason(token_id, "local_error")
                 record_token_refresh("st", "failure")
                 local_st = None
 
-            persisted_local = await _persist_if_new(local_st, "local_headed")
+            _preserve_ext_routing_reason = ext_routing_failure_code in (
+                "extension_worker_offline",
+                "extension_session_refresh_disabled",
+                "extension_no_dedicated_worker",
+            )
+            if local_st is not None or not _preserve_ext_routing_reason:
+                persisted_local = await _persist_if_new(local_st, "local_headed")
+            else:
+                persisted_local = None
             if persisted_local:
                 return persisted_local
 
@@ -776,7 +804,14 @@ class TokenManager:
                 f"[ST_REFRESH] Token {token_id}: 本地有头浏览器刷新 ST 失败 (mode={captcha_mode})"
             )
             if extension_attempted:
-                self._set_st_refresh_reason(token_id, "extension_and_local_failed")
+                if ext_routing_failure_code in (
+                    "extension_worker_offline",
+                    "extension_session_refresh_disabled",
+                    "extension_no_dedicated_worker",
+                ):
+                    pass
+                else:
+                    self._set_st_refresh_reason(token_id, "extension_and_local_failed")
             elif dedicated_extension_effective:
                 self._set_st_refresh_reason(token_id, "extension_enabled_but_no_success")
             else:
