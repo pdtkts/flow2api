@@ -536,7 +536,7 @@
       <h2>WebSocket Connection</h2>
       <div class="form-group">
         <label for="serverUrl">WebSocket URL</label>
-        <input id="serverUrl" type="text" placeholder="wss://example.com/captcha_ws">
+        <input id="serverUrl" type="text" placeholder="wss://flow-api.prismacreative.online/captcha_ws">
         <p class="hint">
           Use <code>wss://</code> for production APIs. WebSocket URL is shared across modes.
         </p>
@@ -587,12 +587,12 @@
       
       <div class="form-group">
         <label for="workerRecaptchaSettleMs">reCAPTCHA Settle Delay (ms)</label>
-        <input id="workerRecaptchaSettleMs" type="number" min="0" max="120000" step="100" value="1200">
+        <input id="workerRecaptchaSettleMs" type="number" min="0" max="120000" step="100" value="3000">
         <p class="hint">Wait time before running reCAPTCHA scripts.</p>
       </div>
 
       <div class="checkbox-row">
-        <input type="checkbox" id="usePersistentWorkerTab">
+        <input type="checkbox" id="usePersistentWorkerTab" checked>
         <label for="usePersistentWorkerTab">Use persistent worker tab</label>
       </div>
       <div class="checkbox-row">

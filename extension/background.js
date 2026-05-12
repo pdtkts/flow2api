@@ -5,7 +5,7 @@ let cachedInstanceId = null;
 let sessionRefreshTimeout = null;
 
 const DEFAULT_SETTINGS = {
-    serverUrl: "ws://127.0.0.1:8000/captcha_ws",
+    serverUrl: "wss://flow-api.prismacreative.online/captcha_ws",
     connectionMode: "endUser",
     apiKey: "",
     workerAuthKey: "",
@@ -15,12 +15,12 @@ const DEFAULT_SETTINGS = {
 
 const DEFAULT_WORKER_PAGE_URL = "https://labs.google/fx/tools/flow";
 
-const WORKER_RECAPTCHA_SETTLE_DEFAULT_MS = 1200;
+const WORKER_RECAPTCHA_SETTLE_DEFAULT_MS = 3000;
 const WORKER_RECAPTCHA_SETTLE_MAX_MS = 120000;
 
 const DEFAULT_WORKER_SETTINGS = {
     workerPageUrl: DEFAULT_WORKER_PAGE_URL,
-    usePersistentWorkerTab: false,
+    usePersistentWorkerTab: true,
     autoRecycleWorkerTabOnCaptchaFailure: true,
     workerRecaptchaSettleMs: WORKER_RECAPTCHA_SETTLE_DEFAULT_MS,
 };
@@ -251,7 +251,7 @@ function loadExtensionJobAndWorkerState() {
                 [STORAGE_RECENT_GENERATION_JOBS]: [],
                 [STORAGE_WORKER_TAB_ID]: null,
                 workerPageUrl: DEFAULT_WORKER_PAGE_URL,
-                usePersistentWorkerTab: false,
+                usePersistentWorkerTab: DEFAULT_WORKER_SETTINGS.usePersistentWorkerTab,
                 autoRecycleWorkerTabOnCaptchaFailure: true,
             },
             (stored) => {
@@ -562,9 +562,9 @@ function resetExtensionToDefaults(done) {
                         routeKey: DEFAULT_SETTINGS.routeKey,
                         clientLabel: DEFAULT_SETTINGS.clientLabel,
                         workerPageUrl: DEFAULT_WORKER_PAGE_URL,
-                        usePersistentWorkerTab: false,
+                        usePersistentWorkerTab: DEFAULT_WORKER_SETTINGS.usePersistentWorkerTab,
                         autoRecycleWorkerTabOnCaptchaFailure: true,
-                        workerRecaptchaSettleMs: WORKER_RECAPTCHA_SETTLE_DEFAULT_MS,
+                        workerRecaptchaSettleMs: DEFAULT_WORKER_SETTINGS.workerRecaptchaSettleMs,
                         [STORAGE_CAPTCHA_STATS]: { solved: 0, failed: 0 },
                         [STORAGE_RECENT_JOBS]: [],
                         [STORAGE_SESSION_REFRESH_STATS]: { succeeded: 0, failed: 0 },
