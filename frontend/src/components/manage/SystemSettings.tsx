@@ -120,6 +120,8 @@ type ExtensionWorkerRow = {
   connected_at: number
   dedicated_worker_id?: number | null
   dedicated_token_id?: number | null
+  dedicated_worker_key_label?: string | null
+  worker_key_prefix?: string | null
 }
 
 type ExtensionBindingRow = {
@@ -1532,21 +1534,27 @@ export function SystemSettings({ active }: { active: boolean }) {
                 </div>
                 <div className="rounded-md border">
                   <div className="px-3 py-2 text-xs font-medium border-b bg-muted/30">Worker mode (dedicated registration key)</div>
-                  <div className="grid grid-cols-8 gap-2 px-3 py-2 text-xs font-medium border-b">
+                  <div className="grid grid-cols-9 gap-2 px-3 py-2 text-xs font-medium border-b">
                     <span>Worker ID</span>
                     <span>Dedicated worker</span>
                     <span>Dedicated token</span>
+                    <span>Key name</span>
                     <span>Route key</span>
-                    <span>Label</span>
+                    <span>Client label</span>
                     <span>Source</span>
                     <span>Connected at</span>
                     <span>Action</span>
                   </div>
                   {dedicatedWorkers.map((w) => (
-                    <div key={w.worker_session_id} className="grid grid-cols-8 gap-2 px-3 py-2 text-xs border-b last:border-b-0 items-start">
+                    <div key={w.worker_session_id} className="grid grid-cols-9 gap-2 px-3 py-2 text-xs border-b last:border-b-0 items-start">
                       <span className="font-mono min-w-0 break-all whitespace-normal">{w.worker_session_id || "-"}</span>
                       <span>{w.dedicated_worker_id ?? "-"}</span>
                       <span>{w.dedicated_token_id ?? "-"}</span>
+                      <span className="min-w-0 break-words whitespace-normal">
+                        {(w.dedicated_worker_key_label || "").trim() ||
+                          (w.worker_key_prefix || "").trim() ||
+                          "—"}
+                      </span>
                       <span className="font-mono min-w-0 break-all whitespace-normal">{w.route_key || "(empty)"}</span>
                       <span className="min-w-0 break-words whitespace-normal">{w.client_label || "-"}</span>
                       <span className="min-w-0 break-words whitespace-normal">{w.binding_source || "-"}</span>

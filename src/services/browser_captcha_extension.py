@@ -57,6 +57,9 @@ class ExtensionConnection:
     binding_source: str = "none"
     dedicated_worker_id: Optional[int] = None
     dedicated_token_id: Optional[int] = None
+    # Registration key metadata (dedicated_extension_workers.label / worker_key_prefix).
+    dedicated_worker_key_label: str = ""
+    worker_key_prefix: str = ""
     allow_captcha: bool = True
     allow_session_refresh: bool = True
     connected_at: float = field(default_factory=time.time)
@@ -405,6 +408,8 @@ class ExtensionCaptchaService:
             conn.dedicated_worker_id = int(authenticated_worker.get("id"))
             token_id = authenticated_worker.get("token_id")
             conn.dedicated_token_id = int(token_id) if token_id is not None else None
+            conn.dedicated_worker_key_label = str(authenticated_worker.get("label") or "").strip()
+            conn.worker_key_prefix = str(authenticated_worker.get("worker_key_prefix") or "").strip()
             conn.allow_captcha = bool(int(authenticated_worker.get("allow_captcha") or 1))
             conn.allow_session_refresh = bool(int(authenticated_worker.get("allow_session_refresh") or 1))
             try:
@@ -1336,6 +1341,8 @@ class ExtensionCaptchaService:
         """Refresh token binding and capability flags from a dedicated_extension_workers row."""
         tid = row.get("token_id")
         conn.dedicated_token_id = int(tid) if tid is not None else None
+        conn.dedicated_worker_key_label = str(row.get("label") or "").strip()
+        conn.worker_key_prefix = str(row.get("worker_key_prefix") or "").strip()
         conn.allow_captcha = bool(int(row.get("allow_captcha") or 1))
         conn.allow_session_refresh = bool(int(row.get("allow_session_refresh") or 1))
 
@@ -1434,8 +1441,29 @@ class ExtensionCaptchaService:
         debug_logger.log_warning(f"[Extension Captcha] Flow error reported (ignoring): {error_reason}")
 
     async def list_active_workers(self) -> list[Dict[str, Any]]:
+        label_by_id: dict[int, tuple[str, str]] = {}
+        if self.db and hasattr(self.db, "list_dedicated_extension_workers"):
+            try:
+                rows = await self.db.list_dedicated_extension_workers()
+                for row in rows or []:
+                    wid = row.get("id")
+                    if wid is None:
+                        continue
+                    label_by_id[int(wid)] = (
+                        str(row.get("label") or "").strip(),
+                        str(row.get("worker_key_prefix") or "").strip(),
+                    )
+            except Exception as exc:
+                debug_logger.log_warning(f"[Extension Captcha] list_active_workers: DB label lookup failed: {exc}")
+
         workers: list[Dict[str, Any]] = []
         for conn in self.active_connections:
+            key_label = conn.dedicated_worker_key_label
+            key_prefix = conn.worker_key_prefix
+            if conn.dedicated_worker_id is not None:
+                db_pair = label_by_id.get(int(conn.dedicated_worker_id))
+                if db_pair is not None:
+                    key_label, key_prefix = db_pair
             workers.append(
                 {
                     "worker_session_id": conn.worker_session_id,
@@ -1446,6 +1474,8 @@ class ExtensionCaptchaService:
                     "binding_source": conn.binding_source,
                     "dedicated_worker_id": conn.dedicated_worker_id,
                     "dedicated_token_id": conn.dedicated_token_id,
+                    "dedicated_worker_key_label": key_label,
+                    "worker_key_prefix": key_prefix,
                     "allow_captcha": conn.allow_captcha,
                     "allow_session_refresh": conn.allow_session_refresh,
                     "connected_at": conn.connected_at,
