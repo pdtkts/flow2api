@@ -579,6 +579,7 @@ class Database:
                         last_error TEXT,
                         allow_captcha INTEGER NOT NULL DEFAULT 1,
                         allow_session_refresh INTEGER NOT NULL DEFAULT 1,
+                        allow_generation INTEGER NOT NULL DEFAULT 0,
                         worker_key_plaintext TEXT,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -702,6 +703,7 @@ class Database:
                     ("video_concurrency", "INTEGER DEFAULT -1"),
                     ("captcha_proxy_url", "TEXT"),  # token级打码代理
                     ("extension_route_key", "TEXT"),  # extension 模式路由键
+                    ("use_extension_for_generation", "INTEGER NOT NULL DEFAULT 1"),
                     ("ban_reason", "TEXT"),  # 禁用原因
                     ("banned_at", "TIMESTAMP"),  # 禁用时间
                 ]
@@ -947,6 +949,7 @@ class Database:
                         print(f"  ✗ Failed to add column 'flow_project_id' to cache_files: {e}")
 
             await self._ensure_dedicated_extension_worker_capability_columns(db)
+            await self._ensure_tokens_use_extension_for_generation_column(db)
 
             # ========== Step 3: Ensure all config tables have default rows ==========
             # Note: This will NOT overwrite existing config rows
@@ -995,6 +998,7 @@ class Database:
                     video_concurrency INTEGER DEFAULT -1,
                     captcha_proxy_url TEXT,
                     extension_route_key TEXT,
+                    use_extension_for_generation INTEGER NOT NULL DEFAULT 1,
                     ban_reason TEXT,
                     banned_at TIMESTAMP
                 )
@@ -1344,6 +1348,7 @@ class Database:
                     last_error TEXT,
                     allow_captcha INTEGER NOT NULL DEFAULT 1,
                     allow_session_refresh INTEGER NOT NULL DEFAULT 1,
+                    allow_generation INTEGER NOT NULL DEFAULT 0,
                     worker_key_plaintext TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -1383,6 +1388,7 @@ class Database:
             await self._ensure_api_key_ownership_columns(db)
             await self._ensure_task_async_columns(db)
             await self._ensure_dedicated_extension_worker_capability_columns(db)
+            await self._ensure_tokens_use_extension_for_generation_column(db)
 
             # Create indexes
             await db.execute("CREATE INDEX IF NOT EXISTS idx_task_id ON tasks(task_id)")
@@ -1423,6 +1429,7 @@ class Database:
             for col_name, col_def in (
                 ("allow_captcha", "INTEGER NOT NULL DEFAULT 1"),
                 ("allow_session_refresh", "INTEGER NOT NULL DEFAULT 1"),
+                ("allow_generation", "INTEGER NOT NULL DEFAULT 0"),
                 ("worker_key_plaintext", "TEXT"),
             ):
                 if not await self._column_exists(db, "dedicated_extension_workers", col_name):
@@ -1435,6 +1442,19 @@ class Database:
                         print(f"  ✗ Failed to add column '{col_name}' to dedicated_extension_workers: {e}")
         except Exception as e:
             print(f"  ✗ dedicated_extension_workers capability column migration failed: {e}")
+
+    async def _ensure_tokens_use_extension_for_generation_column(self, db) -> None:
+        """Add use_extension_for_generation when upgrading older tokens schemas."""
+        try:
+            if not await self._table_exists(db, "tokens"):
+                return
+            if not await self._column_exists(db, "tokens", "use_extension_for_generation"):
+                await db.execute(
+                    "ALTER TABLE tokens ADD COLUMN use_extension_for_generation INTEGER NOT NULL DEFAULT 1"
+                )
+                print("  ✓ Added column 'use_extension_for_generation' to tokens table")
+        except Exception as e:
+            print(f"  ✗ tokens use_extension_for_generation migration failed: {e}")
 
     async def _ensure_api_key_ownership_columns(self, db):
         """Add api_key_id to core tables when upgrading from older schemas (before indexes on those columns)."""
@@ -1561,13 +1581,14 @@ class Database:
             cursor = await db.execute("""
                 INSERT INTO tokens (st, at, at_expires, email, name, remark, is_active,
                                    credits, user_paygate_tier, current_project_id, current_project_name,
-                                   image_enabled, video_enabled, image_concurrency, video_concurrency, captcha_proxy_url, extension_route_key)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                   image_enabled, video_enabled, image_concurrency, video_concurrency, captcha_proxy_url, extension_route_key, use_extension_for_generation)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (token.st, token.at, token.at_expires, token.email, token.name, token.remark,
                   token.is_active, token.credits, token.user_paygate_tier,
                   token.current_project_id, token.current_project_name,
                   token.image_enabled, token.video_enabled,
-                  token.image_concurrency, token.video_concurrency, token.captcha_proxy_url, token.extension_route_key))
+                  token.image_concurrency, token.video_concurrency, token.captcha_proxy_url, token.extension_route_key,
+                  1 if getattr(token, "use_extension_for_generation", True) else 0))
             await db.commit()
             token_id = cursor.lastrowid
 
@@ -4644,6 +4665,7 @@ class Database:
         route_key: Optional[str] = None,
         allow_captcha: bool = True,
         allow_session_refresh: bool = True,
+        allow_generation: bool = False,
         worker_key_plaintext: Optional[str] = None,
     ) -> int:
         async with self._connect(write=True) as db:
@@ -4651,8 +4673,8 @@ class Database:
                 """
                 INSERT INTO dedicated_extension_workers (
                     worker_key_prefix, worker_key_hash, label, token_id, route_key,
-                    allow_captcha, allow_session_refresh, worker_key_plaintext
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    allow_captcha, allow_session_refresh, allow_generation, worker_key_plaintext
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     (worker_key_prefix or "").strip(),
@@ -4662,6 +4684,7 @@ class Database:
                     (route_key or "").strip() or None,
                     1 if allow_captcha else 0,
                     1 if allow_session_refresh else 0,
+                    1 if allow_generation else 0,
                     (worker_key_plaintext or "").strip() or None,
                 ),
             )
@@ -4682,6 +4705,7 @@ class Database:
         clear_token_binding: bool = False,
         allow_captcha: Any = _DEDICATED_WORKER_UPDATE_OMIT,
         allow_session_refresh: Any = _DEDICATED_WORKER_UPDATE_OMIT,
+        allow_generation: Any = _DEDICATED_WORKER_UPDATE_OMIT,
     ) -> None:
         updates: list[str] = ["updated_at = CURRENT_TIMESTAMP"]
         values: list[Any] = []
@@ -4694,6 +4718,9 @@ class Database:
         if allow_session_refresh is not _DEDICATED_WORKER_UPDATE_OMIT:
             updates.append("allow_session_refresh = ?")
             values.append(1 if allow_session_refresh else 0)
+        if allow_generation is not _DEDICATED_WORKER_UPDATE_OMIT:
+            updates.append("allow_generation = ?")
+            values.append(1 if allow_generation else 0)
         if token_id is not _DEDICATED_WORKER_UPDATE_OMIT and token_id is not None:
             updates.append("token_id = ?")
             values.append(int(token_id))

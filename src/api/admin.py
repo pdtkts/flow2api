@@ -602,6 +602,7 @@ class UpdateTokenRequest(BaseModel):
     remark: Optional[str] = None
     captcha_proxy_url: Optional[str] = None
     extension_route_key: Optional[str] = None
+    use_extension_for_generation: Optional[bool] = None
     image_enabled: Optional[bool] = None
     video_enabled: Optional[bool] = None
     image_concurrency: Optional[int] = None
@@ -727,6 +728,7 @@ class DedicatedWorkerCreateRequest(BaseModel):
     route_key: Optional[str] = None
     allow_captcha: bool = True
     allow_session_refresh: bool = True
+    allow_generation: bool = False
 
 
 class DedicatedWorkerUpdateRequest(BaseModel):
@@ -736,6 +738,7 @@ class DedicatedWorkerUpdateRequest(BaseModel):
     is_active: Optional[bool] = None
     allow_captcha: Optional[bool] = None
     allow_session_refresh: Optional[bool] = None
+    allow_generation: Optional[bool] = None
 
 
 class DedicatedWorkerKillSessionsRequest(BaseModel):
@@ -1014,6 +1017,9 @@ async def update_token(
                 if request.extension_route_key is not None
                 else None
             )
+        if _supports_kwarg(token_manager.update_token, "use_extension_for_generation"):
+            if request.use_extension_for_generation is not None:
+                update_kwargs["use_extension_for_generation"] = bool(request.use_extension_for_generation)
         await token_manager.update_token(**update_kwargs)
 
         # 热更新并发限制，确保管理台修改立即生效
@@ -2403,10 +2409,10 @@ async def create_dedicated_extension_worker(
     request: DedicatedWorkerCreateRequest,
     token: str = Depends(verify_admin_token),
 ):
-    if not request.allow_captcha and not request.allow_session_refresh:
+    if not request.allow_captcha and not request.allow_session_refresh and not request.allow_generation:
         raise HTTPException(
             status_code=400,
-            detail="At least one of allow_captcha or allow_session_refresh must be true",
+            detail="At least one of allow_captcha, allow_session_refresh, or allow_generation must be true",
         )
     token_id = int(request.token_id) if request.token_id is not None else None
     if token_id is not None:
@@ -2422,6 +2428,7 @@ async def create_dedicated_extension_worker(
         route_key=(request.route_key or "").strip() or None,
         allow_captcha=bool(request.allow_captcha),
         allow_session_refresh=bool(request.allow_session_refresh),
+        allow_generation=bool(request.allow_generation),
         worker_key_plaintext=worker_key.strip(),
     )
     worker = await db.get_dedicated_extension_worker(worker_id)
@@ -2443,12 +2450,14 @@ async def update_dedicated_extension_worker(
             raise HTTPException(status_code=404, detail="Token not found")
     cur_captcha = bool(int(existing.get("allow_captcha") or 1))
     cur_refresh = bool(int(existing.get("allow_session_refresh") or 1))
+    cur_generation = bool(int(existing.get("allow_generation") or 0))
     next_captcha = cur_captcha if request.allow_captcha is None else bool(request.allow_captcha)
     next_refresh = cur_refresh if request.allow_session_refresh is None else bool(request.allow_session_refresh)
-    if not next_captcha and not next_refresh:
+    next_generation = cur_generation if request.allow_generation is None else bool(request.allow_generation)
+    if not next_captcha and not next_refresh and not next_generation:
         raise HTTPException(
             status_code=400,
-            detail="At least one of allow_captcha or allow_session_refresh must remain true",
+            detail="At least one of allow_captcha, allow_session_refresh, or allow_generation must remain true",
         )
     fs = request.model_fields_set
     await db.update_dedicated_extension_worker(
@@ -2459,6 +2468,7 @@ async def update_dedicated_extension_worker(
         is_active=request.is_active if "is_active" in fs else _DEDICATED_WORKER_UPDATE_OMIT,
         allow_captcha=request.allow_captcha if "allow_captcha" in fs else _DEDICATED_WORKER_UPDATE_OMIT,
         allow_session_refresh=request.allow_session_refresh if "allow_session_refresh" in fs else _DEDICATED_WORKER_UPDATE_OMIT,
+        allow_generation=request.allow_generation if "allow_generation" in fs else _DEDICATED_WORKER_UPDATE_OMIT,
     )
     updated = await db.get_dedicated_extension_worker(worker_id)
     return {"success": True, "worker": updated}

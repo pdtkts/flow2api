@@ -16,6 +16,7 @@ from curl_cffi.requests import AsyncSession
 from ..core.logger import debug_logger
 from ..core.config import config, get_yescaptcha_min_score
 from .extension_generation_service import ExtensionGenerationService
+from .browser_captcha_extension import NoExtensionGenerationWorkerError
 
 try:
     import httpx
@@ -267,6 +268,20 @@ class FlowClient:
             return False
         return self._is_generation_request_with_recaptcha(url, json_data)
 
+    async def _token_allows_extension_generation(self, token_id: Optional[int]) -> bool:
+        if token_id is None:
+            return True
+        if not self.db or not hasattr(self.db, "get_token"):
+            return True
+        try:
+            row = await self.db.get_token(int(token_id))
+            if row is None:
+                return True
+            return bool(getattr(row, "use_extension_for_generation", True))
+        except Exception as exc:
+            debug_logger.log_warning(f"[EXT-GEN] token extension-generation flag lookup failed: {exc}")
+            return True
+
     async def _make_request(
         self,
         method: str,
@@ -408,22 +423,25 @@ class FlowClient:
         if self._should_submit_generation_via_extension(method, url, json_data):
             managed_api_key_id = self.get_managed_api_key_id()
             routing_token_id = token_id if token_id is not None else self.get_active_generation_token_id()
-            try:
-                debug_logger.log_info(
-                    f"[EXT-GEN] submit dispatch via extension: method={method.upper()}, managed_api_key_id={managed_api_key_id}, token_id={routing_token_id}"
-                )
-                return await self.extension_generation_service.submit_generation(
-                    url=url,
-                    method=method.upper(),
-                    headers=headers,
-                    json_data=json_data if isinstance(json_data, dict) else {},
-                    timeout_seconds=int(request_timeout),
-                    token_id=routing_token_id,
-                    managed_api_key_id=managed_api_key_id,
-                )
-            except Exception as ext_err:
-                debug_logger.log_error(f"[EXT-GEN] extension submit failed: {ext_err}")
-                raise Exception(f"Flow API request failed: {ext_err}")
+            if await self._token_allows_extension_generation(routing_token_id):
+                try:
+                    debug_logger.log_info(
+                        f"[EXT-GEN] submit dispatch via extension: method={method.upper()}, managed_api_key_id={managed_api_key_id}, token_id={routing_token_id}"
+                    )
+                    return await self.extension_generation_service.submit_generation(
+                        url=url,
+                        method=method.upper(),
+                        headers=headers,
+                        json_data=json_data if isinstance(json_data, dict) else {},
+                        timeout_seconds=int(request_timeout),
+                        token_id=routing_token_id,
+                        managed_api_key_id=managed_api_key_id,
+                    )
+                except NoExtensionGenerationWorkerError as no_ext:
+                    debug_logger.log_warning(f"[EXT-GEN] no generation worker, using local HTTP: {no_ext}")
+                except Exception as ext_err:
+                    debug_logger.log_error(f"[EXT-GEN] extension submit failed: {ext_err}")
+                    raise Exception(f"Flow API request failed: {ext_err}")
 
         try:
             async with AsyncSession(trust_env=False) as session:
@@ -2762,6 +2780,9 @@ class FlowClient:
 
     async def check_video_status_via_extension_poll(self, at: str, operations: List[Dict]) -> dict:
         """Fallback video poll path using extension browser context."""
+        routing_token_id = self.get_active_generation_token_id()
+        if not await self._token_allows_extension_generation(routing_token_id):
+            return await self.check_video_status(at, operations)
         url = f"{self.api_base_url}/video:batchCheckAsyncVideoGenerationStatus"
         headers = {
             "Authorization": f"Bearer {at}",

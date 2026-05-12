@@ -431,6 +431,7 @@ function renderStatusCards(state) {
     ["Managed key", managed, false],
     ["Dedicated worker", dedicatedWorker, false],
     ["Dedicated token", dedicatedToken, false],
+    ["Allow generation", state.allowGeneration ? "yes" : "no", false],
     ["Route key", route, false],
     ["Instance ID", instance, false],
     ["Worker session", workerSession, false],

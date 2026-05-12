@@ -117,6 +117,7 @@ export function TokenManagement() {
   const [editImgConc, setEditImgConc] = useState("")
   const [editVidConc, setEditVidConc] = useState("")
   const [editPreviewAt, setEditPreviewAt] = useState("")
+  const [editUseExtensionGen, setEditUseExtensionGen] = useState(true)
   const [editProfileSaving, setEditProfileSaving] = useState(false)
 
   const [importFile, setImportFile] = useState<File | null>(null)
@@ -138,8 +139,9 @@ export function TokenManagement() {
   const [workerKeyDeletingId, setWorkerKeyDeletingId] = useState<number | null>(null)
   const [workerKeyAllowCaptcha, setWorkerKeyAllowCaptcha] = useState(true)
   const [workerKeyAllowSessionRefresh, setWorkerKeyAllowSessionRefresh] = useState(true)
+  const [workerKeyAllowGeneration, setWorkerKeyAllowGeneration] = useState(false)
   const [workerRowDrafts, setWorkerRowDrafts] = useState<
-    Record<number, { label: string; allow_captcha: boolean; allow_session_refresh: boolean }>
+    Record<number, { label: string; allow_captcha: boolean; allow_session_refresh: boolean; allow_generation: boolean }>
   >({})
   const [workerRowSavingId, setWorkerRowSavingId] = useState<number | null>(null)
   const [workerKeyKillAllBusy, setWorkerKeyKillAllBusy] = useState(false)
@@ -306,6 +308,9 @@ export function TokenManagement() {
     setEditImgConc(String(row.image_concurrency ?? -1))
     setEditVidConc(String(row.video_concurrency ?? -1))
     setEditPreviewAt("")
+    setEditUseExtensionGen(
+      !(row.use_extension_for_generation === false || row.use_extension_for_generation === 0)
+    )
     setEditOpen(true)
   }
 
@@ -330,6 +335,7 @@ export function TokenManagement() {
           video_enabled: editVideoEn,
           image_concurrency: editImgConc ? parseInt(editImgConc, 10) : null,
           video_concurrency: editVidConc ? parseInt(editVidConc, 10) : null,
+          use_extension_for_generation: editUseExtensionGen,
         }),
       })
       if (!r) return
@@ -478,12 +484,13 @@ export function TokenManagement() {
       }
       const filtered = data.workers.filter((w) => w.token_id === tid)
       setWorkerKeyList(filtered)
-      const drafts: Record<number, { label: string; allow_captcha: boolean; allow_session_refresh: boolean }> = {}
+      const drafts: Record<number, { label: string; allow_captcha: boolean; allow_session_refresh: boolean; allow_generation: boolean }> = {}
       for (const w of filtered) {
         drafts[w.id] = {
           label: (w.label ?? "").trim(),
           allow_captcha: asDedicatedWorkerBool(w.allow_captcha),
           allow_session_refresh: asDedicatedWorkerBool(w.allow_session_refresh),
+          allow_generation: asDedicatedWorkerBool(w.allow_generation, false),
         }
       }
       setWorkerRowDrafts(drafts)
@@ -502,6 +509,7 @@ export function TokenManagement() {
     setWorkerKeyGenerated(null)
     setWorkerKeyAllowCaptcha(true)
     setWorkerKeyAllowSessionRefresh(true)
+    setWorkerKeyAllowGeneration(false)
     setWorkerKeyOpen(true)
     void loadDedicatedWorkersForToken(t.id)
   }
@@ -568,8 +576,8 @@ export function TokenManagement() {
     if (!token || !workerKeyToken) return
     const draft = workerRowDraftsRef.current[workerId]
     if (!draft) return
-    if (!draft.allow_captcha && !draft.allow_session_refresh) {
-      toast.error("At least one of Captcha or Refresh AT/ST must stay enabled")
+    if (!draft.allow_captcha && !draft.allow_session_refresh && !draft.allow_generation) {
+      toast.error("At least one of Captcha, Refresh AT/ST, or Extension generation must stay enabled")
       return
     }
     const labelStr = typeof draft.label === "string" ? draft.label.trim() : String(draft.label ?? "").trim()
@@ -584,6 +592,7 @@ export function TokenManagement() {
             label: labelStr || `Worker: ${workerId}`,
             allow_captcha: !!draft.allow_captcha,
             allow_session_refresh: !!draft.allow_session_refresh,
+            allow_generation: !!draft.allow_generation,
           }),
         }
       )
@@ -663,8 +672,8 @@ export function TokenManagement() {
 
   const generateDedicatedWorkerKey = async () => {
     if (!token || !workerKeyToken) return
-    if (!workerKeyAllowCaptcha && !workerKeyAllowSessionRefresh) {
-      toast.error("Enable at least one of Captcha or Refresh AT/ST")
+    if (!workerKeyAllowCaptcha && !workerKeyAllowSessionRefresh && !workerKeyAllowGeneration) {
+      toast.error("Enable at least one of Captcha, Refresh AT/ST, or Extension generation")
       return
     }
     setWorkerKeySaving(true)
@@ -676,11 +685,13 @@ export function TokenManagement() {
         route_key?: string | null
         allow_captcha: boolean
         allow_session_refresh: boolean
+        allow_generation: boolean
       } = {
         label: workerKeyLabel.trim() || `Worker: ${workerKeyToken.id}`,
         token_id: workerKeyToken.id,
         allow_captcha: workerKeyAllowCaptcha,
         allow_session_refresh: workerKeyAllowSessionRefresh,
+        allow_generation: workerKeyAllowGeneration,
       }
       const rk = workerKeyRouteKey.trim()
       if (rk) body.route_key = rk
@@ -1013,6 +1024,15 @@ export function TokenManagement() {
               <Label>Captcha proxy URL</Label>
               <Input className="mt-1 font-mono text-sm" value={editCaptchaProxy} onChange={(e) => setEditCaptchaProxy(e.target.value)} />
             </div>
+            <div className="flex items-start gap-3 border-t pt-3">
+              <Switch checked={editUseExtensionGen} onCheckedChange={setEditUseExtensionGen} className="mt-0.5" />
+              <div className="space-y-0.5">
+                <Label className="!mt-0">Use extension for generation</Label>
+                <p className="text-xs text-muted-foreground">
+                  When off, Flow image/video requests use server HTTP; the extension can still handle captcha for this token.
+                </p>
+              </div>
+            </div>
             <div className="flex flex-col gap-3 border-t pt-3">
               <div className="flex items-center gap-3">
                 <Switch checked={editImageEn} onCheckedChange={setEditImageEn} />
@@ -1128,7 +1148,16 @@ export function TokenManagement() {
                 />
                 <span>Refresh AT/ST (session token via extension)</span>
               </label>
-              <p className="text-xs text-muted-foreground">At least one must stay checked. Use captcha-only on untrusted machines.</p>
+              <label className="flex items-center gap-2 text-sm cursor-pointer">
+                <input
+                  type="checkbox"
+                  className="h-4 w-4 rounded border border-input"
+                  checked={workerKeyAllowGeneration}
+                  onChange={(e) => setWorkerKeyAllowGeneration(e.target.checked)}
+                />
+                <span>Extension generation (Flow HTTP in this browser)</span>
+              </label>
+              <p className="text-xs text-muted-foreground">At least one must stay checked.</p>
             </div>
             <div className="rounded-md border bg-muted/40 p-3 text-sm text-muted-foreground">
               <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
@@ -1261,6 +1290,20 @@ export function TokenManagement() {
                               }
                             />
                             Refresh AT/ST
+                          </label>
+                          <label className="flex items-center gap-2 text-xs cursor-pointer">
+                            <input
+                              type="checkbox"
+                              className="h-3.5 w-3.5 rounded border border-input"
+                              checked={draft.allow_generation}
+                              onChange={(e) =>
+                                setWorkerRowDrafts((prev) => ({
+                                  ...prev,
+                                  [w.id]: { ...draft, allow_generation: e.target.checked },
+                                }))
+                              }
+                            />
+                            Generation
                           </label>
                         </div>
                       </li>

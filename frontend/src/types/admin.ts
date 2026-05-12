@@ -33,6 +33,8 @@ export interface TokenRow {
   video_count?: number
   error_count?: number
   extension_route_key?: string | null
+  /** When false, Flow generation uses server HTTP; extension still used for captcha if method is extension. */
+  use_extension_for_generation?: boolean | number | null
 }
 
 /** Row from GET /api/admin/dedicated-extension/workers (joined fields may vary) */
@@ -48,6 +50,7 @@ export interface DedicatedExtensionWorkerRow {
   token_email?: string | null
   allow_captcha?: boolean | number | null
   allow_session_refresh?: boolean | number | null
+  allow_generation?: boolean | number | null
   /** Full registration secret when stored at creation (admin-only; protect DB backups). */
   worker_key_plaintext?: string | null
 }

@@ -76,6 +76,7 @@ const runtimeState = {
     /** Dedicated worker capabilities from server register_ack (end-user mode: both true). */
     allowCaptcha: true,
     allowSessionRefresh: true,
+    allowGeneration: false,
 };
 
 function inferConnectionMode(stored) {
@@ -528,6 +529,7 @@ function resetRuntimeStatePartial() {
     runtimeState.generationLastPollFallbackReason = "";
     runtimeState.allowCaptcha = true;
     runtimeState.allowSessionRefresh = true;
+    runtimeState.allowGeneration = false;
 }
 
 async function closeWorkerTabIfAny() {
@@ -1245,8 +1247,10 @@ async function connectWS() {
             runtimeState.dedicatedTokenId = String(data.dedicated_token_id || "");
             const ac = data.allow_captcha;
             const ar = data.allow_session_refresh;
+            const ag = data.allow_generation;
             runtimeState.allowCaptcha = ac !== false && ac !== 0 && ac !== "0";
             runtimeState.allowSessionRefresh = ar !== false && ar !== 0 && ar !== "0";
+            runtimeState.allowGeneration = ag === true || ag === 1 || ag === "1";
             if (ackStatus === "error") {
                 runtimeState.wsStatus = "open_register_error";
                 runtimeState.lastError = ackError || "register_failed";

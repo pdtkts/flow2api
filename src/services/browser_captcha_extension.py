@@ -4,12 +4,17 @@ import secrets
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from fastapi import WebSocket
 
 from ..core.config import config
 from ..core.logger import debug_logger
+
+
+class NoExtensionGenerationWorkerError(RuntimeError):
+    """No connected dedicated worker with allow_generation for this token (extension-first gen cannot run)."""
+
 
 # Dedicated-worker hybrid routing (health + score + RR tie-break)
 _DEDICATED_EMA_ALPHA = 0.25
@@ -62,6 +67,7 @@ class ExtensionConnection:
     worker_key_prefix: str = ""
     allow_captcha: bool = True
     allow_session_refresh: bool = True
+    allow_generation: bool = False
     connected_at: float = field(default_factory=time.time)
     # Serialize send+wait on this WebSocket (FIFO waiters); matches extension tokenQueue.
     dispatch_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -87,7 +93,7 @@ class ExtensionCaptchaService:
         self._rr_cursor: dict[str, int] = {}
         # Hybrid dedicated-worker routing: stats keyed by worker_session_id
         self._dedicated_worker_stats: dict[str, DedicatedWorkerStats] = {}
-        # RR cursor among top-scoring dedicated workers per token_id (string key dedicated:{id})
+        # RR cursor among top-scoring dedicated workers per token_id (keys dedicated:{id}:captcha|generation)
         self._dedicated_hybrid_rr: dict[str, int] = {}
         self._dedicated_stats_lock = asyncio.Lock()
         # upload_id -> slot for extension HTTP side-channel (large generation responses)
@@ -228,16 +234,19 @@ class ExtensionCaptchaService:
         *,
         exclude_worker_session_ids: Optional[Set[str]] = None,
         selection_meta_out: Optional[Dict[str, Any]] = None,
+        eligible: Optional[Callable[[ExtensionConnection], bool]] = None,
+        hybrid_rr_suffix: str = "captcha",
     ) -> Optional[ExtensionConnection]:
         tid = int(preferred_token_id)
         exclude = exclude_worker_session_ids or set()
+        eligible_fn = eligible or self._conn_eligible_for_captcha
         candidates = [
             c
             for c in pool
             if c.dedicated_token_id is not None
             and int(c.dedicated_token_id) == tid
             and c.worker_session_id not in exclude
-            and self._conn_eligible_for_captcha(c)
+            and eligible_fn(c)
         ]
         if not candidates:
             return None
@@ -256,7 +265,7 @@ class ExtensionCaptchaService:
         best_score = max(s[0] for s in scored)
         tied = [c for s, c in scored if abs(s - best_score) <= _DEDICATED_TIE_DELTA]
         tied_sorted = sorted(tied, key=lambda c: c.worker_session_id)
-        rr_key = f"dedicated:{tid}"
+        rr_key = f"dedicated:{tid}:{hybrid_rr_suffix}"
         n = len(tied_sorted)
         idx = self._dedicated_hybrid_rr.get(rr_key, 0) % n
         chosen = tied_sorted[idx]
@@ -265,6 +274,7 @@ class ExtensionCaptchaService:
         if selection_meta_out is not None:
             selection_meta_out.clear()
             selection_meta_out["dedicated_hybrid"] = True
+            selection_meta_out["dedicated_hybrid_suffix"] = hybrid_rr_suffix
             selection_meta_out["dedicated_token_id"] = tid
             selection_meta_out["dedicated_score"] = round(best_score, 2)
             selection_meta_out["dedicated_rr_idx"] = idx
@@ -273,7 +283,7 @@ class ExtensionCaptchaService:
 
         debug_logger.log_info(
             "[Extension Captcha] Dedicated hybrid pick: "
-            f"token_id={tid}, worker_session_id={chosen.worker_session_id}, score={best_score:.2f}, "
+            f"token_id={tid}, pool={hybrid_rr_suffix}, worker_session_id={chosen.worker_session_id}, score={best_score:.2f}, "
             f"rr_idx={idx}/{n}, candidates={len(candidates)}, healthy={len(healthy)}"
         )
         return chosen
@@ -412,6 +422,7 @@ class ExtensionCaptchaService:
             conn.worker_key_prefix = str(authenticated_worker.get("worker_key_prefix") or "").strip()
             conn.allow_captcha = bool(int(authenticated_worker.get("allow_captcha") or 1))
             conn.allow_session_refresh = bool(int(authenticated_worker.get("allow_session_refresh") or 1))
+            conn.allow_generation = bool(int(authenticated_worker.get("allow_generation") or 0))
             try:
                 if self.db and hasattr(self.db, "update_dedicated_extension_worker"):
                     rk = (conn.route_key or authenticated_worker.get("route_key") or "").strip() or None
@@ -493,6 +504,23 @@ class ExtensionCaptchaService:
             return True
         return bool(conn.allow_session_refresh)
 
+    @staticmethod
+    def _conn_eligible_for_generation(conn: ExtensionConnection) -> bool:
+        if conn.dedicated_worker_id is None:
+            return True
+        return bool(conn.allow_generation)
+
+    def has_generation_worker_for_token(self, token_id: Optional[int]) -> bool:
+        if token_id is None:
+            return False
+        tid = int(token_id)
+        return any(
+            c.dedicated_token_id is not None
+            and int(c.dedicated_token_id) == tid
+            and self._conn_eligible_for_generation(c)
+            for c in self.active_connections
+        )
+
     def _connection_pool(
         self, *, exclude_dedicated_token_id: Optional[int] = None
     ) -> list[ExtensionConnection]:
@@ -559,6 +587,7 @@ class ExtensionCaptchaService:
         selection_meta_out: Optional[Dict[str, Any]] = None,
         for_captcha: bool = False,
         for_session_refresh: bool = False,
+        for_extension_generation: bool = False,
     ) -> Optional[ExtensionConnection]:
         pool = self._connection_pool(exclude_dedicated_token_id=exclude_dedicated_token_id)
         if for_captcha:
@@ -570,10 +599,14 @@ class ExtensionCaptchaService:
                     int(preferred_token_id),
                     exclude_worker_session_ids=exclude_worker_session_ids,
                     selection_meta_out=selection_meta_out,
+                    eligible=self._conn_eligible_for_generation if for_extension_generation else None,
+                    hybrid_rr_suffix="generation" if for_extension_generation else "captcha",
                 )
                 if picked is not None:
                     return picked
                 if for_session_refresh:
+                    return None
+                if for_extension_generation:
                     return None
             else:
                 for conn in pool:
@@ -731,6 +764,7 @@ class ExtensionCaptchaService:
         use_dedicated_hybrid: bool = True,
         selection_meta_out: Optional[Dict[str, Any]] = None,
         for_captcha: bool = False,
+        for_extension_generation: bool = False,
     ) -> Optional[ExtensionConnection]:
         deadline = time.time() + max(0.0, float(timeout))
         queue_key = self._queue_key(managed_api_key_id)
@@ -747,6 +781,7 @@ class ExtensionCaptchaService:
                     use_dedicated_hybrid=use_dedicated_hybrid,
                     selection_meta_out=selection_meta_out,
                     for_captcha=for_captcha,
+                    for_extension_generation=for_extension_generation,
                 )
                 if conn is not None:
                     self._finalize_managed_rr_cursor_after_pick(
@@ -848,6 +883,7 @@ class ExtensionCaptchaService:
                             "dedicated_token_id": conn.dedicated_token_id,
                             "allow_captcha": conn.allow_captcha,
                             "allow_session_refresh": conn.allow_session_refresh,
+                            "allow_generation": conn.allow_generation,
                             "status": "error" if register_error else "ok",
                             "error": register_error,
                         },
@@ -954,6 +990,11 @@ class ExtensionCaptchaService:
         route_key = ""
         if managed_api_key_id is None:
             route_key = await self._resolve_route_key(token_id)
+        if managed_api_key_id is None and token_id is not None:
+            if not self.has_generation_worker_for_token(token_id):
+                raise NoExtensionGenerationWorkerError(
+                    f"No extension worker with generation enabled for token_id={token_id}"
+                )
         queue_wait_timeout = 20
         if self.db and hasattr(self.db, "get_captcha_config"):
             try:
@@ -971,6 +1012,7 @@ class ExtensionCaptchaService:
             exclude_dedicated_token_id=None,
             selection_meta_out=selection_meta,
             for_captcha=False,
+            for_extension_generation=True,
         )
         if conn is None:
             raise RuntimeError("No extension worker available for generation submit")
@@ -1007,6 +1049,11 @@ class ExtensionCaptchaService:
         route_key = ""
         if managed_api_key_id is None:
             route_key = await self._resolve_route_key(token_id)
+        if managed_api_key_id is None and token_id is not None:
+            if not self.has_generation_worker_for_token(token_id):
+                raise NoExtensionGenerationWorkerError(
+                    f"No extension worker with generation enabled for token_id={token_id}"
+                )
         queue_wait_timeout = 20
         if self.db and hasattr(self.db, "get_captcha_config"):
             try:
@@ -1024,6 +1071,7 @@ class ExtensionCaptchaService:
             exclude_dedicated_token_id=None,
             selection_meta_out=selection_meta,
             for_captcha=False,
+            for_extension_generation=True,
         )
         if conn is None:
             raise RuntimeError("No extension worker available for generation polling fallback")
@@ -1345,6 +1393,7 @@ class ExtensionCaptchaService:
         conn.worker_key_prefix = str(row.get("worker_key_prefix") or "").strip()
         conn.allow_captcha = bool(int(row.get("allow_captcha") or 1))
         conn.allow_session_refresh = bool(int(row.get("allow_session_refresh") or 1))
+        conn.allow_generation = bool(int(row.get("allow_generation") or 0))
 
     async def _sync_active_connections_for_dedicated_token(self, token_id: int) -> None:
         """Reconcile in-memory worker sockets with DB (binding/caps may change without reconnect)."""
@@ -1478,6 +1527,7 @@ class ExtensionCaptchaService:
                     "worker_key_prefix": key_prefix,
                     "allow_captcha": conn.allow_captcha,
                     "allow_session_refresh": conn.allow_session_refresh,
+                    "allow_generation": conn.allow_generation,
                     "connected_at": conn.connected_at,
                 }
             )

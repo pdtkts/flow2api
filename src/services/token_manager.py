@@ -340,7 +340,8 @@ class TokenManager:
         image_concurrency: Optional[int] = None,
         video_concurrency: Optional[int] = None,
         captcha_proxy_url: Optional[str] = None,
-        extension_route_key: Optional[str] = None
+        extension_route_key: Optional[str] = None,
+        use_extension_for_generation: Optional[bool] = None,
     ):
         """Update token (支持修改project_id和project_name)
 
@@ -372,6 +373,8 @@ class TokenManager:
             update_fields["captcha_proxy_url"] = captcha_proxy_url
         if extension_route_key is not None:
             update_fields["extension_route_key"] = extension_route_key
+        if use_extension_for_generation is not None:
+            update_fields["use_extension_for_generation"] = 1 if use_extension_for_generation else 0
 
         # 检查token是否因429被禁用，如果是且未过期，则清空429状态
         token = await self.db.get_token(token_id)

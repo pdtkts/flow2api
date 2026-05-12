@@ -44,6 +44,8 @@ class Token(BaseModel):
     captcha_proxy_url: Optional[str] = None
     # 插件路由键（extension 模式用于将请求路由到指定浏览器插件连接）
     extension_route_key: Optional[str] = None
+    # When False, Flow image/video generation HTTP uses server curl path; extension still used for captcha (if captcha_method is extension).
+    use_extension_for_generation: bool = True
 
     # 429禁用相关
     ban_reason: Optional[str] = None  # 禁用原因: "429_rate_limit" 或 None
@@ -329,6 +331,7 @@ class DedicatedExtensionWorker(BaseModel):
     last_error: Optional[str] = None
     allow_captcha: bool = True
     allow_session_refresh: bool = True
+    allow_generation: bool = False
     worker_key_plaintext: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
