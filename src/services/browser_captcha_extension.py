@@ -779,6 +779,15 @@ class ExtensionCaptchaService:
                     conn.route_key = (payload.get("route_key") or conn.route_key or "").strip()
                     conn.client_label = (payload.get("client_label") or conn.client_label or "").strip()
                     conn.instance_id = (payload.get("instance_id") or conn.instance_id or "").strip()
+                    if conn.dedicated_worker_id and self.db and hasattr(self.db, "get_dedicated_extension_worker"):
+                        try:
+                            fresh = await self.db.get_dedicated_extension_worker(int(conn.dedicated_worker_id))
+                            if fresh:
+                                self._apply_dedicated_worker_row_to_conn(conn, fresh)
+                        except Exception as exc:
+                            debug_logger.log_warning(
+                                f"[Extension Captcha] Failed to refresh dedicated worker caps from DB on register: {exc}"
+                            )
                     if conn.dedicated_worker_id and self.db and hasattr(self.db, "update_dedicated_extension_worker"):
                         try:
                             rk = (conn.route_key or "").strip() or None
@@ -1323,6 +1332,35 @@ class ExtensionCaptchaService:
         finally:
             self.pending_requests.pop(req_id, None)
 
+    def _apply_dedicated_worker_row_to_conn(self, conn: ExtensionConnection, row: Dict[str, Any]) -> None:
+        """Refresh token binding and capability flags from a dedicated_extension_workers row."""
+        tid = row.get("token_id")
+        conn.dedicated_token_id = int(tid) if tid is not None else None
+        conn.allow_captcha = bool(int(row.get("allow_captcha") or 1))
+        conn.allow_session_refresh = bool(int(row.get("allow_session_refresh") or 1))
+
+    async def _sync_active_connections_for_dedicated_token(self, token_id: int) -> None:
+        """Reconcile in-memory worker sockets with DB (binding/caps may change without reconnect)."""
+        if not self.db or not hasattr(self.db, "list_dedicated_extension_workers"):
+            return
+        try:
+            all_workers = await self.db.list_dedicated_extension_workers()
+        except Exception as exc:
+            debug_logger.log_warning(f"[Extension Captcha] ST routing sync: list workers failed: {exc}")
+            return
+        tid = int(token_id)
+        for row in all_workers or []:
+            rt = row.get("token_id")
+            if rt is None or int(rt) != tid:
+                continue
+            wid = row.get("id")
+            if wid is None:
+                continue
+            wid = int(wid)
+            for conn in self.active_connections:
+                if conn.dedicated_worker_id is not None and int(conn.dedicated_worker_id) == wid:
+                    self._apply_dedicated_worker_row_to_conn(conn, row)
+
     async def _classify_extension_st_refresh_no_connection(self, token_id: int) -> str:
         """Reason code when no eligible dedicated websocket exists for ST refresh (strict routing)."""
         tid = int(token_id)
@@ -1374,6 +1412,7 @@ class ExtensionCaptchaService:
         """
         if token_id is None:
             return ExtensionStRefreshResult(failure_code="extension_no_worker_or_empty")
+        await self._sync_active_connections_for_dedicated_token(int(token_id))
         conn = self._select_connection(
             route_key="",
             managed_api_key_id=None,
