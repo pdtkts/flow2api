@@ -113,7 +113,6 @@ const defaultCaptcha: CaptchaForm = {
 
 type ExtensionWorkerRow = {
   worker_session_id: string
-  route_key: string
   client_label: string
   managed_api_key_id: number | null
   binding_source: string
@@ -128,13 +127,6 @@ type ExtensionWorkerRow = {
   allow_captcha?: boolean
   allow_session_refresh?: boolean
   allow_generation?: boolean
-}
-
-type ExtensionBindingRow = {
-  id: number
-  route_key: string
-  api_key_id: number
-  api_key_label?: string
 }
 
 export function SystemSettings({ active }: { active: boolean }) {
@@ -171,10 +163,6 @@ export function SystemSettings({ active }: { active: boolean }) {
 
   const [captcha, setCaptcha] = useState<CaptchaForm>(defaultCaptcha)
   const [extensionWorkers, setExtensionWorkers] = useState<ExtensionWorkerRow[]>([])
-  const [extensionBindings, setExtensionBindings] = useState<ExtensionBindingRow[]>([])
-  const [managedKeys, setManagedKeys] = useState<Array<{ id: number; label?: string; key_prefix?: string }>>([])
-  const [bindRouteKey, setBindRouteKey] = useState("")
-  const [bindApiKeyId, setBindApiKeyId] = useState("")
 
   const [busy, setBusy] = useState(false)
   /** Bumps when leaving extension mode so in-flight worker list fetches do not repopulate state. */
@@ -183,7 +171,7 @@ export function SystemSettings({ active }: { active: boolean }) {
   const loadAll = useCallback(async () => {
     if (!token || !active) return
 
-    const [a, p, g, c, plug, cap, keysResp, workersResp] = await Promise.all([
+    const [a, p, g, c, plug, cap, workersResp] = await Promise.all([
       adminJson<{
         admin_username?: string
         api_key?: string
@@ -214,14 +202,9 @@ export function SystemSettings({ active }: { active: boolean }) {
         token
       ),
       adminJson<Record<string, unknown>>("/api/captcha/config", token),
-      adminJson<{ success?: boolean; keys?: Array<{ id: number; label?: string; key_prefix?: string }> }>(
-        "/api/admin/managed-apikeys",
-        token
-      ),
       adminJson<{
         success?: boolean
         workers?: ExtensionWorkerRow[]
-        bindings?: ExtensionBindingRow[]
       }>("/api/admin/extension/workers", token),
     ])
 
@@ -314,9 +297,6 @@ export function SystemSettings({ active }: { active: boolean }) {
         personal_proxy_url: String(raw.browser_proxy_url ?? ""),
       }))
     }
-    if (keysResp.ok && keysResp.data?.success) {
-      setManagedKeys(Array.isArray(keysResp.data.keys) ? keysResp.data.keys : [])
-    }
     const loadedCaptchaMethod =
       cap.ok && cap.data && typeof cap.data === "object"
         ? String((cap.data as Record<string, unknown>).captcha_method || "yescaptcha")
@@ -324,10 +304,8 @@ export function SystemSettings({ active }: { active: boolean }) {
     if (workersResp.ok && workersResp.data?.success) {
       if (loadedCaptchaMethod === "extension") {
         setExtensionWorkers(Array.isArray(workersResp.data.workers) ? workersResp.data.workers : [])
-        setExtensionBindings(Array.isArray(workersResp.data.bindings) ? workersResp.data.bindings : [])
       } else {
         setExtensionWorkers([])
-        setExtensionBindings([])
       }
     }
   }, [token, active])
@@ -638,14 +616,13 @@ export function SystemSettings({ active }: { active: boolean }) {
   const refreshExtensionWorkers = useCallback(async () => {
     if (!token) return
     const gen = ++extensionFetchGen.current
-    const r = await adminJson<{ success?: boolean; workers?: ExtensionWorkerRow[]; bindings?: ExtensionBindingRow[] }>(
+    const r = await adminJson<{ success?: boolean; workers?: ExtensionWorkerRow[] }>(
       "/api/admin/extension/workers",
       token
     )
     if (gen !== extensionFetchGen.current) return
     if (!r.ok || !r.data?.success) return
     setExtensionWorkers(Array.isArray(r.data.workers) ? r.data.workers : [])
-    setExtensionBindings(Array.isArray(r.data.bindings) ? r.data.bindings : [])
   }, [token])
 
   useEffect(() => {
@@ -653,7 +630,6 @@ export function SystemSettings({ active }: { active: boolean }) {
       extensionFetchGen.current++
       void Promise.resolve().then(() => {
         setExtensionWorkers([])
-        setExtensionBindings([])
       })
       return
     }
@@ -662,49 +638,6 @@ export function SystemSettings({ active }: { active: boolean }) {
       void refreshExtensionWorkers()
     })
   }, [captcha.captcha_method, token, active, refreshExtensionWorkers])
-
-  const bindExtensionWorker = async () => {
-    if (!token) return
-    const routeKey = bindRouteKey.trim()
-    const apiKeyId = parseInt(bindApiKeyId, 10)
-    if (!routeKey) return toast.error("Legacy route key required")
-    if (!Number.isFinite(apiKeyId) || apiKeyId <= 0) return toast.error("Legacy managed API key ID required")
-    setBusy(true)
-    try {
-      const r = await adminFetch("/api/admin/extension/workers/bind", token, {
-        method: "POST",
-        body: JSON.stringify({ route_key: routeKey, api_key_id: apiKeyId }),
-      })
-      if (!r) return
-      const d = await r.json()
-      if (d.success) {
-        toast.success("Legacy worker binding saved")
-        setBindRouteKey("")
-        await refreshExtensionWorkers()
-      } else toast.error(d.message || "Failed")
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const unbindExtensionWorker = async (routeKey: string) => {
-    if (!token) return
-    setBusy(true)
-    try {
-      const r = await adminFetch("/api/admin/extension/workers/unbind", token, {
-        method: "POST",
-        body: JSON.stringify({ route_key: routeKey }),
-      })
-      if (!r) return
-      const d = await r.json()
-      if (d.success) {
-        toast.success("Worker binding removed")
-        await refreshExtensionWorkers()
-      } else toast.error(d.message || "Failed")
-    } finally {
-      setBusy(false)
-    }
-  }
 
   const killExtensionWorker = async (workerSessionId: string) => {
     if (!token) return
@@ -1044,23 +977,9 @@ export function SystemSettings({ active }: { active: boolean }) {
                 }
               />
               <p className="text-xs text-muted-foreground mt-1">
-                Captcha requests wait for a healthy shared captcha worker up to this timeout. Legacy managed-key
-                workers can still connect for compatibility, but normal captcha routing prefers the shared pool.
+                Captcha requests wait for a healthy captcha worker up to this timeout. End user captcha workers are
+                identified by managed API key only.
               </p>
-            </div>
-          ) : null}
-          {m === "extension" ? (
-            <div className="flex items-center gap-2">
-              <Switch
-                checked={captcha.extension_fallback_to_managed_on_dedicated_failure}
-                onCheckedChange={(v) =>
-                  setCaptcha((c) => ({ ...c, extension_fallback_to_managed_on_dedicated_failure: v }))
-                }
-              />
-              <Label>
-                Legacy fallback: after an old token-bound captcha worker failure, retry reCAPTCHA on a managed-key
-                end-user extension. Refresh workers remain ST-refresh only.
-              </Label>
             </div>
           ) : null}
 
@@ -1464,40 +1383,15 @@ export function SystemSettings({ active }: { active: boolean }) {
           <CardHeader>
             <CardTitle>Extension worker routing</CardTitle>
             <CardDescription>
-              Chrome extension captcha uses general captcha workers from the shared pool. Refresh workers are
-              token-bound and can only refresh ST. Managed API key route bindings are legacy compatibility.
+              Chrome extension mode uses exactly three worker types: server-side captcha workers, end user captcha
+              workers, and token-bound refresh workers.
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
-            <div className="space-y-2">
-              <Label>Legacy managed route binding</Label>
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
-                <Input
-                  placeholder="Legacy route key (required)"
-                  value={bindRouteKey}
-                  onChange={(e) => setBindRouteKey(e.target.value)}
-                />
-                <Select value={bindApiKeyId} onValueChange={setBindApiKeyId}>
-                  <SelectTrigger>
-                    <SelectValue placeholder="Select legacy managed API key" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {managedKeys.map((k) => (
-                      <SelectItem key={k.id} value={String(k.id)}>
-                        #{k.id} {k.label || k.key_prefix || "managed-key"}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <div className="flex gap-2">
-                  <Button onClick={bindExtensionWorker} disabled={busy}>
-                    Bind legacy route
-                  </Button>
-                  <Button variant="outline" onClick={refreshExtensionWorkers} disabled={busy}>
-                    Refresh
-                  </Button>
-                </div>
-              </div>
+            <div className="flex justify-end">
+              <Button variant="outline" onClick={refreshExtensionWorkers} disabled={busy}>
+                Refresh
+              </Button>
             </div>
 
             <div className="space-y-2">
@@ -1507,7 +1401,7 @@ export function SystemSettings({ active }: { active: boolean }) {
               </p>
               <div className="space-y-3">
                 <div className="rounded-md border">
-                  <div className="px-3 py-2 text-xs font-medium border-b bg-muted/30">Captcha workers (shared pool)</div>
+                  <div className="px-3 py-2 text-xs font-medium border-b bg-muted/30">Captcha worker server side</div>
                   <div className="grid grid-cols-7 gap-2 px-3 py-2 text-xs font-medium border-b">
                     <span>Worker ID</span>
                     <span>Captcha key</span>
@@ -1542,12 +1436,9 @@ export function SystemSettings({ active }: { active: boolean }) {
                   ) : null}
                 </div>
                 <div className="rounded-md border">
-                  <div className="px-3 py-2 text-xs font-medium border-b bg-muted/30">
-                    Legacy managed-key workers
-                  </div>
-                  <div className="grid grid-cols-7 gap-2 px-3 py-2 text-xs font-medium border-b">
+                  <div className="px-3 py-2 text-xs font-medium border-b bg-muted/30">End user worker for captcha</div>
+                  <div className="grid grid-cols-6 gap-2 px-3 py-2 text-xs font-medium border-b">
                     <span>Worker ID</span>
-                    <span>Legacy route</span>
                     <span>Label</span>
                     <span>Managed key</span>
                     <span>Source</span>
@@ -1555,9 +1446,8 @@ export function SystemSettings({ active }: { active: boolean }) {
                     <span>Action</span>
                   </div>
                   {endUserWorkers.map((w) => (
-                    <div key={w.worker_session_id} className="grid grid-cols-7 gap-2 px-3 py-2 text-xs border-b last:border-b-0 items-start">
+                    <div key={w.worker_session_id} className="grid grid-cols-6 gap-2 px-3 py-2 text-xs border-b last:border-b-0 items-start">
                       <span className="font-mono min-w-0 break-all whitespace-normal">{w.worker_session_id || "-"}</span>
-                      <span className="font-mono min-w-0 break-all whitespace-normal">{w.route_key || "(empty)"}</span>
                       <span className="min-w-0 break-words whitespace-normal">{w.client_label || "-"}</span>
                       <span>{w.managed_api_key_id ?? "-"}</span>
                       <span className="min-w-0 break-words whitespace-normal">{w.binding_source || "-"}</span>
@@ -1575,25 +1465,22 @@ export function SystemSettings({ active }: { active: boolean }) {
                     </div>
                   ))}
                   {endUserWorkers.length === 0 ? (
-                    <div className="px-3 py-3 text-xs text-muted-foreground">No legacy managed-key workers</div>
+                    <div className="px-3 py-3 text-xs text-muted-foreground">No end user captcha workers</div>
                   ) : null}
                 </div>
                 <div className="rounded-md border">
-                  <div className="px-3 py-2 text-xs font-medium border-b bg-muted/30">
-                    Refresh workers (token-bound, ST refresh only)
-                  </div>
-                  <div className="grid grid-cols-8 gap-2 px-3 py-2 text-xs font-medium border-b">
+                  <div className="px-3 py-2 text-xs font-medium border-b bg-muted/30">Refresh workers</div>
+                  <div className="grid grid-cols-7 gap-2 px-3 py-2 text-xs font-medium border-b">
                     <span>Worker ID</span>
                     <span>Refresh key</span>
                     <span>Token ID</span>
                     <span>Work</span>
-                    <span>Legacy route</span>
                     <span>Source</span>
                     <span>Connected at</span>
                     <span>Action</span>
                   </div>
                   {dedicatedWorkers.map((w) => (
-                    <div key={w.worker_session_id} className="grid grid-cols-8 gap-2 px-3 py-2 text-xs border-b last:border-b-0 items-start">
+                    <div key={w.worker_session_id} className="grid grid-cols-7 gap-2 px-3 py-2 text-xs border-b last:border-b-0 items-start">
                       <span className="font-mono min-w-0 break-all whitespace-normal">{w.worker_session_id || "-"}</span>
                       <span className="min-w-0 break-words whitespace-normal">
                         {(w.dedicated_worker_key_label || "").trim() ||
@@ -1602,7 +1489,6 @@ export function SystemSettings({ active }: { active: boolean }) {
                       </span>
                       <span>{w.dedicated_token_id ?? "-"}</span>
                       <span>ST refresh only</span>
-                      <span className="font-mono min-w-0 break-all whitespace-normal">{w.route_key || "(empty)"}</span>
                       <span className="min-w-0 break-words whitespace-normal">{w.binding_source || "-"}</span>
                       <span>{w.connected_at ? new Date(w.connected_at * 1000).toLocaleTimeString() : "-"}</span>
                       <span>
@@ -1621,33 +1507,6 @@ export function SystemSettings({ active }: { active: boolean }) {
                     <div className="px-3 py-3 text-xs text-muted-foreground">No refresh worker connections</div>
                   ) : null}
                 </div>
-              </div>
-            </div>
-
-            <div className="space-y-2">
-              <Label>Legacy persisted route bindings</Label>
-              <div className="rounded-md border">
-                <div className="grid grid-cols-4 gap-2 px-3 py-2 text-xs font-medium border-b">
-                  <span>Legacy route</span>
-                  <span>Managed key</span>
-                  <span>Label</span>
-                  <span>Action</span>
-                </div>
-                {(extensionBindings.length ? extensionBindings : []).map((b) => (
-                  <div key={`${b.id}-${b.route_key}`} className="grid grid-cols-4 gap-2 px-3 py-2 text-xs border-b last:border-b-0 items-start">
-                    <span className="font-mono min-w-0 break-all whitespace-normal">{b.route_key}</span>
-                    <span>{b.api_key_id}</span>
-                    <span className="min-w-0 break-words whitespace-normal">{b.api_key_label || "-"}</span>
-                    <span>
-                      <Button size="sm" variant="outline" onClick={() => unbindExtensionWorker(b.route_key)} disabled={busy}>
-                        Unbind
-                      </Button>
-                    </span>
-                  </div>
-                ))}
-                {extensionBindings.length === 0 ? (
-                  <div className="px-3 py-3 text-xs text-muted-foreground">No legacy persisted bindings</div>
-                ) : null}
               </div>
             </div>
           </CardContent>

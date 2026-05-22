@@ -379,7 +379,7 @@ class ExtensionCaptchaService:
         return cls._instance
 
     def _queue_key(self, managed_api_key_id: Optional[int]) -> str:
-        return f"key:{managed_api_key_id}" if managed_api_key_id is not None else "legacy"
+        return f"key:{managed_api_key_id}" if managed_api_key_id is not None else "unscoped"
 
     async def _notify_connection_change(self) -> None:
         async with self._connection_changed:
@@ -446,7 +446,7 @@ class ExtensionCaptchaService:
         conn = ExtensionConnection(
             websocket=websocket,
             instance_id=(websocket.query_params.get("instance_id") or "").strip(),
-            route_key=(websocket.query_params.get("route_key") or "").strip(),
+            route_key="",
             client_label=(websocket.query_params.get("client_label") or "").strip(),
         )
         if conn.instance_id:
@@ -478,47 +478,34 @@ class ExtensionCaptchaService:
         elif authenticated_managed_api_key_id is not None:
             conn.managed_api_key_id = int(authenticated_managed_api_key_id)
             conn.binding_source = "authenticated"
-            if conn.route_key and self.db and hasattr(self.db, "upsert_extension_worker_binding"):
-                await self.db.upsert_extension_worker_binding(conn.route_key, conn.managed_api_key_id)
         else:
-            claimed_managed_key = websocket.query_params.get("managed_api_key_id")
-            try:
-                await self._apply_route_binding_to_connection(
-                    conn,
-                    claimed_managed_api_key_id=claimed_managed_key,
-                )
-            except Exception as exc:
-                debug_logger.log_warning(f"[Extension Captcha] Ignoring invalid managed key claim on connect: {exc}")
+            conn.binding_source = "none"
         if authenticated_worker:
             conn.dedicated_worker_id = int(authenticated_worker.get("id"))
             token_id = authenticated_worker.get("token_id")
             conn.dedicated_token_id = int(token_id) if token_id is not None else None
             conn.dedicated_worker_key_label = str(authenticated_worker.get("label") or "").strip()
             conn.worker_key_prefix = str(authenticated_worker.get("worker_key_prefix") or "").strip()
+            conn.binding_source = "refresh_worker_key"
             conn.allow_captcha = False
             conn.allow_session_refresh = True
             conn.allow_generation = False
             try:
                 if self.db and hasattr(self.db, "update_dedicated_extension_worker"):
-                    rk = (conn.route_key or authenticated_worker.get("route_key") or "").strip() or None
-                    extra: Dict[str, Any] = {}
-                    if rk is not None:
-                        extra["route_key"] = rk
                     await self.db.update_dedicated_extension_worker(
                         conn.dedicated_worker_id,
-                        **extra,
                         last_instance_id=conn.instance_id or None,
                         mark_seen=True,
                         last_error="",
                     )
             except Exception as exc:
-                debug_logger.log_warning(f"[Extension Captcha] Failed to persist dedicated worker route: {exc}")
+                debug_logger.log_warning(f"[Extension Captcha] Failed to persist refresh worker heartbeat: {exc}")
         self.active_connections.append(conn)
         debug_logger.log_info(
             f"[Extension Captcha] Client connected. Total: {len(self.active_connections)}, "
             f"worker_session_id={conn.worker_session_id}, "
             f"instance_id={conn.instance_id or '-'}, "
-            f"route_key={conn.route_key or '-'}, label={conn.client_label or '-'}, "
+            f"label={conn.client_label or '-'}, "
             f"managed_api_key_id={conn.managed_api_key_id}, captcha_worker_id={conn.captcha_worker_id}, "
             f"source={conn.binding_source}"
         )
@@ -543,8 +530,7 @@ class ExtensionCaptchaService:
                             pass
                 debug_logger.log_info(
                     f"[Extension Captcha] Client disconnected. Total: {len(self.active_connections)}, "
-                    f"worker_session_id={conn.worker_session_id}, "
-                    f"route_key={conn.route_key or '-'}, label={conn.client_label or '-'}"
+                    f"worker_session_id={conn.worker_session_id}, label={conn.client_label or '-'}"
                 )
                 mid = conn.managed_api_key_id
                 if mid is not None:
@@ -630,19 +616,12 @@ class ExtensionCaptchaService:
             if int(conn.dedicated_token_id) == int(preferred_token_id):
                 return
         pool = self._connection_pool(exclude_dedicated_token_id=exclude_dedicated_token_id)
-        normalized_key = (route_key or "").strip()
         candidate_connections = [
             c for c in pool if c.managed_api_key_id == managed_api_key_id
         ]
         if not candidate_connections:
             return
         sorted_candidates = sorted(candidate_connections, key=lambda c: c.worker_session_id)
-        if normalized_key:
-            for c in sorted_candidates:
-                if c.route_key == normalized_key:
-                    if c.websocket is conn.websocket:
-                        return
-                    break
         try:
             idx = sorted_candidates.index(conn)
         except ValueError:
@@ -701,7 +680,6 @@ class ExtensionCaptchaService:
                         return conn
                 if for_session_refresh:
                     return None
-        normalized_key = (route_key or "").strip()
         candidate_connections = pool
         if managed_api_key_id is not None:
             candidate_connections = [
@@ -710,12 +688,6 @@ class ExtensionCaptchaService:
             if not candidate_connections:
                 return None
             sorted_candidates = sorted(candidate_connections, key=lambda c: c.worker_session_id)
-            # Key-first routing: if managed key is known, route_key is only a preference.
-            # Prefer exact route_key match when provided (no RR advance); otherwise round-robin.
-            if normalized_key:
-                for conn in sorted_candidates:
-                    if conn.route_key == normalized_key:
-                        return conn
             queue_key = self._queue_key(managed_api_key_id)
             n = len(sorted_candidates)
             idx = self._rr_cursor.get(queue_key, 0) % n
@@ -725,24 +697,6 @@ class ExtensionCaptchaService:
                 selection_meta_out["pool_size"] = n
                 selection_meta_out["rr_idx"] = idx
             return chosen
-        else:
-            # Legacy/global callers must never borrow managed-key scoped workers.
-            candidate_connections = [
-                conn for conn in candidate_connections if conn.managed_api_key_id is None
-            ]
-
-        if normalized_key:
-            for conn in candidate_connections:
-                if conn.route_key == normalized_key:
-                    return conn
-            return None
-        # Empty token routes are only allowed to use an empty extension route.
-        # A keyed route such as "9223" belongs to a specific browser/account
-        # and must never be borrowed by another token just because it is the
-        # only extension online.
-        for conn in candidate_connections:
-            if not conn.route_key:
-                return conn
         return None
 
     def _describe_routes(self) -> str:
@@ -751,9 +705,9 @@ class ExtensionCaptchaService:
             if conn.captcha_worker_id is not None:
                 labels.append(f"captcha-worker:{conn.captcha_worker_id}#{conn.binding_source}")
                 continue
-            label = conn.route_key or "(empty)"
+            label = conn.client_label or "worker"
             if conn.client_label:
-                label = f"{label}:{conn.client_label}"
+                label = conn.client_label
             if conn.managed_api_key_id is not None:
                 label = f"{label}@key{conn.managed_api_key_id}"
             if conn.binding_source:
@@ -772,7 +726,6 @@ class ExtensionCaptchaService:
                     f"binding={conn.binding_source or 'captcha_worker_key'}"
                 )
                 continue
-            route = conn.route_key or "(empty)"
             label = conn.client_label or "-"
             managed = (
                 str(conn.managed_api_key_id)
@@ -781,7 +734,7 @@ class ExtensionCaptchaService:
             )
             source = conn.binding_source or "none"
             parts.append(
-                f"route={route}, label={label}, managed_key={managed}, binding={source}"
+                f"label={label}, managed_key={managed}, binding={source}"
             )
         return " | ".join(parts)
 
@@ -795,18 +748,10 @@ class ExtensionCaptchaService:
             pass
 
     async def _resolve_route_key(self, token_id: Optional[int]) -> str:
-        if not token_id or not self.db:
-            return ""
-        try:
-            token = await self.db.get_token(token_id)
-            if token and token.extension_route_key:
-                return token.extension_route_key.strip()
-        except Exception as e:
-            debug_logger.log_warning(f"[Extension Captcha] Failed to resolve route key for token {token_id}: {e}")
         return ""
 
     def _has_connection_for_route_key(self, route_key: str, managed_api_key_id: Optional[int]) -> bool:
-        return self._select_connection(route_key, managed_api_key_id, for_captcha=True) is not None
+        return self._select_connection("", managed_api_key_id, for_captcha=True) is not None
 
     async def has_connection_for_managed_key(self, managed_api_key_id: Optional[int]) -> bool:
         if managed_api_key_id is None:
@@ -837,14 +782,13 @@ class ExtensionCaptchaService:
         token_id: Optional[int],
         managed_api_key_id: Optional[int] = None,
     ) -> tuple[bool, str]:
-        route_key = await self._resolve_route_key(token_id)
+        route_key = ""
         if managed_api_key_id is not None:
             has_connection = await self.has_connection_for_managed_key(managed_api_key_id)
             if not has_connection:
-                # Dedicated worker mode can route by dedicated token binding even without managed key.
                 has_connection = await self.has_connection_for_dedicated_token(token_id)
             return has_connection, route_key
-        return self._has_connection_for_route_key(route_key, managed_api_key_id), route_key
+        return self._has_connection_for_route_key("", managed_api_key_id), route_key
 
     async def _wait_for_connection(
         self,
@@ -910,7 +854,6 @@ class ExtensionCaptchaService:
             if message_type == "register":
                 conn = self._find_connection(websocket)
                 if conn:
-                    conn.route_key = (payload.get("route_key") or conn.route_key or "").strip()
                     conn.client_label = (payload.get("client_label") or conn.client_label or "").strip()
                     conn.instance_id = (payload.get("instance_id") or conn.instance_id or "").strip()
                     if conn.dedicated_worker_id and self.db and hasattr(self.db, "get_dedicated_extension_worker"):
@@ -924,13 +867,8 @@ class ExtensionCaptchaService:
                             )
                     if conn.dedicated_worker_id and self.db and hasattr(self.db, "update_dedicated_extension_worker"):
                         try:
-                            rk = (conn.route_key or "").strip() or None
-                            extra: Dict[str, Any] = {}
-                            if rk is not None:
-                                extra["route_key"] = rk
                             await self.db.update_dedicated_extension_worker(
                                 conn.dedicated_worker_id,
-                                **extra,
                                 last_instance_id=conn.instance_id or None,
                                 mark_seen=True,
                                 last_error="",
@@ -962,26 +900,9 @@ class ExtensionCaptchaService:
                                 f"[Extension Captcha] Failed to update captcha worker heartbeat: {register_error}"
                             )
                     elif conn.binding_source == "authenticated" and conn.managed_api_key_id is not None:
-                        try:
-                            if conn.route_key and self.db and hasattr(self.db, "upsert_extension_worker_binding"):
-                                await self.db.upsert_extension_worker_binding(conn.route_key, conn.managed_api_key_id)
-                        except Exception as exc:
-                            register_error = str(exc)
-                            debug_logger.log_warning(
-                                f"[Extension Captcha] Failed to persist authenticated route binding: {register_error}"
-                            )
-                    else:
-                        try:
-                            await self._apply_route_binding_to_connection(
-                                conn,
-                                claimed_managed_api_key_id=payload.get("managed_api_key_id"),
-                            )
-                        except Exception as exc:
-                            register_error = str(exc)
-                            debug_logger.log_warning(f"[Extension Captcha] Invalid managed key claim: {register_error}")
+                        conn.route_key = ""
                     debug_logger.log_info(
-                        f"[Extension Captcha] Client registered route_key={conn.route_key or '-'}, "
-                        f"label={conn.client_label or '-'}, "
+                        f"[Extension Captcha] Client registered label={conn.client_label or '-'}, "
                         f"managed_api_key_id={conn.managed_api_key_id}, source={conn.binding_source}"
                     )
                     await self._send_ack(
@@ -989,7 +910,6 @@ class ExtensionCaptchaService:
                         {
                             "type": "register_ack",
                             "worker_session_id": conn.worker_session_id,
-                            "route_key": conn.route_key,
                             "client_label": conn.client_label,
                             "instance_id": conn.instance_id,
                             "managed_api_key_id": conn.managed_api_key_id,
@@ -1106,8 +1026,6 @@ class ExtensionCaptchaService:
         managed_api_key_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         route_key = ""
-        if managed_api_key_id is None:
-            route_key = await self._resolve_route_key(token_id)
         if managed_api_key_id is None and token_id is not None:
             if not self.has_generation_worker_for_token(token_id):
                 raise NoExtensionGenerationWorkerError(
@@ -1134,10 +1052,10 @@ class ExtensionCaptchaService:
         )
         if conn is None:
             raise RuntimeError("No extension worker available for generation submit")
-        selection_source = "dedicated" if selection_meta.get("dedicated_hybrid") else "managed_or_route"
+        selection_source = "dedicated" if selection_meta.get("dedicated_hybrid") else "managed_key"
         debug_logger.log_info(
             f"[EXT-GEN] submit worker selected: source={selection_source}, worker_session_id={conn.worker_session_id}, "
-            f"token_id={token_id}, managed_api_key_id={managed_api_key_id}, route_key={route_key or '-'}"
+            f"token_id={token_id}, managed_api_key_id={managed_api_key_id}"
         )
         payload = {
             "url": str(url or "").strip(),
@@ -1165,8 +1083,6 @@ class ExtensionCaptchaService:
         managed_api_key_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         route_key = ""
-        if managed_api_key_id is None:
-            route_key = await self._resolve_route_key(token_id)
         if managed_api_key_id is None and token_id is not None:
             if not self.has_generation_worker_for_token(token_id):
                 raise NoExtensionGenerationWorkerError(
@@ -1193,10 +1109,10 @@ class ExtensionCaptchaService:
         )
         if conn is None:
             raise RuntimeError("No extension worker available for generation polling fallback")
-        selection_source = "dedicated" if selection_meta.get("dedicated_hybrid") else "managed_or_route"
+        selection_source = "dedicated" if selection_meta.get("dedicated_hybrid") else "managed_key"
         debug_logger.log_info(
             f"[EXT-GEN] poll worker selected: source={selection_source}, worker_session_id={conn.worker_session_id}, "
-            f"token_id={token_id}, managed_api_key_id={managed_api_key_id}, route_key={route_key or '-'}"
+            f"token_id={token_id}, managed_api_key_id={managed_api_key_id}"
         )
         payload = {
             "url": str(url or "").strip(),
@@ -1236,12 +1152,10 @@ class ExtensionCaptchaService:
             "req_id": req_id,
             "action": action,
             "project_id": project_id,
-            "route_key": route_key,
             "managed_api_key_id": managed_api_key_id,
         }
         try:
             dispatch_parts = [
-                f"route_key={route_key or '-'}",
                 f"label={conn.client_label or '-'}",
                 f"worker_session_id={conn.worker_session_id}",
                 f"project_id={project_id}",
@@ -1360,8 +1274,6 @@ class ExtensionCaptchaService:
         managed_api_key_id: Optional[int] = None,
     ) -> tuple[Optional[str], Optional[str]]:
         route_key = ""
-        if managed_api_key_id is None:
-            route_key = await self._resolve_route_key(token_id)
         queue_wait_timeout = 20
         fallback_to_managed = False
         if self.db and hasattr(self.db, "get_captcha_config"):
@@ -1391,9 +1303,9 @@ class ExtensionCaptchaService:
             waiting_count = self._queue_waiters.get(qkey, 0)
             raise RuntimeError(
                 f"No Chrome Extension connection matched this request after waiting {queue_wait_timeout}s: "
-                f"managed_api_key_id={managed_api_key_id}, token_id={token_id}, route_key='{route_key}', "
+                f"managed_api_key_id={managed_api_key_id}, token_id={token_id}, "
                 f"queue={qkey}, queue_waiters={waiting_count}. "
-                f"Available route keys: {available}. Active workers: {workers_verbose}"
+                f"Available workers: {available}. Active workers: {workers_verbose}"
             )
 
         async with conn.dispatch_lock:
@@ -1409,7 +1321,7 @@ class ExtensionCaptchaService:
         if token:
             return token, ext_req_id
 
-        # One-shot retry on another general captcha worker before falling back to legacy managed-key routing.
+        # One-shot retry on another general captcha worker before falling back to managed-key routing.
         if conn.captcha_worker_id is not None:
             sel_meta_cw_alt: Dict[str, Any] = {}
             conn_cw_alt = self._select_connection(
@@ -1670,7 +1582,6 @@ class ExtensionCaptchaService:
                 {
                     "worker_session_id": conn.worker_session_id,
                     "instance_id": conn.instance_id,
-                    "route_key": conn.route_key,
                     "client_label": conn.client_label,
                     "managed_api_key_id": conn.managed_api_key_id,
                     "binding_source": conn.binding_source,

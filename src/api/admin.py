@@ -2406,8 +2406,8 @@ async def list_extension_workers(token: str = Depends(verify_admin_token)):
     queue_stats = service.get_queue_stats()
     return {
         "success": True,
-        "mode": "managed_key_primary_with_dedicated_fallback",
-        "note": "Requests prefer workers bound to the same managed API key; dedicated worker-mode connections can be used as token-bound fallback when managed-key binding is absent.",
+        "mode": "three_worker_types",
+        "note": "Extension mode uses server-side captcha workers, managed-key end user captcha workers, and token-bound refresh workers.",
         "workers": active_workers,
         "bindings": bindings,
         "queue_stats": queue_stats,

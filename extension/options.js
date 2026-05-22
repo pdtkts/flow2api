@@ -4,7 +4,6 @@ const DEFAULT_SETTINGS = {
   apiKey: "",
   captchaWorkerAuthKey: "",
   workerAuthKey: "",
-  routeKey: "",
   clientLabel: ""
 };
 
@@ -18,7 +17,6 @@ const STORAGE_KEYS = {
   apiKey: "",
   captchaWorkerAuthKey: "",
   workerAuthKey: "",
-  routeKey: "",
   clientLabel: "",
   workerPageUrl: DEFAULT_WORKER_PAGE_URL,
   usePersistentWorkerTab: true,
@@ -63,7 +61,6 @@ function normalizeSettings(values) {
     apiKey: (values.apiKey || "").trim(),
     captchaWorkerAuthKey: (values.captchaWorkerAuthKey || "").trim(),
     workerAuthKey: (values.workerAuthKey || "").trim(),
-    routeKey: (values.routeKey || "").trim(),
     clientLabel: (values.clientLabel || "").trim(),
     workerPageUrl: normalizeWorkerPageUrl(values.workerPageUrl),
     usePersistentWorkerTab: !!values.usePersistentWorkerTab,
@@ -170,7 +167,6 @@ function applyLoadedSettings(stored, inferredMode) {
   $("apiKey").value = settings.apiKey;
   $("captchaWorkerAuthKey").value = settings.captchaWorkerAuthKey;
   $("workerAuthKey").value = settings.workerAuthKey;
-  $("routeKey").value = settings.routeKey;
   $("clientLabel").value = settings.clientLabel;
   $("workerPageUrl").value = settings.workerPageUrl;
   $("workerRecaptchaSettleMs").value = String(settings.workerRecaptchaSettleMs);
@@ -193,22 +189,21 @@ function saveSettings() {
   if (mode === "endUser") {
     const apiKey = ($("apiKey").value || "").trim();
     if (!apiKey) {
-      setStatus("API Key is required for End user mode.", true);
+      setStatus("API Key is required for End user worker mode.", true);
       return;
     }
     const payload = {
       serverUrl,
       connectionMode: "endUser",
       apiKey,
-      clientLabel: ($("clientLabel").value || "").trim(),
-      routeKey: ($("routeKey").value || "").trim()
+      clientLabel: ($("clientLabel").value || "").trim()
     };
     chrome.storage.local.set(payload, () => {
       if (chrome.runtime.lastError) {
         setStatus(`Save failed: ${chrome.runtime.lastError.message}`, true);
         return;
       }
-      setStatus("Saved connection (End user). Background will reconnect.");
+      setStatus("Saved connection (End user worker). Background will reconnect.");
     });
     return;
   }
@@ -225,8 +220,7 @@ function saveSettings() {
         connectionMode: "captchaWorker",
         captchaWorkerAuthKey,
         apiKey: "",
-        clientLabel: "",
-        routeKey: ""
+        clientLabel: ""
       },
       () => {
         if (chrome.runtime.lastError) {
@@ -236,7 +230,6 @@ function saveSettings() {
         setStatus("Saved connection (Captcha worker). Background will reconnect.");
         $("apiKey").value = "";
         $("clientLabel").value = "";
-        $("routeKey").value = "";
       }
     );
     return;
@@ -252,8 +245,7 @@ function saveSettings() {
     connectionMode: "refreshWorker",
     workerAuthKey,
     apiKey: "",
-    clientLabel: "",
-    routeKey: ""
+    clientLabel: ""
   };
   chrome.storage.local.set(payload, () => {
     if (chrome.runtime.lastError) {
@@ -263,7 +255,6 @@ function saveSettings() {
     setStatus("Saved connection (Refresh worker). API key and labels cleared. Background will reconnect.");
     $("apiKey").value = "";
     $("clientLabel").value = "";
-    $("routeKey").value = "";
   });
 }
 
@@ -453,7 +444,6 @@ function renderStatusCards(state) {
   const cardsEl = $("statusCards");
   const ws = state.wsStatus || "unknown";
   const mode = state.connectionMode || "-";
-  const route = state.routeKey || "(empty)";
   const instance = state.instanceId || "-";
   const workerSession = state.workerSessionId || "-";
   const managed = state.managedApiKeyId || "-";
@@ -478,7 +468,6 @@ function renderStatusCards(state) {
     ["Dedicated worker", dedicatedWorker, false],
     ["Dedicated token", dedicatedToken, false],
     ["Allow generation", state.allowGeneration ? "yes" : "no", false],
-    ["Route key", route, false],
     ["Instance ID", instance, false],
     ["Worker session", workerSession, false],
     ["Persistent worker tab", persistent, false],
@@ -609,7 +598,7 @@ function reconnectNow() {
 }
 
 function runResetExtension() {
-  if (!confirm("Reset this extension?\n\nThis removes WebSocket URL, API keys, labels, route key, worker tab settings (URL, persistent tab, auto-recycle, reCAPTCHA settle delay), captcha job stats and history, session refresh counters, stored Flow session token history (last 3), worker tab id, and assigns a new instance id. The background worker reconnects with default local URL.")) {
+  if (!confirm("Reset this extension?\n\nThis removes WebSocket URL, API keys, labels, worker tab settings (URL, persistent tab, auto-recycle, reCAPTCHA settle delay), captcha job stats and history, session refresh counters, stored Flow session token history (last 3), worker tab id, and assigns a new instance id. The background worker reconnects with default local URL.")) {
     return;
   }
   setStatus("Resetting extension…", false);

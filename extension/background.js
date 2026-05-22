@@ -10,7 +10,6 @@ const DEFAULT_SETTINGS = {
     apiKey: "",
     captchaWorkerAuthKey: "",
     workerAuthKey: "",
-    routeKey: "",
     clientLabel: "",
 };
 
@@ -44,7 +43,6 @@ const STORAGE_WORKER_TAB_ID = "extensionWorkerTabId";
 const runtimeState = {
     wsStatus: "idle",
     connectionMode: "",
-    routeKey: "",
     instanceId: "",
     workerSessionId: "",
     managedApiKeyId: "",
@@ -370,7 +368,6 @@ function getSettings() {
                 apiKey: (stored.apiKey || "").trim(),
                 captchaWorkerAuthKey: (stored.captchaWorkerAuthKey || "").trim(),
                 workerAuthKey: (stored.workerAuthKey || "").trim(),
-                routeKey: (stored.routeKey || "").trim(),
                 clientLabel: (stored.clientLabel || "").trim(),
                 workerPageUrl: normalizeWorkerPageUrl(stored.workerPageUrl),
                 usePersistentWorkerTab: !!stored.usePersistentWorkerTab,
@@ -503,7 +500,6 @@ async function performSessionRefresh({ reason = "server_request", reqId = null }
 function resetRuntimeStatePartial() {
     runtimeState.wsStatus = "idle";
     runtimeState.connectionMode = "";
-    runtimeState.routeKey = "";
     runtimeState.workerSessionId = "";
     runtimeState.managedApiKeyId = "";
     runtimeState.captchaWorkerId = "";
@@ -557,7 +553,7 @@ function resetExtensionToDefaults(done) {
     closeSocket();
     closeWorkerTabIfAny().finally(() => {
         chrome.storage.local.remove(
-            ["extensionInstanceId", FLOW_SESSION_TOKEN_HISTORY_KEY, STORAGE_WORKER_TAB_ID],
+            ["extensionInstanceId", "routeKey", FLOW_SESSION_TOKEN_HISTORY_KEY, STORAGE_WORKER_TAB_ID],
             () => {
                 chrome.storage.local.set(
                     {
@@ -566,7 +562,6 @@ function resetExtensionToDefaults(done) {
                         apiKey: DEFAULT_SETTINGS.apiKey,
                         captchaWorkerAuthKey: DEFAULT_SETTINGS.captchaWorkerAuthKey,
                         workerAuthKey: DEFAULT_SETTINGS.workerAuthKey,
-                        routeKey: DEFAULT_SETTINGS.routeKey,
                         clientLabel: DEFAULT_SETTINGS.clientLabel,
                         workerPageUrl: DEFAULT_WORKER_PAGE_URL,
                         usePersistentWorkerTab: DEFAULT_WORKER_SETTINGS.usePersistentWorkerTab,
@@ -1182,7 +1177,6 @@ async function connectWS() {
     const mode = rawMode === "captchaWorker" || rawMode === "refreshWorker" ? rawMode : "endUser";
     stopWorkerSessionRefreshScheduler();
     runtimeState.connectionMode = mode;
-    runtimeState.routeKey = mode === "endUser" ? settings.routeKey : "";
     runtimeState.instanceId = instanceId;
     runtimeState.workerSessionId = "";
     runtimeState.managedApiKeyId = "";
@@ -1206,9 +1200,6 @@ async function connectWS() {
         if (settings.apiKey) {
             url.searchParams.set("key", settings.apiKey);
         }
-        if (settings.routeKey) {
-            url.searchParams.set("route_key", settings.routeKey);
-        }
         if (settings.clientLabel) {
             url.searchParams.set("client_label", settings.clientLabel);
         }
@@ -1224,7 +1215,6 @@ async function connectWS() {
         pushEvent("connect_open", "WebSocket connected");
         socket.send(JSON.stringify({
             type: "register",
-            route_key: mode === "endUser" ? settings.routeKey : "",
             client_label: mode === "endUser" ? settings.clientLabel : "",
             instance_id: instanceId,
         }));
@@ -1276,9 +1266,7 @@ async function connectWS() {
                 runtimeState.lastError = "";
                 pushEvent("register_ack", "Register successful");
                 console.log(
-                    "[Flow2API] Registered route key:",
-                    data.route_key || "(empty)",
-                    "managed_api_key_id=",
+                    "[Flow2API] Registered managed_api_key_id=",
                     runtimeState.managedApiKeyId || "-",
                     "captcha_worker_id=",
                     runtimeState.captchaWorkerId || "-",
@@ -1452,7 +1440,6 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 chrome.storage.onChanged.addListener((changes, areaName) => {
     if (areaName !== "local") return;
     if (
-        changes.routeKey ||
         changes.serverUrl ||
         changes.clientLabel ||
         changes.apiKey ||
