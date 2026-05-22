@@ -14,7 +14,7 @@ const DEFAULT_SETTINGS = {
     clientLabel: "",
 };
 
-const DEFAULT_WORKER_PAGE_URL = "https://labs.google/fx/tools/flow";
+const DEFAULT_WORKER_PAGE_URL = "https://labs.google/fx/api/auth/providers";
 
 const WORKER_RECAPTCHA_SETTLE_DEFAULT_MS = 3000;
 const WORKER_RECAPTCHA_SETTLE_MAX_MS = 120000;
