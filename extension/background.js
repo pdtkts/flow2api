@@ -9,7 +9,7 @@ const DEFAULT_SETTINGS = {
     connectionMode: "endUser",
     apiKey: "",
     captchaWorkerAuthKey: "",
-    workerAuthKey: "",
+    refreshTokenId: "",
     clientLabel: "",
 };
 
@@ -47,8 +47,7 @@ const runtimeState = {
     workerSessionId: "",
     managedApiKeyId: "",
     captchaWorkerId: "",
-    dedicatedWorkerId: "",
-    dedicatedTokenId: "",
+    refreshTokenId: "",
     bindingSource: "",
     lastRegisterStatus: "never",
     lastRegisterError: "",
@@ -85,10 +84,10 @@ function inferConnectionMode(stored) {
         return explicit === "worker" ? "refreshWorker" : explicit;
     }
     const cwk = String(stored.captchaWorkerAuthKey || "").trim();
-    const wk = String(stored.workerAuthKey || "").trim();
+    const refreshTokenId = String(stored.refreshTokenId || "").trim();
     const ak = String(stored.apiKey || "").trim();
     if (cwk && !ak) return "captchaWorker";
-    if (wk && !ak) return "refreshWorker";
+    if (refreshTokenId && !ak) return "refreshWorker";
     return "endUser";
 }
 
@@ -367,7 +366,7 @@ function getSettings() {
                 connectionMode,
                 apiKey: (stored.apiKey || "").trim(),
                 captchaWorkerAuthKey: (stored.captchaWorkerAuthKey || "").trim(),
-                workerAuthKey: (stored.workerAuthKey || "").trim(),
+                refreshTokenId: String(stored.refreshTokenId || "").trim(),
                 clientLabel: (stored.clientLabel || "").trim(),
                 workerPageUrl: normalizeWorkerPageUrl(stored.workerPageUrl),
                 usePersistentWorkerTab: !!stored.usePersistentWorkerTab,
@@ -503,8 +502,7 @@ function resetRuntimeStatePartial() {
     runtimeState.workerSessionId = "";
     runtimeState.managedApiKeyId = "";
     runtimeState.captchaWorkerId = "";
-    runtimeState.dedicatedWorkerId = "";
-    runtimeState.dedicatedTokenId = "";
+    runtimeState.refreshTokenId = "";
     runtimeState.bindingSource = "";
     runtimeState.lastRegisterStatus = "never";
     runtimeState.lastRegisterError = "";
@@ -561,7 +559,7 @@ function resetExtensionToDefaults(done) {
                         connectionMode: DEFAULT_SETTINGS.connectionMode,
                         apiKey: DEFAULT_SETTINGS.apiKey,
                         captchaWorkerAuthKey: DEFAULT_SETTINGS.captchaWorkerAuthKey,
-                        workerAuthKey: DEFAULT_SETTINGS.workerAuthKey,
+                        refreshTokenId: DEFAULT_SETTINGS.refreshTokenId,
                         clientLabel: DEFAULT_SETTINGS.clientLabel,
                         workerPageUrl: DEFAULT_WORKER_PAGE_URL,
                         usePersistentWorkerTab: DEFAULT_WORKER_SETTINGS.usePersistentWorkerTab,
@@ -1193,8 +1191,8 @@ async function connectWS() {
             url.searchParams.set("captcha_worker_key", settings.captchaWorkerAuthKey);
         }
     } else if (mode === "refreshWorker") {
-        if (settings.workerAuthKey) {
-            url.searchParams.set("worker_key", settings.workerAuthKey);
+        if (settings.refreshTokenId) {
+            url.searchParams.set("refresh_token_id", settings.refreshTokenId);
         }
     } else {
         if (settings.apiKey) {
@@ -1247,8 +1245,7 @@ async function connectWS() {
             runtimeState.workerSessionId = String(data.worker_session_id || "");
             runtimeState.managedApiKeyId = String(data.managed_api_key_id || "");
             runtimeState.captchaWorkerId = String(data.captcha_worker_id || "");
-            runtimeState.dedicatedWorkerId = String(data.dedicated_worker_id || "");
-            runtimeState.dedicatedTokenId = String(data.dedicated_token_id || "");
+            runtimeState.refreshTokenId = String(data.refresh_token_id || "");
             const ac = data.allow_captcha;
             const ar = data.allow_session_refresh;
             const ag = data.allow_generation;
@@ -1346,7 +1343,7 @@ async function handleGetToken(data) {
                 })
             );
         }
-        pushEvent("get_token_blocked", "Captcha disabled for this worker key", "warn");
+        pushEvent("get_token_blocked", "Captcha disabled for this worker", "warn");
         return;
     }
     const action = data.action || "IMAGE_GENERATION";
@@ -1423,7 +1420,7 @@ async function handleRefreshSessionToken(data) {
                 })
             );
         }
-        pushEvent("refresh_st_blocked", "Session refresh disabled for this worker key", "warn");
+        pushEvent("refresh_st_blocked", "Session refresh disabled for this worker", "warn");
         return;
     }
     await performSessionRefresh({ reason: "server_request", reqId: data && data.req_id ? data.req_id : null });
@@ -1444,7 +1441,7 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
         changes.clientLabel ||
         changes.apiKey ||
         changes.captchaWorkerAuthKey ||
-        changes.workerAuthKey ||
+        changes.refreshTokenId ||
         changes.connectionMode
     ) {
         console.log("[Flow2API] Extension settings changed, reconnecting WebSocket...");

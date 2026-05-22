@@ -3,7 +3,7 @@ const DEFAULT_SETTINGS = {
   connectionMode: "endUser",
   apiKey: "",
   captchaWorkerAuthKey: "",
-  workerAuthKey: "",
+  refreshTokenId: "",
   clientLabel: ""
 };
 
@@ -16,7 +16,7 @@ const STORAGE_KEYS = {
   connectionMode: DEFAULT_SETTINGS.connectionMode,
   apiKey: "",
   captchaWorkerAuthKey: "",
-  workerAuthKey: "",
+  refreshTokenId: "",
   clientLabel: "",
   workerPageUrl: DEFAULT_WORKER_PAGE_URL,
   usePersistentWorkerTab: true,
@@ -60,7 +60,7 @@ function normalizeSettings(values) {
     connectionMode: mode,
     apiKey: (values.apiKey || "").trim(),
     captchaWorkerAuthKey: (values.captchaWorkerAuthKey || "").trim(),
-    workerAuthKey: (values.workerAuthKey || "").trim(),
+    refreshTokenId: String(values.refreshTokenId || "").trim(),
     clientLabel: (values.clientLabel || "").trim(),
     workerPageUrl: normalizeWorkerPageUrl(values.workerPageUrl),
     usePersistentWorkerTab: !!values.usePersistentWorkerTab,
@@ -75,10 +75,10 @@ function inferConnectionMode(stored) {
     return explicit === "worker" ? "refreshWorker" : explicit;
   }
   const cwk = (stored.captchaWorkerAuthKey || "").trim();
-  const wk = (stored.workerAuthKey || "").trim();
+  const refreshTokenId = String(stored.refreshTokenId || "").trim();
   const ak = (stored.apiKey || "").trim();
   if (cwk && !ak) return "captchaWorker";
-  if (wk && !ak) return "refreshWorker";
+  if (refreshTokenId && !ak) return "refreshWorker";
   return "endUser";
 }
 
@@ -166,7 +166,7 @@ function applyLoadedSettings(stored, inferredMode) {
   $("serverUrl").value = settings.serverUrl;
   $("apiKey").value = settings.apiKey;
   $("captchaWorkerAuthKey").value = settings.captchaWorkerAuthKey;
-  $("workerAuthKey").value = settings.workerAuthKey;
+  $("refreshTokenId").value = settings.refreshTokenId;
   $("clientLabel").value = settings.clientLabel;
   $("workerPageUrl").value = settings.workerPageUrl;
   $("workerRecaptchaSettleMs").value = String(settings.workerRecaptchaSettleMs);
@@ -235,15 +235,15 @@ function saveSettings() {
     return;
   }
 
-  const workerAuthKey = ($("workerAuthKey").value || "").trim();
-  if (!workerAuthKey) {
-    setStatus("Refresh worker key is required for Refresh worker mode.", true);
+  const refreshTokenId = String(($("refreshTokenId").value || "")).trim();
+  if (!/^[1-9]\d*$/.test(refreshTokenId)) {
+    setStatus("A positive Token ID is required for Refresh worker mode.", true);
     return;
   }
   const payload = {
     serverUrl,
     connectionMode: "refreshWorker",
-    workerAuthKey,
+    refreshTokenId,
     apiKey: "",
     clientLabel: ""
   };
@@ -448,8 +448,7 @@ function renderStatusCards(state) {
   const workerSession = state.workerSessionId || "-";
   const managed = state.managedApiKeyId || "-";
   const captchaWorker = state.captchaWorkerId || "-";
-  const dedicatedWorker = state.dedicatedWorkerId || "-";
-  const dedicatedToken = state.dedicatedTokenId || "-";
+  const refreshToken = state.refreshTokenId || "-";
   const ack = state.lastRegisterStatus || "unknown";
   const source = state.bindingSource || "unknown";
   const registerError = state.lastRegisterError || "-";
@@ -465,8 +464,7 @@ function renderStatusCards(state) {
     ["Binding", source, false],
     ["Managed key", managed, false],
     ["Captcha worker", captchaWorker, false],
-    ["Dedicated worker", dedicatedWorker, false],
-    ["Dedicated token", dedicatedToken, false],
+    ["Refresh token", refreshToken, false],
     ["Allow generation", state.allowGeneration ? "yes" : "no", false],
     ["Instance ID", instance, false],
     ["Worker session", workerSession, false],

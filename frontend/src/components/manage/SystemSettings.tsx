@@ -120,10 +120,7 @@ type ExtensionWorkerRow = {
   captcha_worker_id?: number | null
   captcha_worker_key_label?: string | null
   captcha_worker_key_prefix?: string | null
-  dedicated_worker_id?: number | null
-  dedicated_token_id?: number | null
-  dedicated_worker_key_label?: string | null
-  worker_key_prefix?: string | null
+  refresh_token_id?: number | null
   allow_captcha?: boolean
   allow_session_refresh?: boolean
   allow_generation?: boolean
@@ -685,8 +682,8 @@ export function SystemSettings({ active }: { active: boolean }) {
   const supportsAtRefreshMode = ["extension", "browser", "personal", "remote_browser"].includes(m)
   const captchaWorkers = extensionWorkers.filter((w) => w.captcha_worker_id != null)
   const endUserWorkers = extensionWorkers.filter((w) => w.managed_api_key_id !== null)
-  const dedicatedWorkers = extensionWorkers.filter(
-    (w) => w.captcha_worker_id == null && w.managed_api_key_id === null && (w.dedicated_worker_id != null || w.dedicated_token_id != null)
+  const refreshWorkers = extensionWorkers.filter(
+    (w) => w.captcha_worker_id == null && w.managed_api_key_id === null && w.refresh_token_id != null
   )
 
   return (
@@ -1470,24 +1467,18 @@ export function SystemSettings({ active }: { active: boolean }) {
                 </div>
                 <div className="rounded-md border">
                   <div className="px-3 py-2 text-xs font-medium border-b bg-muted/30">Refresh workers</div>
-                  <div className="grid grid-cols-7 gap-2 px-3 py-2 text-xs font-medium border-b">
+                  <div className="grid grid-cols-6 gap-2 px-3 py-2 text-xs font-medium border-b">
                     <span>Worker ID</span>
-                    <span>Refresh key</span>
                     <span>Token ID</span>
                     <span>Work</span>
                     <span>Source</span>
                     <span>Connected at</span>
                     <span>Action</span>
                   </div>
-                  {dedicatedWorkers.map((w) => (
-                    <div key={w.worker_session_id} className="grid grid-cols-7 gap-2 px-3 py-2 text-xs border-b last:border-b-0 items-start">
+                  {refreshWorkers.map((w) => (
+                    <div key={w.worker_session_id} className="grid grid-cols-6 gap-2 px-3 py-2 text-xs border-b last:border-b-0 items-start">
                       <span className="font-mono min-w-0 break-all whitespace-normal">{w.worker_session_id || "-"}</span>
-                      <span className="min-w-0 break-words whitespace-normal">
-                        {(w.dedicated_worker_key_label || "").trim() ||
-                          (w.worker_key_prefix || "").trim() ||
-                          (w.dedicated_worker_id != null ? `#${w.dedicated_worker_id}` : "-")}
-                      </span>
-                      <span>{w.dedicated_token_id ?? "-"}</span>
+                      <span>{w.refresh_token_id ?? "-"}</span>
                       <span>ST refresh only</span>
                       <span className="min-w-0 break-words whitespace-normal">{w.binding_source || "-"}</span>
                       <span>{w.connected_at ? new Date(w.connected_at * 1000).toLocaleTimeString() : "-"}</span>
@@ -1503,7 +1494,7 @@ export function SystemSettings({ active }: { active: boolean }) {
                       </span>
                     </div>
                   ))}
-                  {dedicatedWorkers.length === 0 ? (
+                  {refreshWorkers.length === 0 ? (
                     <div className="px-3 py-3 text-xs text-muted-foreground">No refresh worker connections</div>
                   ) : null}
                 </div>

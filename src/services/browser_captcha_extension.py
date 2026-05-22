@@ -45,7 +45,7 @@ class DedicatedWorkerStats:
 
 @dataclass
 class ExtensionStRefreshResult:
-    """Outcome of extension-based ST refresh for a dedicated token (no cross-profile fallback)."""
+    """Outcome of extension-based ST refresh for a token-ID-bound worker."""
 
     session_token: Optional[str] = None
     failure_code: Optional[str] = None
@@ -63,11 +63,7 @@ class ExtensionConnection:
     captcha_worker_id: Optional[int] = None
     captcha_worker_key_label: str = ""
     captcha_worker_key_prefix: str = ""
-    dedicated_worker_id: Optional[int] = None
-    dedicated_token_id: Optional[int] = None
-    # Registration key metadata (dedicated_extension_workers.label / worker_key_prefix).
-    dedicated_worker_key_label: str = ""
-    worker_key_prefix: str = ""
+    refresh_token_id: Optional[int] = None
     allow_captcha: bool = True
     allow_session_refresh: bool = True
     allow_generation: bool = False
@@ -246,8 +242,8 @@ class ExtensionCaptchaService:
         candidates = [
             c
             for c in pool
-            if c.dedicated_token_id is not None
-            and int(c.dedicated_token_id) == tid
+            if c.refresh_token_id is not None
+            and int(c.refresh_token_id) == tid
             and c.worker_session_id not in exclude
             and eligible_fn(c)
         ]
@@ -440,7 +436,7 @@ class ExtensionCaptchaService:
         *,
         authenticated_managed_api_key_id: Optional[int] = None,
         authenticated_captcha_worker: Optional[Dict[str, Any]] = None,
-        authenticated_worker: Optional[Dict[str, Any]] = None,
+        refresh_token_id: Optional[int] = None,
     ):
         await websocket.accept()
         conn = ExtensionConnection(
@@ -480,26 +476,12 @@ class ExtensionCaptchaService:
             conn.binding_source = "authenticated"
         else:
             conn.binding_source = "none"
-        if authenticated_worker:
-            conn.dedicated_worker_id = int(authenticated_worker.get("id"))
-            token_id = authenticated_worker.get("token_id")
-            conn.dedicated_token_id = int(token_id) if token_id is not None else None
-            conn.dedicated_worker_key_label = str(authenticated_worker.get("label") or "").strip()
-            conn.worker_key_prefix = str(authenticated_worker.get("worker_key_prefix") or "").strip()
-            conn.binding_source = "refresh_worker_key"
+        if refresh_token_id is not None:
+            conn.refresh_token_id = int(refresh_token_id)
+            conn.binding_source = "refresh_token_id"
             conn.allow_captcha = False
             conn.allow_session_refresh = True
             conn.allow_generation = False
-            try:
-                if self.db and hasattr(self.db, "update_dedicated_extension_worker"):
-                    await self.db.update_dedicated_extension_worker(
-                        conn.dedicated_worker_id,
-                        last_instance_id=conn.instance_id or None,
-                        mark_seen=True,
-                        last_error="",
-                    )
-            except Exception as exc:
-                debug_logger.log_warning(f"[Extension Captcha] Failed to persist refresh worker heartbeat: {exc}")
         self.active_connections.append(conn)
         debug_logger.log_info(
             f"[Extension Captcha] Client connected. Total: {len(self.active_connections)}, "
@@ -556,29 +538,23 @@ class ExtensionCaptchaService:
 
     @staticmethod
     def _conn_eligible_for_captcha(conn: ExtensionConnection) -> bool:
-        if conn.dedicated_worker_id is None:
-            return True
-        return bool(conn.allow_captcha)
+        return conn.refresh_token_id is None and bool(conn.allow_captcha)
 
     @staticmethod
     def _conn_eligible_for_session_refresh(conn: ExtensionConnection) -> bool:
-        if conn.dedicated_worker_id is None:
-            return True
-        return bool(conn.allow_session_refresh)
+        return conn.refresh_token_id is not None and bool(conn.allow_session_refresh)
 
     @staticmethod
     def _conn_eligible_for_generation(conn: ExtensionConnection) -> bool:
-        if conn.dedicated_worker_id is None:
-            return True
-        return bool(conn.allow_generation)
+        return conn.refresh_token_id is None
 
     def has_generation_worker_for_token(self, token_id: Optional[int]) -> bool:
         if token_id is None:
             return False
         tid = int(token_id)
         return any(
-            c.dedicated_token_id is not None
-            and int(c.dedicated_token_id) == tid
+            c.refresh_token_id is not None
+            and int(c.refresh_token_id) == tid
             and self._conn_eligible_for_generation(c)
             for c in self.active_connections
         )
@@ -592,7 +568,7 @@ class ExtensionCaptchaService:
         tid = int(exclude_dedicated_token_id)
         out: list[ExtensionConnection] = []
         for conn in self.active_connections:
-            did = conn.dedicated_token_id
+            did = conn.refresh_token_id
             if did is None:
                 out.append(conn)
                 continue
@@ -612,8 +588,8 @@ class ExtensionCaptchaService:
         """Advance RR cursor after dispatch picks a connection (not while polling in wait loop)."""
         if managed_api_key_id is None:
             return
-        if preferred_token_id is not None and conn.dedicated_token_id is not None:
-            if int(conn.dedicated_token_id) == int(preferred_token_id):
+        if preferred_token_id is not None and conn.refresh_token_id is not None:
+            if int(conn.refresh_token_id) == int(preferred_token_id):
                 return
         pool = self._connection_pool(exclude_dedicated_token_id=exclude_dedicated_token_id)
         candidate_connections = [
@@ -674,7 +650,7 @@ class ExtensionCaptchaService:
                 for conn in pool:
                     if exclude_worker_session_ids and conn.worker_session_id in exclude_worker_session_ids:
                         continue
-                    if conn.dedicated_token_id is not None and conn.dedicated_token_id == int(preferred_token_id):
+                    if conn.refresh_token_id is not None and conn.refresh_token_id == int(preferred_token_id):
                         if for_session_refresh and not self._conn_eligible_for_session_refresh(conn):
                             continue
                         return conn
@@ -765,7 +741,7 @@ class ExtensionCaptchaService:
             return False
         target_token_id = int(token_id)
         return any(
-            conn.dedicated_token_id == target_token_id and self._conn_eligible_for_captcha(conn)
+            conn.refresh_token_id == target_token_id and self._conn_eligible_for_captcha(conn)
             for conn in self.active_connections
         )
 
@@ -856,27 +832,6 @@ class ExtensionCaptchaService:
                 if conn:
                     conn.client_label = (payload.get("client_label") or conn.client_label or "").strip()
                     conn.instance_id = (payload.get("instance_id") or conn.instance_id or "").strip()
-                    if conn.dedicated_worker_id and self.db and hasattr(self.db, "get_dedicated_extension_worker"):
-                        try:
-                            fresh = await self.db.get_dedicated_extension_worker(int(conn.dedicated_worker_id))
-                            if fresh:
-                                self._apply_dedicated_worker_row_to_conn(conn, fresh)
-                        except Exception as exc:
-                            debug_logger.log_warning(
-                                f"[Extension Captcha] Failed to refresh dedicated worker caps from DB on register: {exc}"
-                            )
-                    if conn.dedicated_worker_id and self.db and hasattr(self.db, "update_dedicated_extension_worker"):
-                        try:
-                            await self.db.update_dedicated_extension_worker(
-                                conn.dedicated_worker_id,
-                                last_instance_id=conn.instance_id or None,
-                                mark_seen=True,
-                                last_error="",
-                            )
-                        except Exception as exc:
-                            debug_logger.log_warning(
-                                f"[Extension Captcha] Failed to update dedicated worker heartbeat: {exc}"
-                            )
                     register_error = None
                     if conn.captcha_worker_id is not None:
                         conn.route_key = ""
@@ -917,8 +872,7 @@ class ExtensionCaptchaService:
                             "captcha_worker_id": conn.captcha_worker_id,
                             "captcha_worker_key_label": conn.captcha_worker_key_label,
                             "captcha_worker_key_prefix": conn.captcha_worker_key_prefix,
-                            "dedicated_worker_id": conn.dedicated_worker_id,
-                            "dedicated_token_id": conn.dedicated_token_id,
+                            "refresh_token_id": conn.refresh_token_id,
                             "allow_captcha": conn.allow_captcha,
                             "allow_session_refresh": conn.allow_session_refresh,
                             "allow_generation": conn.allow_generation,
@@ -1139,7 +1093,7 @@ class ExtensionCaptchaService:
         timeout: int,
         selection_meta: Optional[Dict[str, Any]] = None,
     ) -> tuple[Optional[str], Optional[str]]:
-        track_dedicated = conn.dedicated_token_id is not None or conn.captcha_worker_id is not None
+        track_dedicated = conn.refresh_token_id is not None or conn.captcha_worker_id is not None
         t0 = time.time()
         if track_dedicated:
             async with self._dedicated_stats_lock:
@@ -1355,8 +1309,8 @@ class ExtensionCaptchaService:
         # One-shot retry on another dedicated worker for the same token (before managed fallback).
         if (
             token_id is not None
-            and conn.dedicated_token_id is not None
-            and int(conn.dedicated_token_id) == int(token_id)
+            and conn.refresh_token_id is not None
+            and int(conn.refresh_token_id) == int(token_id)
         ):
             sel_meta_alt: Dict[str, Any] = {}
             conn_alt = self._select_connection(
@@ -1387,8 +1341,8 @@ class ExtensionCaptchaService:
             fallback_to_managed
             and managed_api_key_id is not None
             and token_id is not None
-            and conn.dedicated_token_id is not None
-            and int(conn.dedicated_token_id) == int(token_id)
+            and conn.refresh_token_id is not None
+            and int(conn.refresh_token_id) == int(token_id)
         )
         if not use_fallback:
             return None, None
@@ -1450,74 +1404,16 @@ class ExtensionCaptchaService:
         finally:
             self.pending_requests.pop(req_id, None)
 
-    def _apply_dedicated_worker_row_to_conn(self, conn: ExtensionConnection, row: Dict[str, Any]) -> None:
-        """Refresh token binding and capability flags from a dedicated_extension_workers row."""
-        tid = row.get("token_id")
-        conn.dedicated_token_id = int(tid) if tid is not None else None
-        conn.dedicated_worker_key_label = str(row.get("label") or "").strip()
-        conn.worker_key_prefix = str(row.get("worker_key_prefix") or "").strip()
-        conn.allow_captcha = False
-        conn.allow_session_refresh = True
-        conn.allow_generation = False
-
-    async def _sync_active_connections_for_dedicated_token(self, token_id: int) -> None:
-        """Reconcile in-memory worker sockets with DB (binding/caps may change without reconnect)."""
-        if not self.db or not hasattr(self.db, "list_dedicated_extension_workers"):
-            return
-        try:
-            all_workers = await self.db.list_dedicated_extension_workers()
-        except Exception as exc:
-            debug_logger.log_warning(f"[Extension Captcha] ST routing sync: list workers failed: {exc}")
-            return
-        tid = int(token_id)
-        for row in all_workers or []:
-            rt = row.get("token_id")
-            if rt is None or int(rt) != tid:
-                continue
-            wid = row.get("id")
-            if wid is None:
-                continue
-            wid = int(wid)
-            for conn in self.active_connections:
-                if conn.dedicated_worker_id is not None and int(conn.dedicated_worker_id) == wid:
-                    self._apply_dedicated_worker_row_to_conn(conn, row)
-
     async def _classify_extension_st_refresh_no_connection(self, token_id: int) -> str:
-        """Reason code when no eligible dedicated websocket exists for ST refresh (strict routing)."""
+        """Reason code when no eligible token-ID refresh worker exists for ST refresh."""
         tid = int(token_id)
-        dedicated_for_token = [
+        workers_for_token = [
             c
             for c in self.active_connections
-            if c.dedicated_token_id is not None and int(c.dedicated_token_id) == tid
+            if c.refresh_token_id is not None and int(c.refresh_token_id) == tid
         ]
-        if dedicated_for_token and not any(self._conn_eligible_for_session_refresh(c) for c in dedicated_for_token):
+        if workers_for_token and not any(self._conn_eligible_for_session_refresh(c) for c in workers_for_token):
             return "extension_session_refresh_disabled"
-
-        if not self.db or not hasattr(self.db, "list_dedicated_extension_workers"):
-            return "extension_worker_offline"
-
-        try:
-            all_workers = await self.db.list_dedicated_extension_workers()
-        except Exception as exc:
-            debug_logger.log_warning(
-                f"[Extension Captcha] list_dedicated_extension_workers failed for ST routing: {exc}"
-            )
-            return "extension_no_worker_or_empty"
-
-        rows = [
-            w
-            for w in (all_workers or [])
-            if w.get("token_id") is not None and int(w["token_id"]) == tid
-        ]
-        if not rows:
-            return "extension_no_dedicated_worker"
-
-        def row_allows_refresh(w: Dict[str, Any]) -> bool:
-            return bool(int(w.get("allow_session_refresh") or 1))
-
-        if not any(row_allows_refresh(w) for w in rows):
-            return "extension_session_refresh_disabled"
-
         return "extension_worker_offline"
 
     async def refresh_session_token(
@@ -1526,14 +1422,13 @@ class ExtensionCaptchaService:
         token_id: int,
         timeout: int = 45,
     ) -> ExtensionStRefreshResult:
-        """ST refresh is always sent to the extension bound for this token (dedicated if present).
+        """ST refresh is always sent to the extension bound for this token ID.
 
         Intentionally no fallback to other extension connections: session cookies must not be
-        read or refreshed on a different browser profile than the account's dedicated worker.
+        read or refreshed on a different browser profile than the account's refresh worker.
         """
         if token_id is None:
             return ExtensionStRefreshResult(failure_code="extension_no_worker_or_empty")
-        await self._sync_active_connections_for_dedicated_token(int(token_id))
         conn = self._select_connection(
             route_key="",
             managed_api_key_id=None,
@@ -1555,29 +1450,8 @@ class ExtensionCaptchaService:
         debug_logger.log_warning(f"[Extension Captcha] Flow error reported (ignoring): {error_reason}")
 
     async def list_active_workers(self) -> list[Dict[str, Any]]:
-        label_by_id: dict[int, tuple[str, str]] = {}
-        if self.db and hasattr(self.db, "list_dedicated_extension_workers"):
-            try:
-                rows = await self.db.list_dedicated_extension_workers()
-                for row in rows or []:
-                    wid = row.get("id")
-                    if wid is None:
-                        continue
-                    label_by_id[int(wid)] = (
-                        str(row.get("label") or "").strip(),
-                        str(row.get("worker_key_prefix") or "").strip(),
-                    )
-            except Exception as exc:
-                debug_logger.log_warning(f"[Extension Captcha] list_active_workers: DB label lookup failed: {exc}")
-
         workers: list[Dict[str, Any]] = []
         for conn in self.active_connections:
-            key_label = conn.dedicated_worker_key_label
-            key_prefix = conn.worker_key_prefix
-            if conn.dedicated_worker_id is not None:
-                db_pair = label_by_id.get(int(conn.dedicated_worker_id))
-                if db_pair is not None:
-                    key_label, key_prefix = db_pair
             workers.append(
                 {
                     "worker_session_id": conn.worker_session_id,
@@ -1588,10 +1462,7 @@ class ExtensionCaptchaService:
                     "captcha_worker_id": conn.captcha_worker_id,
                     "captcha_worker_key_label": conn.captcha_worker_key_label,
                     "captcha_worker_key_prefix": conn.captcha_worker_key_prefix,
-                    "dedicated_worker_id": conn.dedicated_worker_id,
-                    "dedicated_token_id": conn.dedicated_token_id,
-                    "dedicated_worker_key_label": key_label,
-                    "worker_key_prefix": key_prefix,
+                    "refresh_token_id": conn.refresh_token_id,
                     "allow_captcha": conn.allow_captcha,
                     "allow_session_refresh": conn.allow_session_refresh,
                     "allow_generation": conn.allow_generation,
@@ -1628,44 +1499,6 @@ class ExtensionCaptchaService:
                 await conn.websocket.close(
                     code=1000,
                     reason="Captcha worker sessions terminated by admin",
-                )
-            except Exception:
-                pass
-            self.disconnect(conn.websocket)
-            killed += 1
-        return killed
-
-    async def kill_dedicated_worker_sessions_for_token(self, token_id: int) -> int:
-        """Close all extension websockets for dedicated workers bound to this token (Worker tab / registration keys)."""
-        tid = int(token_id)
-        worker_ids: set[int] = set()
-        if self.db and hasattr(self.db, "list_dedicated_extension_workers"):
-            try:
-                rows = await self.db.list_dedicated_extension_workers()
-                for w in rows or []:
-                    if w.get("token_id") is None or int(w["token_id"]) != tid:
-                        continue
-                    wid = w.get("id")
-                    if wid is not None:
-                        worker_ids.add(int(wid))
-            except Exception as exc:
-                debug_logger.log_warning(
-                    f"[Extension Captcha] kill_dedicated_worker_sessions_for_token: list workers failed: {exc}"
-                )
-
-        killed = 0
-        for conn in list(self.active_connections):
-            match = False
-            if conn.dedicated_worker_id is not None and int(conn.dedicated_worker_id) in worker_ids:
-                match = True
-            elif conn.dedicated_token_id is not None and int(conn.dedicated_token_id) == tid:
-                match = True
-            if not match:
-                continue
-            try:
-                await conn.websocket.close(
-                    code=1000,
-                    reason="Dedicated worker sessions terminated by admin",
                 )
             except Exception:
                 pass

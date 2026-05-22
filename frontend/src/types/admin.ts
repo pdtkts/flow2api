@@ -37,51 +37,6 @@ export interface TokenRow {
   use_extension_for_generation?: boolean | number | null
 }
 
-/** Row from GET /api/admin/dedicated-extension/workers (joined fields may vary) */
-export interface DedicatedExtensionWorkerRow {
-  id: number
-  worker_key_prefix: string
-  label?: string | null
-  token_id?: number | null
-  route_key?: string | null
-  is_active?: boolean | number | null
-  last_seen_at?: string | null
-  last_instance_id?: string | null
-  token_email?: string | null
-  allow_captcha?: boolean | number | null
-  allow_session_refresh?: boolean | number | null
-  allow_generation?: boolean | number | null
-  /** Full registration secret when stored at creation (admin-only; protect DB backups). */
-  worker_key_plaintext?: string | null
-}
-
-export interface CreateDedicatedWorkerResponse {
-  success?: boolean
-  worker?: DedicatedExtensionWorkerRow
-  worker_registration_key?: string
-  detail?: string
-}
-
-export interface ListDedicatedWorkersResponse {
-  success?: boolean
-  workers?: DedicatedExtensionWorkerRow[]
-}
-
-/** Response from DELETE /api/admin/dedicated-extension/workers/{worker_id} */
-export interface DeleteDedicatedWorkerResponse {
-  success?: boolean
-  worker_id?: number
-  detail?: string
-}
-
-/** Response from POST /api/admin/dedicated-extension/workers/kill-sessions */
-export interface KillDedicatedWorkerSessionsResponse {
-  success?: boolean
-  killed_count?: number
-  message?: string
-  detail?: string
-}
-
 export interface CaptchaWorkerKeyRow {
   id: number
   key_prefix: string

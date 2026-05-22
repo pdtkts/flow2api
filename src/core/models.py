@@ -316,27 +316,6 @@ class ExtensionWorkerBinding(BaseModel):
     updated_at: Optional[datetime] = None
 
 
-class DedicatedExtensionWorker(BaseModel):
-    """Dedicated extension worker registration and token binding."""
-
-    id: Optional[int] = None
-    worker_key_prefix: str
-    worker_key_hash: str
-    label: str = ""
-    token_id: Optional[int] = None
-    route_key: Optional[str] = None
-    last_instance_id: Optional[str] = None
-    is_active: bool = True
-    last_seen_at: Optional[datetime] = None
-    last_error: Optional[str] = None
-    allow_captcha: bool = True
-    allow_session_refresh: bool = True
-    allow_generation: bool = False
-    worker_key_plaintext: Optional[str] = None
-    created_at: Optional[datetime] = None
-    updated_at: Optional[datetime] = None
-
-
 class CaptchaWorkerKey(BaseModel):
     """General captcha worker key for the shared reCAPTCHA worker pool."""
 

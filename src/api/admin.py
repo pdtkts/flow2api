@@ -20,7 +20,7 @@ from urllib.parse import urlparse
 from curl_cffi.requests import AsyncSession
 from ..core.auth import AuthManager
 from ..core.api_key_manager import ApiKeyManager
-from ..core.database import Database, _DEDICATED_WORKER_UPDATE_OMIT
+from ..core.database import Database
 from ..core.config import config, get_yescaptcha_min_score, normalize_yescaptcha_task_type
 from ..core.models import GenerationConfig
 from ..core.monitoring import build_public_health_snapshot
@@ -47,10 +47,6 @@ _ADMIN_SESSION_TTL_REMEMBER = 30 * 24 * 3600  # 30 days when "remember me" is on
 _ADMIN_SESSION_TTL_BROWSER = 24 * 3600  # 24 hours when off
 
 SUPPORTED_API_CAPTCHA_METHODS = {"yescaptcha", "capmonster", "ezcaptcha", "capsolver"}
-
-
-def _generate_worker_registration_key() -> str:
-    return f"wk_{secrets.token_urlsafe(32)}"
 
 
 def _generate_captcha_worker_key() -> str:
@@ -724,29 +720,6 @@ class ExtensionWorkerUnbindRequest(BaseModel):
 
 class ExtensionWorkerKillRequest(BaseModel):
     worker_session_id: str
-
-
-class DedicatedWorkerCreateRequest(BaseModel):
-    label: str = ""
-    token_id: Optional[int] = None
-    route_key: Optional[str] = None
-    allow_captcha: bool = True
-    allow_session_refresh: bool = True
-    allow_generation: bool = False
-
-
-class DedicatedWorkerUpdateRequest(BaseModel):
-    label: Optional[str] = None
-    token_id: Optional[int] = None
-    route_key: Optional[str] = None
-    is_active: Optional[bool] = None
-    allow_captcha: Optional[bool] = None
-    allow_session_refresh: Optional[bool] = None
-    allow_generation: Optional[bool] = None
-
-
-class DedicatedWorkerKillSessionsRequest(BaseModel):
-    token_id: int
 
 
 class CaptchaWorkerKeyCreateRequest(BaseModel):
@@ -2468,117 +2441,6 @@ async def kill_extension_worker(
     if not killed:
         return {"success": False, "message": "Worker not found"}
     return {"success": True, "message": "Worker terminated", "worker_session_id": worker_session_id}
-
-
-@router.get("/api/admin/dedicated-extension/workers")
-async def list_dedicated_extension_workers(token: str = Depends(verify_admin_token)):
-    workers = await db.list_dedicated_extension_workers()
-    for worker in workers:
-        worker["allow_captcha"] = 0
-        worker["allow_session_refresh"] = 1
-        worker["allow_generation"] = 0
-    return {"success": True, "workers": workers}
-
-
-@router.post("/api/admin/dedicated-extension/workers/kill-sessions")
-async def kill_dedicated_extension_worker_sessions(
-    request: DedicatedWorkerKillSessionsRequest,
-    token: str = Depends(verify_admin_token),
-):
-    """Disconnect all Worker-mode (dedicated registration key) extension clients for this token."""
-    from ..services.browser_captcha_extension import ExtensionCaptchaService
-
-    tid = int(request.token_id)
-    token_obj = await db.get_token(tid)
-    if not token_obj:
-        raise HTTPException(status_code=404, detail="Token not found")
-    service = await ExtensionCaptchaService.get_instance(db=db)
-    killed = await service.kill_dedicated_worker_sessions_for_token(tid)
-    return {
-        "success": True,
-        "killed_count": killed,
-        "message": f"Terminated {killed} active session(s)" if killed else "No active dedicated worker sessions for this token",
-    }
-
-
-@router.post("/api/admin/dedicated-extension/workers")
-async def create_dedicated_extension_worker(
-    request: DedicatedWorkerCreateRequest,
-    token: str = Depends(verify_admin_token),
-):
-    token_id = int(request.token_id) if request.token_id is not None else None
-    if token_id is None:
-        raise HTTPException(status_code=400, detail="Refresh worker keys must be bound to a token")
-    existing_token = await db.get_token(token_id)
-    if not existing_token:
-        raise HTTPException(status_code=404, detail="Token not found")
-    worker_key = _generate_worker_registration_key()
-    worker_id = await db.create_dedicated_extension_worker(
-        worker_key_prefix=_worker_key_prefix(worker_key),
-        worker_key_hash=_hash_worker_registration_key(worker_key),
-        label=(request.label or "").strip(),
-        token_id=token_id,
-        route_key=(request.route_key or "").strip() or None,
-        allow_captcha=False,
-        allow_session_refresh=True,
-        allow_generation=False,
-        worker_key_plaintext=worker_key.strip(),
-    )
-    worker = await db.get_dedicated_extension_worker(worker_id)
-    return {"success": True, "worker": worker, "worker_registration_key": worker_key}
-
-
-@router.patch("/api/admin/dedicated-extension/workers/{worker_id}")
-async def update_dedicated_extension_worker(
-    worker_id: int,
-    request: DedicatedWorkerUpdateRequest,
-    token: str = Depends(verify_admin_token),
-):
-    existing = await db.get_dedicated_extension_worker(worker_id)
-    if not existing:
-        raise HTTPException(status_code=404, detail="Dedicated worker not found")
-    fs = request.model_fields_set
-    if "token_id" in fs and request.token_id is None:
-        raise HTTPException(status_code=400, detail="Refresh worker keys must stay bound to a token")
-    if request.token_id is not None:
-        token_obj = await db.get_token(int(request.token_id))
-        if not token_obj:
-            raise HTTPException(status_code=404, detail="Token not found")
-    await db.update_dedicated_extension_worker(
-        worker_id,
-        label=request.label if "label" in fs else _DEDICATED_WORKER_UPDATE_OMIT,
-        token_id=request.token_id if "token_id" in fs else _DEDICATED_WORKER_UPDATE_OMIT,
-        route_key=request.route_key if "route_key" in fs else _DEDICATED_WORKER_UPDATE_OMIT,
-        is_active=request.is_active if "is_active" in fs else _DEDICATED_WORKER_UPDATE_OMIT,
-        allow_captcha=False,
-        allow_session_refresh=True,
-        allow_generation=False,
-    )
-    updated = await db.get_dedicated_extension_worker(worker_id)
-    return {"success": True, "worker": updated}
-
-
-@router.post("/api/admin/dedicated-extension/workers/{worker_id}/unbind")
-async def unbind_dedicated_extension_worker(
-    worker_id: int,
-    token: str = Depends(verify_admin_token),
-):
-    existing = await db.get_dedicated_extension_worker(worker_id)
-    if not existing:
-        raise HTTPException(status_code=404, detail="Dedicated worker not found")
-    raise HTTPException(status_code=400, detail="Refresh worker keys cannot be unbound from their token")
-
-
-@router.delete("/api/admin/dedicated-extension/workers/{worker_id}")
-async def delete_dedicated_extension_worker(
-    worker_id: int,
-    token: str = Depends(verify_admin_token),
-):
-    existing = await db.get_dedicated_extension_worker(worker_id)
-    if not existing:
-        raise HTTPException(status_code=404, detail="Dedicated worker not found")
-    await db.delete_dedicated_extension_worker(worker_id)
-    return {"success": True, "worker_id": worker_id}
 
 
 @router.post("/api/admin/debug")

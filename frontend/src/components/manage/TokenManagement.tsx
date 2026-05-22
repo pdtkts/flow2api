@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef, type ReactNode } from "react"
+import { useState, useEffect, useCallback, type ReactNode } from "react"
 import { useAuth } from "../../contexts/AuthContext"
 import { adminFetch, adminJson } from "../../lib/adminApi"
 import type { DashboardStats, TokenRow, ImportTokenItem } from "../../types/admin"
@@ -6,21 +6,14 @@ import { Card, CardContent, CardHeader, CardTitle } from "../ui/card"
 import { Button } from "../ui/button"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../ui/table"
 import { Switch } from "../ui/switch"
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "../ui/dialog"
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "../ui/dialog"
 import { Input } from "../ui/input"
 import { Label } from "../ui/label"
 import { Textarea } from "../ui/textarea"
 import { toast } from "sonner"
-import { RefreshCw, Download, Upload, Plus, Loader2, RefreshCcw, Pencil, Trash2, FolderPlus, KeyRound, Copy, Unplug } from "lucide-react"
+import { RefreshCw, Download, Upload, Plus, Loader2, RefreshCcw, Pencil, Trash2, FolderPlus } from "lucide-react"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select"
-import type {
-  CreateProjectResponse,
-  DedicatedExtensionWorkerRow,
-  ListDedicatedWorkersResponse,
-  CreateDedicatedWorkerResponse,
-  DeleteDedicatedWorkerResponse,
-  KillDedicatedWorkerSessionsResponse,
-} from "../../types/admin"
+import type { CreateProjectResponse } from "../../types/admin"
 
 function formatExpiryDisplay(atExpires: string | null | undefined): ReactNode {
   if (!atExpires) return <span className="text-muted-foreground">-</span>
@@ -121,21 +114,6 @@ export function TokenManagement() {
   const [newProjectTitle, setNewProjectTitle] = useState("")
   const [newProjectSetCurrent, setNewProjectSetCurrent] = useState(true)
   const [newProjectSaving, setNewProjectSaving] = useState(false)
-
-  const [workerKeyOpen, setWorkerKeyOpen] = useState(false)
-  const [workerKeyToken, setWorkerKeyToken] = useState<TokenRow | null>(null)
-  const [workerKeyLabel, setWorkerKeyLabel] = useState("")
-  const [workerKeyRouteKey, setWorkerKeyRouteKey] = useState("")
-  const [workerKeySaving, setWorkerKeySaving] = useState(false)
-  const [workerKeyGenerated, setWorkerKeyGenerated] = useState<string | null>(null)
-  const [workerKeyList, setWorkerKeyList] = useState<DedicatedExtensionWorkerRow[]>([])
-  const [workerKeyListLoading, setWorkerKeyListLoading] = useState(false)
-  const [workerKeyDeletingId, setWorkerKeyDeletingId] = useState<number | null>(null)
-  const [workerRowDrafts, setWorkerRowDrafts] = useState<Record<number, { label: string }>>({})
-  const [workerRowSavingId, setWorkerRowSavingId] = useState<number | null>(null)
-  const [workerKeyKillAllBusy, setWorkerKeyKillAllBusy] = useState(false)
-  const workerRowDraftsRef = useRef(workerRowDrafts)
-  workerRowDraftsRef.current = workerRowDrafts
 
   const loadStats = useCallback(async () => {
     if (!token) return
@@ -461,226 +439,6 @@ export function TokenManagement() {
     }
   }
 
-  const loadDedicatedWorkersForToken = async (tid: number) => {
-    if (!token) return
-    setWorkerKeyListLoading(true)
-    try {
-      const { ok, data } = await adminJson<ListDedicatedWorkersResponse>("/api/admin/dedicated-extension/workers", token)
-      if (!ok || !data?.workers) {
-        setWorkerKeyList([])
-        setWorkerRowDrafts({})
-        return
-      }
-      const filtered = data.workers.filter((w) => w.token_id === tid)
-      setWorkerKeyList(filtered)
-      const drafts: Record<number, { label: string }> = {}
-      for (const w of filtered) {
-        drafts[w.id] = {
-          label: (w.label ?? "").trim(),
-        }
-      }
-      setWorkerRowDrafts(drafts)
-    } catch {
-      setWorkerKeyList([])
-    } finally {
-      setWorkerKeyListLoading(false)
-    }
-  }
-
-  const openWorkerKeyDialog = (t: TokenRow) => {
-    setWorkerKeyToken(t)
-    const baseLabel = (t.remark || t.email || `token-${t.id}`).trim()
-    setWorkerKeyLabel(baseLabel ? `Refresh worker: ${baseLabel}` : `Refresh worker: ${t.id}`)
-    setWorkerKeyRouteKey((t.extension_route_key || "").trim())
-    setWorkerKeyGenerated(null)
-    setWorkerKeyOpen(true)
-    void loadDedicatedWorkersForToken(t.id)
-  }
-
-  const closeWorkerKeyDialog = (open: boolean) => {
-    setWorkerKeyOpen(open)
-    if (!open) {
-      setWorkerKeyToken(null)
-      setWorkerKeyGenerated(null)
-      setWorkerKeyList([])
-      setWorkerRowDrafts({})
-      setWorkerKeyDeletingId(null)
-      setWorkerRowSavingId(null)
-      setWorkerKeyKillAllBusy(false)
-    }
-  }
-
-  const deleteDedicatedWorkerForToken = async (workerId: number) => {
-    if (!token || !workerKeyToken) return
-    if (
-      !confirm(
-        "Delete this worker registration key? It cannot be undone. Any extension using this key must be given a new key."
-      )
-    ) {
-      return
-    }
-    setWorkerKeyDeletingId(workerId)
-    try {
-      const { ok, status, data } = await adminJson<DeleteDedicatedWorkerResponse>(
-        `/api/admin/dedicated-extension/workers/${workerId}`,
-        token,
-        { method: "DELETE" }
-      )
-      if (ok && data?.success) {
-        toast.success("Refresh worker key deleted")
-        await loadDedicatedWorkersForToken(workerKeyToken.id)
-      } else {
-        const d = data as DeleteDedicatedWorkerResponse & { detail?: unknown }
-        const detail = d?.detail
-        const msg =
-          typeof detail === "string"
-            ? detail
-            : Array.isArray(detail) && detail[0] && typeof (detail[0] as { msg?: string }).msg === "string"
-              ? (detail[0] as { msg: string }).msg
-              : `Failed (${status})`
-        toast.error(msg)
-      }
-    } finally {
-      setWorkerKeyDeletingId(null)
-    }
-  }
-
-  const copyWorkerRegistrationKey = async () => {
-    if (!workerKeyGenerated) return
-    try {
-      await navigator.clipboard.writeText(workerKeyGenerated)
-      toast.success("Worker registration key copied")
-    } catch {
-      toast.error("Copy failed")
-    }
-  }
-
-  const saveDedicatedWorkerRow = async (workerId: number) => {
-    if (!token || !workerKeyToken) return
-    const draft = workerRowDraftsRef.current[workerId]
-    if (!draft) return
-    const labelStr = typeof draft.label === "string" ? draft.label.trim() : String(draft.label ?? "").trim()
-    setWorkerRowSavingId(workerId)
-    try {
-      const { ok, status, data } = await adminJson<{ success?: boolean; detail?: string | unknown[] }>(
-        `/api/admin/dedicated-extension/workers/${workerId}`,
-        token,
-        {
-          method: "PATCH",
-          body: JSON.stringify({
-            label: labelStr || `Refresh worker: ${workerId}`,
-          }),
-        }
-      )
-      if (ok && data?.success) {
-        toast.success("Refresh worker updated")
-        await loadDedicatedWorkersForToken(workerKeyToken.id)
-      } else {
-        let msg = `Failed (${status})`
-        const d = data?.detail
-        if (typeof d === "string") msg = d
-        else if (Array.isArray(d) && d[0] && typeof (d[0] as { msg?: string }).msg === "string")
-          msg = (d[0] as { msg: string }).msg
-        toast.error(msg)
-      }
-    } finally {
-      setWorkerRowSavingId(null)
-    }
-  }
-
-  const copyWorkerRowPlaintext = async (secret: string) => {
-    const t = String(secret || "").trim()
-    if (!t) return
-    try {
-      await navigator.clipboard.writeText(t)
-      toast.success("Full registration key copied")
-    } catch {
-      toast.error("Copy failed")
-    }
-  }
-
-  const copyWorkerFullKeyOrExplain = (w: DedicatedExtensionWorkerRow) => {
-    const full = String(w.worker_key_plaintext || "").trim()
-    if (!full) {
-      toast.error(
-        "No full secret is stored for this worker (older key). Use “Generate registration key” below — new keys are saved so you can copy them anytime."
-      )
-      return
-    }
-    void copyWorkerRowPlaintext(full)
-  }
-
-  const killAllDedicatedWorkerSessions = async () => {
-    if (!token || !workerKeyToken) return
-    if (
-      !confirm(
-        "Terminate every active Worker-mode extension connection for this token? Each browser using a dedicated registration key for this token will disconnect (they may reconnect automatically)."
-      )
-    ) {
-      return
-    }
-    setWorkerKeyKillAllBusy(true)
-    try {
-      const { ok, data } = await adminJson<KillDedicatedWorkerSessionsResponse>(
-        "/api/admin/dedicated-extension/workers/kill-sessions",
-        token,
-        { method: "POST", body: JSON.stringify({ token_id: workerKeyToken.id }) }
-      )
-      if (ok && data?.success) {
-        toast.success(
-          typeof data.message === "string" ? data.message : `${data.killed_count ?? 0} session(s) closed`
-        )
-      } else {
-        const d = data as KillDedicatedWorkerSessionsResponse & { detail?: unknown }
-        const detail = d?.detail
-        const msg =
-          typeof detail === "string"
-            ? detail
-            : Array.isArray(detail) && detail[0] && typeof (detail[0] as { msg?: string }).msg === "string"
-              ? (detail[0] as { msg: string }).msg
-              : "Kill sessions failed"
-        toast.error(msg)
-      }
-    } finally {
-      setWorkerKeyKillAllBusy(false)
-    }
-  }
-
-  const generateDedicatedWorkerKey = async () => {
-    if (!token || !workerKeyToken) return
-    setWorkerKeySaving(true)
-    setWorkerKeyGenerated(null)
-    try {
-      const body: {
-        label: string
-        token_id: number
-        route_key?: string | null
-      } = {
-        label: workerKeyLabel.trim() || `Refresh worker: ${workerKeyToken.id}`,
-        token_id: workerKeyToken.id,
-      }
-      const rk = workerKeyRouteKey.trim()
-      if (rk) body.route_key = rk
-      const { ok, status, data } = await adminJson<CreateDedicatedWorkerResponse>("/api/admin/dedicated-extension/workers", token, {
-        method: "POST",
-        body: JSON.stringify(body),
-      })
-      if (ok && data?.success && data.worker_registration_key) {
-        setWorkerKeyGenerated(data.worker_registration_key)
-        toast.success("Refresh worker key created — copy it now; it will not be shown again.")
-        await loadDedicatedWorkersForToken(workerKeyToken.id)
-      } else {
-        const msg =
-          (data as { detail?: string })?.detail ||
-          (typeof (data as { message?: string })?.message === "string" ? (data as { message?: string }).message : null) ||
-          `Failed (${status})`
-        toast.error(msg)
-      }
-    } finally {
-      setWorkerKeySaving(false)
-    }
-  }
-
   const openNewProject = () => {
     const first = tokens[0]
     setNewProjectTokenId(first ? String(first.id) : "")
@@ -858,16 +616,6 @@ export function TokenManagement() {
                           <div className="flex justify-end gap-1 flex-wrap">
                             <Button variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={() => refreshAt(t.id)}>
                               Refresh AT
-                            </Button>
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              className="h-7 px-2 text-xs"
-                              onClick={() => openWorkerKeyDialog(t)}
-                              title="Create Chrome extension refresh worker key for this account"
-                            >
-                              <KeyRound className="h-3 w-3 mr-1" />
-                              Refresh key
                             </Button>
                             <Button variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={() => openEdit(t)}>
                               <Pencil className="h-3 w-3 mr-1" />
@@ -1064,166 +812,6 @@ export function TokenManagement() {
             </Button>
             <Button onClick={submitNewProject} disabled={newProjectSaving || !newProjectTokenId}>
               {newProjectSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : "Create"}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog open={workerKeyOpen} onOpenChange={closeWorkerKeyDialog}>
-        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
-          <DialogHeader>
-            <DialogTitle>Extension refresh worker key</DialogTitle>
-            <DialogDescription>
-              For token #{workerKeyToken?.id}
-              {workerKeyToken?.email ? ` (${workerKeyToken.email})` : ""}. Paste the generated key into the Chrome extension
-              <strong className="font-medium"> Refresh worker</strong> mode. The full secret is shown only once - store it safely. The list
-              below shows the public key id; when the server has stored the registration secret (new keys), you can view and copy it here. Older keys only have the prefix until you generate a replacement.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-4">
-            <div>
-              <Label>Refresh worker label</Label>
-              <Input className="mt-1" value={workerKeyLabel} onChange={(e) => setWorkerKeyLabel(e.target.value)} placeholder="e.g. office PC" />
-            </div>
-            <div>
-              <Label>Extension route key (optional)</Label>
-              <Input
-                className="mt-1 font-mono text-sm"
-                value={workerKeyRouteKey}
-                onChange={(e) => setWorkerKeyRouteKey(e.target.value)}
-                placeholder="Leave empty if you only use dedicated worker binding"
-              />
-            </div>
-            <div className="rounded-md border bg-muted/40 p-3 text-sm text-muted-foreground">
-              <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
-                <p className="font-medium text-foreground">Refresh workers linked to this token</p>
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  className="h-7 text-[11px] gap-1 border-destructive/60 text-destructive hover:bg-destructive/10"
-                  disabled={
-                    !workerKeyToken ||
-                    workerKeyKillAllBusy ||
-                    workerKeyListLoading ||
-                    workerRowSavingId !== null ||
-                    workerKeyDeletingId !== null
-                  }
-                  title="Disconnect all extension clients using refresh worker keys for this token"
-                  onClick={() => void killAllDedicatedWorkerSessions()}
-                >
-                  {workerKeyKillAllBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Unplug className="h-3 w-3" />}
-                  Kill all sessions
-                </Button>
-              </div>
-              {workerKeyListLoading ? (
-                <p className="text-xs">Loading…</p>
-              ) : workerKeyList.length === 0 ? (
-                <p className="text-xs">None yet. Generate a key below.</p>
-              ) : (
-                <ul className="space-y-3 text-xs">
-                  {workerKeyList.map((w) => {
-                    const draft = workerRowDrafts[w.id]
-                    if (!draft) return null
-                    return (
-                      <li key={w.id} className="rounded border border-border/60 bg-background p-3 space-y-2">
-                        <div className="flex flex-wrap gap-2 justify-between items-start">
-                          <div className="space-y-1 min-w-0 flex-1">
-                            <Label className="text-[11px] text-muted-foreground">Name</Label>
-                            <Input
-                              className="h-8 text-sm font-normal"
-                              value={draft.label}
-                              onChange={(e) =>
-                                setWorkerRowDrafts((prev) => ({
-                                  ...prev,
-                                  [w.id]: { ...draft, label: e.target.value },
-                                }))
-                              }
-                            />
-                            <p className="font-mono text-[11px] text-muted-foreground break-all pt-1">
-                              Key id: {w.worker_key_prefix}
-                              {!w.is_active ? " · inactive" : ""}
-                              {w.last_seen_at ? ` · last seen ${w.last_seen_at}` : ""}
-                            </p>
-                            <div className="pt-2 space-y-1">
-                              <Label className="text-[11px] text-muted-foreground">Refresh worker key (full secret)</Label>
-                              <div className="flex gap-2">
-                                <Textarea
-                                  readOnly
-                                  className="font-mono text-[11px] min-h-[56px] py-1.5"
-                                  value={String(w.worker_key_plaintext || "").trim()}
-                                  placeholder="Not stored for this worker — generate a new key below"
-                                />
-                                <Button
-                                  type="button"
-                                  variant="outline"
-                                  size="icon"
-                                  className="h-8 w-8 shrink-0 mt-0.5"
-                                  title={
-                                    String(w.worker_key_plaintext || "").trim()
-                                      ? "Copy full registration key"
-                                      : "No full key on file — tap for instructions"
-                                  }
-                                  onClick={() => copyWorkerFullKeyOrExplain(w)}
-                                >
-                                  <Copy className="h-3.5 w-3.5" />
-                                </Button>
-                              </div>
-                            </div>
-                          </div>
-                          <div className="flex flex-col gap-1 shrink-0">
-                            <Button
-                              type="button"
-                              size="sm"
-                              variant="secondary"
-                              className="h-8 text-[11px]"
-                              disabled={
-                                workerRowSavingId !== null || workerKeyDeletingId !== null || workerKeyListLoading
-                              }
-                              onClick={() => void saveDedicatedWorkerRow(w.id)}
-                            >
-                              {workerRowSavingId === w.id ? <Loader2 className="h-3 w-3 animate-spin" /> : "Save"}
-                            </Button>
-                            <Button
-                              type="button"
-                              size="sm"
-                              variant="destructive"
-                              className="h-8 gap-1 text-[11px]"
-                              disabled={workerKeyDeletingId !== null || workerKeyListLoading}
-                              onClick={() => void deleteDedicatedWorkerForToken(w.id)}
-                            >
-                              {workerKeyDeletingId === w.id ? <Loader2 className="h-3 w-3 animate-spin" /> : <Trash2 className="h-3 w-3" />}
-                              Delete
-                            </Button>
-                          </div>
-                        </div>
-                      </li>
-                    )
-                  })}
-                </ul>
-              )}
-            </div>
-            {workerKeyGenerated ? (
-              <div className="space-y-2">
-                <Label>Refresh worker key (copy now)</Label>
-                <div className="flex gap-2">
-                  <Textarea readOnly className="font-mono text-xs min-h-[72px]" value={workerKeyGenerated} />
-                  <Button type="button" variant="outline" size="icon" className="shrink-0" onClick={() => void copyWorkerRegistrationKey()} title="Copy">
-                    <Copy className="h-4 w-4" />
-                  </Button>
-                </div>
-              </div>
-            ) : null}
-          </div>
-          <DialogFooter className="flex-col sm:flex-row gap-2">
-            <Button type="button" variant="secondary" onClick={() => workerKeyToken && void loadDedicatedWorkersForToken(workerKeyToken.id)} disabled={workerKeyListLoading}>
-              Refresh list
-            </Button>
-            <Button type="button" onClick={() => void generateDedicatedWorkerKey()} disabled={workerKeySaving || !workerKeyToken}>
-              {workerKeySaving ? <Loader2 className="h-4 w-4 animate-spin" /> : workerKeyGenerated ? "Generate another key" : "Generate refresh key"}
-            </Button>
-            <Button variant="outline" onClick={() => closeWorkerKeyDialog(false)}>
-              Close
             </Button>
           </DialogFooter>
         </DialogContent>

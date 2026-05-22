@@ -563,30 +563,6 @@ class Database:
                     )
                 """)
 
-            if not await self._table_exists(db, "dedicated_extension_workers"):
-                print("  ✓ Creating missing table: dedicated_extension_workers")
-                await db.execute("""
-                    CREATE TABLE dedicated_extension_workers (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        worker_key_prefix TEXT NOT NULL UNIQUE,
-                        worker_key_hash TEXT NOT NULL UNIQUE,
-                        label TEXT DEFAULT '',
-                        token_id INTEGER,
-                        route_key TEXT,
-                        last_instance_id TEXT,
-                        is_active BOOLEAN DEFAULT 1,
-                        last_seen_at TIMESTAMP,
-                        last_error TEXT,
-                        allow_captcha INTEGER NOT NULL DEFAULT 1,
-                        allow_session_refresh INTEGER NOT NULL DEFAULT 1,
-                        allow_generation INTEGER NOT NULL DEFAULT 0,
-                        worker_key_plaintext TEXT,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        FOREIGN KEY (token_id) REFERENCES tokens(id)
-                    )
-                """)
-
             if not await self._table_exists(db, "captcha_worker_keys"):
                 print("  âœ“ Creating missing table: captcha_worker_keys")
                 await db.execute("""
@@ -966,7 +942,6 @@ class Database:
                     except Exception as e:
                         print(f"  ✗ Failed to add column 'flow_project_id' to cache_files: {e}")
 
-            await self._ensure_dedicated_extension_worker_capability_columns(db)
             await self._ensure_tokens_use_extension_for_generation_column(db)
 
             # ========== Step 3: Ensure all config tables have default rows ==========
@@ -982,7 +957,6 @@ class Database:
             await db.execute("CREATE INDEX IF NOT EXISTS idx_cache_files_api_key_filename ON cache_files(api_key_id, filename)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_cache_files_api_key_project ON cache_files(api_key_id, flow_project_id)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_extension_worker_bindings_api_key_id ON extension_worker_bindings(api_key_id)")
-            await db.execute("CREATE INDEX IF NOT EXISTS idx_dedicated_extension_workers_token_id ON dedicated_extension_workers(token_id)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_captcha_worker_keys_active ON captcha_worker_keys(is_active)")
 
             await db.commit()
@@ -1354,27 +1328,6 @@ class Database:
                 )
             """)
             await db.execute("""
-                CREATE TABLE IF NOT EXISTS dedicated_extension_workers (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    worker_key_prefix TEXT NOT NULL UNIQUE,
-                    worker_key_hash TEXT NOT NULL UNIQUE,
-                    label TEXT DEFAULT '',
-                    token_id INTEGER,
-                    route_key TEXT,
-                    last_instance_id TEXT,
-                    is_active BOOLEAN DEFAULT 1,
-                    last_seen_at TIMESTAMP,
-                    last_error TEXT,
-                    allow_captcha INTEGER NOT NULL DEFAULT 1,
-                    allow_session_refresh INTEGER NOT NULL DEFAULT 1,
-                    allow_generation INTEGER NOT NULL DEFAULT 0,
-                    worker_key_plaintext TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (token_id) REFERENCES tokens(id)
-                )
-            """)
-            await db.execute("""
                 CREATE TABLE IF NOT EXISTS captcha_worker_keys (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     key_prefix TEXT NOT NULL UNIQUE,
@@ -1421,7 +1374,6 @@ class Database:
             # Existing DBs: tables were created before api_key_id; CREATE IF NOT EXISTS does not add columns.
             await self._ensure_api_key_ownership_columns(db)
             await self._ensure_task_async_columns(db)
-            await self._ensure_dedicated_extension_worker_capability_columns(db)
             await self._ensure_tokens_use_extension_for_generation_column(db)
 
             # Create indexes
@@ -1435,7 +1387,6 @@ class Database:
             await db.execute("CREATE INDEX IF NOT EXISTS idx_api_key_accounts_key_id ON api_key_accounts(api_key_id)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_api_key_rl_key_endpoint ON api_key_rate_limits(api_key_id, endpoint)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_api_key_audit_created_at ON api_key_audit_logs(created_at DESC)")
-            await db.execute("CREATE INDEX IF NOT EXISTS idx_dedicated_extension_workers_token_id ON dedicated_extension_workers(token_id)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_captcha_worker_keys_active ON captcha_worker_keys(is_active)")
 
             # Migrate request_logs table if needed
@@ -1455,28 +1406,6 @@ class Database:
             await db.execute("CREATE INDEX IF NOT EXISTS idx_token_stats_token_id ON token_stats(token_id)")
 
             await db.commit()
-
-    async def _ensure_dedicated_extension_worker_capability_columns(self, db) -> None:
-        """Add allow_captcha / allow_session_refresh when upgrading older dedicated_extension_workers schemas."""
-        try:
-            if not await self._table_exists(db, "dedicated_extension_workers"):
-                return
-            for col_name, col_def in (
-                ("allow_captcha", "INTEGER NOT NULL DEFAULT 1"),
-                ("allow_session_refresh", "INTEGER NOT NULL DEFAULT 1"),
-                ("allow_generation", "INTEGER NOT NULL DEFAULT 0"),
-                ("worker_key_plaintext", "TEXT"),
-            ):
-                if not await self._column_exists(db, "dedicated_extension_workers", col_name):
-                    try:
-                        await db.execute(
-                            f"ALTER TABLE dedicated_extension_workers ADD COLUMN {col_name} {col_def}"
-                        )
-                        print(f"  ✓ Added column '{col_name}' to dedicated_extension_workers table")
-                    except Exception as e:
-                        print(f"  ✗ Failed to add column '{col_name}' to dedicated_extension_workers: {e}")
-        except Exception as e:
-            print(f"  ✗ dedicated_extension_workers capability column migration failed: {e}")
 
     async def _ensure_tokens_use_extension_for_generation_column(self, db) -> None:
         """Add use_extension_for_generation when upgrading older tokens schemas."""
@@ -1784,9 +1713,9 @@ class Database:
         async with self._connect(write=True) as db:
             await db.execute("UPDATE request_logs SET token_id = NULL WHERE token_id = ?", (token_id,))
             await db.execute("UPDATE cache_files SET token_id = NULL WHERE token_id = ?", (token_id,))
-            # Dedicated extension workers can outlive a token; detach ownership first
-            # so deleting token rows does not violate FK constraints.
-            await db.execute("UPDATE dedicated_extension_workers SET token_id = NULL WHERE token_id = ?", (token_id,))
+            if await self._table_exists(db, "dedicated_extension_workers"):
+                # Existing databases may still have inert legacy rows with a token FK.
+                await db.execute("UPDATE dedicated_extension_workers SET token_id = NULL WHERE token_id = ?", (token_id,))
             await db.execute("DELETE FROM tasks WHERE token_id = ?", (token_id,))
             await db.execute("DELETE FROM token_stats WHERE token_id = ?", (token_id,))
             await db.execute("DELETE FROM projects WHERE token_id = ?", (token_id,))
@@ -4762,148 +4691,6 @@ class Database:
                 SELECT *
                 FROM captcha_worker_keys
                 ORDER BY updated_at DESC, id DESC
-                """
-            )
-            rows = await cursor.fetchall()
-            return [dict(row) for row in rows]
-
-    async def get_dedicated_extension_worker_by_key_hash(self, worker_key_hash: str) -> Optional[Dict[str, Any]]:
-        normalized = (worker_key_hash or "").strip()
-        if not normalized:
-            return None
-        async with self._connect() as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute(
-                """
-                SELECT *
-                FROM dedicated_extension_workers
-                WHERE worker_key_hash = ?
-                """,
-                (normalized,),
-            )
-            row = await cursor.fetchone()
-            return dict(row) if row else None
-
-    async def get_dedicated_extension_worker(self, worker_id: int) -> Optional[Dict[str, Any]]:
-        async with self._connect() as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute(
-                "SELECT * FROM dedicated_extension_workers WHERE id = ?",
-                (int(worker_id),),
-            )
-            row = await cursor.fetchone()
-            return dict(row) if row else None
-
-    async def create_dedicated_extension_worker(
-        self,
-        *,
-        worker_key_prefix: str,
-        worker_key_hash: str,
-        label: str = "",
-        token_id: Optional[int] = None,
-        route_key: Optional[str] = None,
-        allow_captcha: bool = True,
-        allow_session_refresh: bool = True,
-        allow_generation: bool = False,
-        worker_key_plaintext: Optional[str] = None,
-    ) -> int:
-        async with self._connect(write=True) as db:
-            cursor = await db.execute(
-                """
-                INSERT INTO dedicated_extension_workers (
-                    worker_key_prefix, worker_key_hash, label, token_id, route_key,
-                    allow_captcha, allow_session_refresh, allow_generation, worker_key_plaintext
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    (worker_key_prefix or "").strip(),
-                    (worker_key_hash or "").strip(),
-                    (label or "").strip(),
-                    int(token_id) if token_id is not None else None,
-                    (route_key or "").strip() or None,
-                    1 if allow_captcha else 0,
-                    1 if allow_session_refresh else 0,
-                    1 if allow_generation else 0,
-                    (worker_key_plaintext or "").strip() or None,
-                ),
-            )
-            await db.commit()
-            return int(cursor.lastrowid)
-
-    async def update_dedicated_extension_worker(
-        self,
-        worker_id: int,
-        *,
-        label: Any = _DEDICATED_WORKER_UPDATE_OMIT,
-        token_id: Any = _DEDICATED_WORKER_UPDATE_OMIT,
-        route_key: Any = _DEDICATED_WORKER_UPDATE_OMIT,
-        is_active: Any = _DEDICATED_WORKER_UPDATE_OMIT,
-        last_instance_id: Optional[str] = None,
-        last_error: Optional[str] = None,
-        mark_seen: bool = False,
-        clear_token_binding: bool = False,
-        allow_captcha: Any = _DEDICATED_WORKER_UPDATE_OMIT,
-        allow_session_refresh: Any = _DEDICATED_WORKER_UPDATE_OMIT,
-        allow_generation: Any = _DEDICATED_WORKER_UPDATE_OMIT,
-    ) -> None:
-        updates: list[str] = ["updated_at = CURRENT_TIMESTAMP"]
-        values: list[Any] = []
-        if label is not _DEDICATED_WORKER_UPDATE_OMIT:
-            updates.append("label = ?")
-            values.append((label or "").strip())
-        if allow_captcha is not _DEDICATED_WORKER_UPDATE_OMIT:
-            updates.append("allow_captcha = ?")
-            values.append(1 if allow_captcha else 0)
-        if allow_session_refresh is not _DEDICATED_WORKER_UPDATE_OMIT:
-            updates.append("allow_session_refresh = ?")
-            values.append(1 if allow_session_refresh else 0)
-        if allow_generation is not _DEDICATED_WORKER_UPDATE_OMIT:
-            updates.append("allow_generation = ?")
-            values.append(1 if allow_generation else 0)
-        if token_id is not _DEDICATED_WORKER_UPDATE_OMIT and token_id is not None:
-            updates.append("token_id = ?")
-            values.append(int(token_id))
-        elif clear_token_binding:
-            updates.append("token_id = NULL")
-        if route_key is not _DEDICATED_WORKER_UPDATE_OMIT:
-            updates.append("route_key = ?")
-            values.append((route_key or "").strip() or None)
-        if is_active is not _DEDICATED_WORKER_UPDATE_OMIT:
-            updates.append("is_active = ?")
-            values.append(bool(is_active))
-        if last_instance_id is not None:
-            updates.append("last_instance_id = ?")
-            values.append((last_instance_id or "").strip() or None)
-        if last_error is not None:
-            updates.append("last_error = ?")
-            values.append((last_error or "").strip() or None)
-        if mark_seen:
-            updates.append("last_seen_at = CURRENT_TIMESTAMP")
-        values.append(int(worker_id))
-        async with self._connect(write=True) as db:
-            await db.execute(
-                f"UPDATE dedicated_extension_workers SET {', '.join(updates)} WHERE id = ?",
-                tuple(values),
-            )
-            await db.commit()
-
-    async def delete_dedicated_extension_worker(self, worker_id: int) -> None:
-        async with self._connect(write=True) as db:
-            await db.execute("DELETE FROM dedicated_extension_workers WHERE id = ?", (int(worker_id),))
-            await db.commit()
-
-    async def list_dedicated_extension_workers(self) -> List[Dict[str, Any]]:
-        async with self._connect() as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute(
-                """
-                SELECT
-                    w.*,
-                    t.email AS token_email,
-                    t.remark AS token_remark
-                FROM dedicated_extension_workers w
-                LEFT JOIN tokens t ON t.id = w.token_id
-                ORDER BY w.updated_at DESC, w.id DESC
                 """
             )
             rows = await cursor.fetchall()

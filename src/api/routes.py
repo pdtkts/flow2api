@@ -2281,19 +2281,34 @@ async def captcha_websocket_endpoint(websocket: WebSocket):
         or websocket.headers.get("x-flow2-worker-key")
     )
     if worker_key:
-        handler_db = generation_handler.db if generation_handler is not None else None
-        if handler_db is None or not hasattr(handler_db, "get_dedicated_extension_worker_by_key_hash"):
+        await websocket.accept()
+        await websocket.close(code=1008, reason="Refresh worker keys removed; use refresh_token_id")
+        return
+
+    raw_refresh_token_id = websocket.query_params.get("refresh_token_id")
+    if raw_refresh_token_id is not None:
+        try:
+            refresh_token_id = int(str(raw_refresh_token_id).strip())
+        except (TypeError, ValueError):
             await websocket.accept()
-            await websocket.close(code=1011, reason="Dedicated worker auth unavailable")
+            await websocket.close(code=1008, reason="refresh_token_id must be a positive integer")
             return
-        worker_key_hash = hashlib.sha256(worker_key.encode("utf-8")).hexdigest()
-        worker = await handler_db.get_dedicated_extension_worker_by_key_hash(worker_key_hash)
-        if not worker or not bool(worker.get("is_active", True)):
+        if refresh_token_id <= 0:
             await websocket.accept()
-            await websocket.close(code=1008, reason="Invalid worker registration key")
+            await websocket.close(code=1008, reason="refresh_token_id must be a positive integer")
+            return
+        handler_db = generation_handler.db if generation_handler is not None else None
+        if handler_db is None or not hasattr(handler_db, "get_token"):
+            await websocket.accept()
+            await websocket.close(code=1011, reason="Refresh token lookup unavailable")
+            return
+        refresh_token = await handler_db.get_token(refresh_token_id)
+        if not refresh_token:
+            await websocket.accept()
+            await websocket.close(code=1008, reason="refresh_token_id token not found")
             return
         service = await ExtensionCaptchaService.get_instance(db=handler_db)
-        await service.connect(websocket, authenticated_worker=worker)
+        await service.connect(websocket, refresh_token_id=refresh_token_id)
         try:
             while True:
                 data = await websocket.receive_text()
