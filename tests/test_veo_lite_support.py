@@ -2,9 +2,86 @@ import types
 import unittest
 from unittest.mock import AsyncMock
 
+from src.api.routes import _extract_async_delivery_fields
 from src.core.model_resolver import resolve_model_name
 from src.services.flow_client import FlowClient
 from src.services.generation_handler import MODEL_CONFIG, GenerationHandler
+
+
+class AsyncImageDeliveryFieldTests(unittest.TestCase):
+    def test_failed_upscale_delivers_cached_1k_fallback(self):
+        google_url = "https://flow-content.google/image/source"
+        cached_url = "https://api.example.com/api/cache/blob/fallback.jpg"
+        payload = {
+            "url": cached_url,
+            "generated_assets": {
+                "type": "image",
+                "origin_image_url": google_url,
+                "final_image_url": cached_url,
+            },
+        }
+
+        fields = _extract_async_delivery_fields(
+            payload,
+            "gemini-3.1-flash-image-landscape-4k",
+        )
+
+        self.assertEqual(fields["base_result_urls"], [google_url])
+        self.assertEqual(fields["result_urls"], [cached_url])
+        self.assertEqual(fields["delivery_urls"], [cached_url])
+        self.assertEqual(fields["requested_resolution"], "4k")
+        self.assertEqual(fields["output_resolution"], "1k")
+        self.assertEqual(fields["upscale_status"], "failed")
+
+    def test_successful_upscale_delivers_upscaled_url(self):
+        google_url = "https://flow-content.google/image/source"
+        upscaled_url = "https://api.example.com/api/cache/blob/result_4K.jpg"
+        payload = {
+            "url": upscaled_url,
+            "generated_assets": {
+                "type": "image",
+                "origin_image_url": google_url,
+                "upscaled_image": {
+                    "resolution": "4K",
+                    "url": upscaled_url,
+                },
+            },
+        }
+
+        fields = _extract_async_delivery_fields(
+            payload,
+            "gemini-3.1-flash-image-landscape-4k",
+        )
+
+        self.assertEqual(fields["base_result_urls"], [google_url])
+        self.assertEqual(fields["result_urls"], [upscaled_url])
+        self.assertEqual(fields["delivery_urls"], [upscaled_url])
+        self.assertEqual(fields["output_resolution"], "4k")
+        self.assertEqual(fields["upscale_status"], "completed")
+
+    def test_normal_1k_image_keeps_cached_final_url(self):
+        google_url = "https://flow-content.google/image/source"
+        cached_url = "https://api.example.com/api/cache/blob/fallback.jpg"
+        payload = {
+            "url": cached_url,
+            "generated_assets": {
+                "type": "image",
+                "origin_image_url": google_url,
+                "final_image_url": cached_url,
+            },
+        }
+
+        fields = _extract_async_delivery_fields(
+            payload,
+            "gemini-3.1-flash-image-landscape",
+        )
+
+        self.assertEqual(fields["base_result_urls"], [google_url])
+        self.assertEqual(fields["result_urls"], [cached_url])
+        self.assertEqual(fields["delivery_urls"], [cached_url])
+        self.assertIsNone(fields["requested_resolution"])
+        self.assertIsNone(fields["output_resolution"])
+        self.assertEqual(fields["upscale_status"], "not_requested")
 
 
 class VeoLiteModelResolverTests(unittest.TestCase):

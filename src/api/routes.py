@@ -902,6 +902,10 @@ def _extract_async_delivery_fields(
                 if not delivery_urls:
                     delivery_urls = list(base_result_urls)
                     result_urls = list(base_result_urls)
+            final_image_url = generated_assets.get("final_image_url")
+            if isinstance(final_image_url, str) and final_image_url.strip():
+                result_urls = [final_image_url.strip()]
+                delivery_urls = [final_image_url.strip()]
             upscaled_image = generated_assets.get("upscaled_image")
             if isinstance(upscaled_image, dict):
                 upscale_url = upscaled_image.get("url") or upscaled_image.get("local_url")
@@ -919,8 +923,8 @@ def _extract_async_delivery_fields(
                     upscale_status = "completed"
             elif requested_resolution is not None:
                 upscale_status = "failed"
-                if base_result_urls:
-                    delivery_urls = list(base_result_urls)
+                if delivery_urls:
+                    output_resolution = "1k"
         elif asset_type == "video":
             final_video_url = generated_assets.get("final_video_url")
             if isinstance(final_video_url, str) and final_video_url.strip():
