@@ -78,6 +78,13 @@ def _resolve_adobe_stock_category_id(raw: Dict[str, Any]) -> Optional[int]:
         if 1 <= v <= 21:
             return v
     return _adobe_category_id_by_label(s)
+
+
+def _adobe_stock_categories_for_csvgen_settings() -> List[Dict[str, Any]]:
+    """Adobe Stock taxonomy as CSVGEN expects in settings.categories ({id, name} rows)."""
+    return [{"id": cid, "name": label} for cid, label in ADOBE_STOCK_METADATA_CATEGORIES]
+
+
 from fastapi import HTTPException
 from ..core.config import config as app_config
 from .llm_provider_chain import (
@@ -513,6 +520,13 @@ class CloningMetadataService:
                         settings_payload = (
                             dict(metadata_settings) if isinstance(metadata_settings, dict) else {}
                         )
+                        platforms_norm = [
+                            str(p).strip().lower()
+                            for p in (metadata_settings.get("platforms") or [])
+                            if str(p).strip()
+                        ]
+                        if include_category and "adobe-stock" in platforms_norm:
+                            settings_payload["categories"] = _adobe_stock_categories_for_csvgen_settings()
                         csvgen_model = str(model or "").strip() or "@cf/moonshotai/kimi-k2.5"
                         body = {
                             "image": data_url,

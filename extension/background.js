@@ -8,12 +8,12 @@ const DEFAULT_SETTINGS = {
     serverUrl: "wss://flow-api.prismacreative.online/captcha_ws",
     connectionMode: "endUser",
     apiKey: "",
-    workerAuthKey: "",
-    routeKey: "",
+    captchaWorkerAuthKey: "",
+    refreshTokenId: "",
     clientLabel: "",
 };
 
-const DEFAULT_WORKER_PAGE_URL = "https://labs.google/fx/tools/flow";
+const DEFAULT_WORKER_PAGE_URL = "https://labs.google/fx/api/auth/providers";
 
 const WORKER_RECAPTCHA_SETTLE_DEFAULT_MS = 3000;
 const WORKER_RECAPTCHA_SETTLE_MAX_MS = 120000;
@@ -43,12 +43,11 @@ const STORAGE_WORKER_TAB_ID = "extensionWorkerTabId";
 const runtimeState = {
     wsStatus: "idle",
     connectionMode: "",
-    routeKey: "",
     instanceId: "",
     workerSessionId: "",
     managedApiKeyId: "",
-    dedicatedWorkerId: "",
-    dedicatedTokenId: "",
+    captchaWorkerId: "",
+    refreshTokenId: "",
     bindingSource: "",
     lastRegisterStatus: "never",
     lastRegisterError: "",
@@ -81,12 +80,14 @@ const runtimeState = {
 
 function inferConnectionMode(stored) {
     const explicit = String(stored.connectionMode || "").trim();
-    if (explicit === "worker" || explicit === "endUser") {
-        return explicit;
+    if (explicit === "captchaWorker" || explicit === "refreshWorker" || explicit === "worker" || explicit === "endUser") {
+        return explicit === "worker" ? "refreshWorker" : explicit;
     }
-    const wk = String(stored.workerAuthKey || "").trim();
+    const cwk = String(stored.captchaWorkerAuthKey || "").trim();
+    const refreshTokenId = String(stored.refreshTokenId || "").trim();
     const ak = String(stored.apiKey || "").trim();
-    if (wk && !ak) return "worker";
+    if (cwk && !ak) return "captchaWorker";
+    if (refreshTokenId && !ak) return "refreshWorker";
     return "endUser";
 }
 
@@ -364,8 +365,8 @@ function getSettings() {
                 serverUrl: normalizeWebSocketUrl((stored.serverUrl || DEFAULT_SETTINGS.serverUrl).trim()),
                 connectionMode,
                 apiKey: (stored.apiKey || "").trim(),
-                workerAuthKey: (stored.workerAuthKey || "").trim(),
-                routeKey: (stored.routeKey || "").trim(),
+                captchaWorkerAuthKey: (stored.captchaWorkerAuthKey || "").trim(),
+                refreshTokenId: String(stored.refreshTokenId || "").trim(),
                 clientLabel: (stored.clientLabel || "").trim(),
                 workerPageUrl: normalizeWorkerPageUrl(stored.workerPageUrl),
                 usePersistentWorkerTab: !!stored.usePersistentWorkerTab,
@@ -445,8 +446,8 @@ function stopWorkerSessionRefreshScheduler() {
 
 async function performSessionRefresh({ reason = "server_request", reqId = null } = {}) {
     const refreshReason = String(reason || "server_request");
-    if (runtimeState.connectionMode !== "worker") {
-        return { success: false, error: "worker_mode_required", reason: refreshReason };
+    if (runtimeState.connectionMode !== "refreshWorker") {
+        return { success: false, error: "refresh_worker_mode_required", reason: refreshReason };
     }
     if (runtimeState.sessionRefreshInFlight) {
         return { success: false, error: "session_refresh_busy", reason: refreshReason };
@@ -498,11 +499,10 @@ async function performSessionRefresh({ reason = "server_request", reqId = null }
 function resetRuntimeStatePartial() {
     runtimeState.wsStatus = "idle";
     runtimeState.connectionMode = "";
-    runtimeState.routeKey = "";
     runtimeState.workerSessionId = "";
     runtimeState.managedApiKeyId = "";
-    runtimeState.dedicatedWorkerId = "";
-    runtimeState.dedicatedTokenId = "";
+    runtimeState.captchaWorkerId = "";
+    runtimeState.refreshTokenId = "";
     runtimeState.bindingSource = "";
     runtimeState.lastRegisterStatus = "never";
     runtimeState.lastRegisterError = "";
@@ -551,15 +551,15 @@ function resetExtensionToDefaults(done) {
     closeSocket();
     closeWorkerTabIfAny().finally(() => {
         chrome.storage.local.remove(
-            ["extensionInstanceId", FLOW_SESSION_TOKEN_HISTORY_KEY, STORAGE_WORKER_TAB_ID],
+            ["extensionInstanceId", "routeKey", FLOW_SESSION_TOKEN_HISTORY_KEY, STORAGE_WORKER_TAB_ID],
             () => {
                 chrome.storage.local.set(
                     {
                         serverUrl: DEFAULT_SETTINGS.serverUrl,
                         connectionMode: DEFAULT_SETTINGS.connectionMode,
                         apiKey: DEFAULT_SETTINGS.apiKey,
-                        workerAuthKey: DEFAULT_SETTINGS.workerAuthKey,
-                        routeKey: DEFAULT_SETTINGS.routeKey,
+                        captchaWorkerAuthKey: DEFAULT_SETTINGS.captchaWorkerAuthKey,
+                        refreshTokenId: DEFAULT_SETTINGS.refreshTokenId,
                         clientLabel: DEFAULT_SETTINGS.clientLabel,
                         workerPageUrl: DEFAULT_WORKER_PAGE_URL,
                         usePersistentWorkerTab: DEFAULT_WORKER_SETTINGS.usePersistentWorkerTab,
@@ -1171,13 +1171,14 @@ async function connectWS() {
 
     const settings = await getSettings();
     const instanceId = await getInstanceId();
-    const mode = settings.connectionMode === "worker" ? "worker" : "endUser";
+    const rawMode = settings.connectionMode === "worker" ? "refreshWorker" : settings.connectionMode;
+    const mode = rawMode === "captchaWorker" || rawMode === "refreshWorker" ? rawMode : "endUser";
     stopWorkerSessionRefreshScheduler();
     runtimeState.connectionMode = mode;
-    runtimeState.routeKey = mode === "endUser" ? settings.routeKey : "";
     runtimeState.instanceId = instanceId;
     runtimeState.workerSessionId = "";
     runtimeState.managedApiKeyId = "";
+    runtimeState.captchaWorkerId = "";
     runtimeState.bindingSource = "";
     runtimeState.wsStatus = "connecting";
     runtimeState.lastRegisterStatus = "pending";
@@ -1185,16 +1186,17 @@ async function connectWS() {
     runtimeState.lastError = "";
     pushEvent("connect_start", `Connecting to ${settings.serverUrl || DEFAULT_SETTINGS.serverUrl}`);
     const url = new URL(settings.serverUrl || DEFAULT_SETTINGS.serverUrl);
-    if (mode === "worker") {
-        if (settings.workerAuthKey) {
-            url.searchParams.set("worker_key", settings.workerAuthKey);
+    if (mode === "captchaWorker") {
+        if (settings.captchaWorkerAuthKey) {
+            url.searchParams.set("captcha_worker_key", settings.captchaWorkerAuthKey);
+        }
+    } else if (mode === "refreshWorker") {
+        if (settings.refreshTokenId) {
+            url.searchParams.set("refresh_token_id", settings.refreshTokenId);
         }
     } else {
         if (settings.apiKey) {
             url.searchParams.set("key", settings.apiKey);
-        }
-        if (settings.routeKey) {
-            url.searchParams.set("route_key", settings.routeKey);
         }
         if (settings.clientLabel) {
             url.searchParams.set("client_label", settings.clientLabel);
@@ -1211,7 +1213,6 @@ async function connectWS() {
         pushEvent("connect_open", "WebSocket connected");
         socket.send(JSON.stringify({
             type: "register",
-            route_key: mode === "endUser" ? settings.routeKey : "",
             client_label: mode === "endUser" ? settings.clientLabel : "",
             instance_id: instanceId,
         }));
@@ -1243,8 +1244,8 @@ async function connectWS() {
             runtimeState.instanceId = String(data.instance_id || runtimeState.instanceId || "");
             runtimeState.workerSessionId = String(data.worker_session_id || "");
             runtimeState.managedApiKeyId = String(data.managed_api_key_id || "");
-            runtimeState.dedicatedWorkerId = String(data.dedicated_worker_id || "");
-            runtimeState.dedicatedTokenId = String(data.dedicated_token_id || "");
+            runtimeState.captchaWorkerId = String(data.captcha_worker_id || "");
+            runtimeState.refreshTokenId = String(data.refresh_token_id || "");
             const ac = data.allow_captcha;
             const ar = data.allow_session_refresh;
             const ag = data.allow_generation;
@@ -1262,10 +1263,10 @@ async function connectWS() {
                 runtimeState.lastError = "";
                 pushEvent("register_ack", "Register successful");
                 console.log(
-                    "[Flow2API] Registered route key:",
-                    data.route_key || "(empty)",
-                    "managed_api_key_id=",
+                    "[Flow2API] Registered managed_api_key_id=",
                     runtimeState.managedApiKeyId || "-",
+                    "captcha_worker_id=",
+                    runtimeState.captchaWorkerId || "-",
                     "binding_source=",
                     runtimeState.bindingSource || "-",
                     "allowCaptcha=",
@@ -1332,7 +1333,7 @@ async function connectWS() {
 }
 
 async function handleGetToken(data) {
-    if (runtimeState.connectionMode === "worker" && runtimeState.allowCaptcha === false) {
+    if (runtimeState.allowCaptcha === false) {
         if (ws && ws.readyState === WebSocket.OPEN && data.req_id) {
             ws.send(
                 JSON.stringify({
@@ -1342,7 +1343,7 @@ async function handleGetToken(data) {
                 })
             );
         }
-        pushEvent("get_token_blocked", "Captcha disabled for this worker key", "warn");
+        pushEvent("get_token_blocked", "Captcha disabled for this worker", "warn");
         return;
     }
     const action = data.action || "IMAGE_GENERATION";
@@ -1409,7 +1410,7 @@ async function warmupLabsForSessionRefresh() {
 }
 
 async function handleRefreshSessionToken(data) {
-    if (runtimeState.connectionMode === "worker" && runtimeState.allowSessionRefresh === false) {
+    if (runtimeState.allowSessionRefresh === false) {
         if (ws && ws.readyState === WebSocket.OPEN && data && data.req_id) {
             ws.send(
                 JSON.stringify({
@@ -1419,7 +1420,7 @@ async function handleRefreshSessionToken(data) {
                 })
             );
         }
-        pushEvent("refresh_st_blocked", "Session refresh disabled for this worker key", "warn");
+        pushEvent("refresh_st_blocked", "Session refresh disabled for this worker", "warn");
         return;
     }
     await performSessionRefresh({ reason: "server_request", reqId: data && data.req_id ? data.req_id : null });
@@ -1436,11 +1437,11 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 chrome.storage.onChanged.addListener((changes, areaName) => {
     if (areaName !== "local") return;
     if (
-        changes.routeKey ||
         changes.serverUrl ||
         changes.clientLabel ||
         changes.apiKey ||
-        changes.workerAuthKey ||
+        changes.captchaWorkerAuthKey ||
+        changes.refreshTokenId ||
         changes.connectionMode
     ) {
         console.log("[Flow2API] Extension settings changed, reconnecting WebSocket...");

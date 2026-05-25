@@ -2,12 +2,12 @@ const DEFAULT_SETTINGS = {
   serverUrl: "wss://flow-api.prismacreative.online/captcha_ws",
   connectionMode: "endUser",
   apiKey: "",
-  workerAuthKey: "",
-  routeKey: "",
+  captchaWorkerAuthKey: "",
+  refreshTokenId: "",
   clientLabel: ""
 };
 
-const DEFAULT_WORKER_PAGE_URL = "https://labs.google/fx/tools/flow";
+const DEFAULT_WORKER_PAGE_URL = "https://labs.google/fx/api/auth/providers";
 const WORKER_RECAPTCHA_SETTLE_DEFAULT_MS = 3000;
 const WORKER_RECAPTCHA_SETTLE_MAX_MS = 120000;
 
@@ -15,8 +15,8 @@ const STORAGE_KEYS = {
   serverUrl: DEFAULT_SETTINGS.serverUrl,
   connectionMode: DEFAULT_SETTINGS.connectionMode,
   apiKey: "",
-  workerAuthKey: "",
-  routeKey: "",
+  captchaWorkerAuthKey: "",
+  refreshTokenId: "",
   clientLabel: "",
   workerPageUrl: DEFAULT_WORKER_PAGE_URL,
   usePersistentWorkerTab: true,
@@ -50,13 +50,17 @@ function normalizeWorkerPageUrl(raw) {
 }
 
 function normalizeSettings(values) {
-  const mode = (values.connectionMode || "").trim() === "worker" ? "worker" : "endUser";
+  const rawMode = (values.connectionMode || "").trim();
+  const mode =
+    rawMode === "captchaWorker" || rawMode === "refreshWorker" || rawMode === "worker"
+      ? rawMode === "worker" ? "refreshWorker" : rawMode
+      : "endUser";
   return {
     serverUrl: normalizeWebSocketUrl((values.serverUrl || DEFAULT_SETTINGS.serverUrl).trim()),
     connectionMode: mode,
     apiKey: (values.apiKey || "").trim(),
-    workerAuthKey: (values.workerAuthKey || "").trim(),
-    routeKey: (values.routeKey || "").trim(),
+    captchaWorkerAuthKey: (values.captchaWorkerAuthKey || "").trim(),
+    refreshTokenId: String(values.refreshTokenId || "").trim(),
     clientLabel: (values.clientLabel || "").trim(),
     workerPageUrl: normalizeWorkerPageUrl(values.workerPageUrl),
     usePersistentWorkerTab: !!values.usePersistentWorkerTab,
@@ -67,12 +71,14 @@ function normalizeSettings(values) {
 
 function inferConnectionMode(stored) {
   const explicit = (stored.connectionMode || "").trim();
-  if (explicit === "worker" || explicit === "endUser") {
-    return explicit;
+  if (explicit === "captchaWorker" || explicit === "refreshWorker" || explicit === "worker" || explicit === "endUser") {
+    return explicit === "worker" ? "refreshWorker" : explicit;
   }
-  const wk = (stored.workerAuthKey || "").trim();
+  const cwk = (stored.captchaWorkerAuthKey || "").trim();
+  const refreshTokenId = String(stored.refreshTokenId || "").trim();
   const ak = (stored.apiKey || "").trim();
-  if (wk && !ak) return "worker";
+  if (cwk && !ak) return "captchaWorker";
+  if (refreshTokenId && !ak) return "refreshWorker";
   return "endUser";
 }
 
@@ -120,16 +126,22 @@ function normalizeWebSocketUrl(raw) {
 }
 
 function getActiveMode() {
-  const endTab = $("tabEndUser");
-  return endTab && endTab.getAttribute("aria-selected") === "true" ? "endUser" : "worker";
+  if ($("tabCaptchaWorker") && $("tabCaptchaWorker").getAttribute("aria-selected") === "true") return "captchaWorker";
+  if ($("tabRefreshWorker") && $("tabRefreshWorker").getAttribute("aria-selected") === "true") return "refreshWorker";
+  return "endUser";
 }
 
 function setActiveMode(mode) {
-  const isEnd = mode === "endUser";
+  const normalized = mode === "worker" ? "refreshWorker" : mode;
+  const isEnd = normalized === "endUser";
+  const isCaptcha = normalized === "captchaWorker";
+  const isRefresh = normalized === "refreshWorker";
   $("tabEndUser").setAttribute("aria-selected", isEnd ? "true" : "false");
-  $("tabWorker").setAttribute("aria-selected", isEnd ? "false" : "true");
+  $("tabCaptchaWorker").setAttribute("aria-selected", isCaptcha ? "true" : "false");
+  $("tabRefreshWorker").setAttribute("aria-selected", isRefresh ? "true" : "false");
   $("panelEndUser").setAttribute("aria-hidden", isEnd ? "false" : "true");
-  $("panelWorker").setAttribute("aria-hidden", isEnd ? "true" : "false");
+  $("panelCaptchaWorker").setAttribute("aria-hidden", isCaptcha ? "false" : "true");
+  $("panelRefreshWorker").setAttribute("aria-hidden", isRefresh ? "false" : "true");
 }
 
 function loadSettings() {
@@ -153,8 +165,8 @@ function applyLoadedSettings(stored, inferredMode) {
   const settings = normalizeSettings({ ...stored, connectionMode: inferredMode });
   $("serverUrl").value = settings.serverUrl;
   $("apiKey").value = settings.apiKey;
-  $("workerAuthKey").value = settings.workerAuthKey;
-  $("routeKey").value = settings.routeKey;
+  $("captchaWorkerAuthKey").value = settings.captchaWorkerAuthKey;
+  $("refreshTokenId").value = settings.refreshTokenId;
   $("clientLabel").value = settings.clientLabel;
   $("workerPageUrl").value = settings.workerPageUrl;
   $("workerRecaptchaSettleMs").value = String(settings.workerRecaptchaSettleMs);
@@ -177,49 +189,72 @@ function saveSettings() {
   if (mode === "endUser") {
     const apiKey = ($("apiKey").value || "").trim();
     if (!apiKey) {
-      setStatus("API Key is required for End user mode.", true);
+      setStatus("API Key is required for End user worker mode.", true);
       return;
     }
     const payload = {
       serverUrl,
       connectionMode: "endUser",
       apiKey,
-      workerAuthKey: "",
-      clientLabel: ($("clientLabel").value || "").trim(),
-      routeKey: ($("routeKey").value || "").trim()
+      clientLabel: ($("clientLabel").value || "").trim()
     };
     chrome.storage.local.set(payload, () => {
       if (chrome.runtime.lastError) {
         setStatus(`Save failed: ${chrome.runtime.lastError.message}`, true);
         return;
       }
-      setStatus("Saved connection (End user). Worker key cleared. Background will reconnect.");
+      setStatus("Saved connection (End user worker). Background will reconnect.");
     });
     return;
   }
 
-  const workerAuthKey = ($("workerAuthKey").value || "").trim();
-  if (!workerAuthKey) {
-    setStatus("Worker Registration Key is required for Worker mode.", true);
+  if (mode === "captchaWorker") {
+    const captchaWorkerAuthKey = ($("captchaWorkerAuthKey").value || "").trim();
+    if (!captchaWorkerAuthKey) {
+      setStatus("Captcha worker key is required for Captcha worker mode.", true);
+      return;
+    }
+    chrome.storage.local.set(
+      {
+        serverUrl,
+        connectionMode: "captchaWorker",
+        captchaWorkerAuthKey,
+        apiKey: "",
+        clientLabel: ""
+      },
+      () => {
+        if (chrome.runtime.lastError) {
+          setStatus(`Save failed: ${chrome.runtime.lastError.message}`, true);
+          return;
+        }
+        setStatus("Saved connection (Captcha worker). Background will reconnect.");
+        $("apiKey").value = "";
+        $("clientLabel").value = "";
+      }
+    );
+    return;
+  }
+
+  const refreshTokenId = String(($("refreshTokenId").value || "")).trim();
+  if (!/^[1-9]\d*$/.test(refreshTokenId)) {
+    setStatus("A positive Token ID is required for Refresh worker mode.", true);
     return;
   }
   const payload = {
     serverUrl,
-    connectionMode: "worker",
-    workerAuthKey,
+    connectionMode: "refreshWorker",
+    refreshTokenId,
     apiKey: "",
-    clientLabel: "",
-    routeKey: ""
+    clientLabel: ""
   };
   chrome.storage.local.set(payload, () => {
     if (chrome.runtime.lastError) {
       setStatus(`Save failed: ${chrome.runtime.lastError.message}`, true);
       return;
     }
-    setStatus("Saved connection (Worker). API key and labels cleared. Background will reconnect.");
+    setStatus("Saved connection (Refresh worker). API key and labels cleared. Background will reconnect.");
     $("apiKey").value = "";
     $("clientLabel").value = "";
-    $("routeKey").value = "";
   });
 }
 
@@ -409,12 +444,11 @@ function renderStatusCards(state) {
   const cardsEl = $("statusCards");
   const ws = state.wsStatus || "unknown";
   const mode = state.connectionMode || "-";
-  const route = state.routeKey || "(empty)";
   const instance = state.instanceId || "-";
   const workerSession = state.workerSessionId || "-";
   const managed = state.managedApiKeyId || "-";
-  const dedicatedWorker = state.dedicatedWorkerId || "-";
-  const dedicatedToken = state.dedicatedTokenId || "-";
+  const captchaWorker = state.captchaWorkerId || "-";
+  const refreshToken = state.refreshTokenId || "-";
   const ack = state.lastRegisterStatus || "unknown";
   const source = state.bindingSource || "unknown";
   const registerError = state.lastRegisterError || "-";
@@ -429,10 +463,9 @@ function renderStatusCards(state) {
     ["Register", ack, ack === "error"],
     ["Binding", source, false],
     ["Managed key", managed, false],
-    ["Dedicated worker", dedicatedWorker, false],
-    ["Dedicated token", dedicatedToken, false],
+    ["Captcha worker", captchaWorker, false],
+    ["Refresh token", refreshToken, false],
     ["Allow generation", state.allowGeneration ? "yes" : "no", false],
-    ["Route key", route, false],
     ["Instance ID", instance, false],
     ["Worker session", workerSession, false],
     ["Persistent worker tab", persistent, false],
@@ -563,7 +596,7 @@ function reconnectNow() {
 }
 
 function runResetExtension() {
-  if (!confirm("Reset this extension?\n\nThis removes WebSocket URL, API keys, labels, route key, worker tab settings (URL, persistent tab, auto-recycle, reCAPTCHA settle delay), captcha job stats and history, session refresh counters, stored Flow session token history (last 3), worker tab id, and assigns a new instance id. The background worker reconnects with default local URL.")) {
+  if (!confirm("Reset this extension?\n\nThis removes WebSocket URL, API keys, labels, worker tab settings (URL, persistent tab, auto-recycle, reCAPTCHA settle delay), captcha job stats and history, session refresh counters, stored Flow session token history (last 3), worker tab id, and assigns a new instance id. The background worker reconnects with default local URL.")) {
     return;
   }
   setStatus("Resetting extension…", false);
@@ -627,7 +660,8 @@ function sendWorkerMessage(type, okMsg) {
 
 function wireAuthTabs() {
   $("tabEndUser").addEventListener("click", () => setActiveMode("endUser"));
-  $("tabWorker").addEventListener("click", () => setActiveMode("worker"));
+  $("tabCaptchaWorker").addEventListener("click", () => setActiveMode("captchaWorker"));
+  $("tabRefreshWorker").addEventListener("click", () => setActiveMode("refreshWorker"));
 }
 
 function wireMainTabs() {

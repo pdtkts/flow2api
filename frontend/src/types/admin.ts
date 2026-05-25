@@ -37,45 +37,48 @@ export interface TokenRow {
   use_extension_for_generation?: boolean | number | null
 }
 
-/** Row from GET /api/admin/dedicated-extension/workers (joined fields may vary) */
-export interface DedicatedExtensionWorkerRow {
+export interface CaptchaWorkerKeyRow {
   id: number
-  worker_key_prefix: string
+  key_prefix: string
   label?: string | null
-  token_id?: number | null
-  route_key?: string | null
+  key_plaintext?: string | null
   is_active?: boolean | number | null
   last_seen_at?: string | null
   last_instance_id?: string | null
-  token_email?: string | null
-  allow_captcha?: boolean | number | null
-  allow_session_refresh?: boolean | number | null
-  allow_generation?: boolean | number | null
-  /** Full registration secret when stored at creation (admin-only; protect DB backups). */
-  worker_key_plaintext?: string | null
+  last_error?: string | null
+  created_at?: string | null
+  updated_at?: string | null
 }
 
-export interface CreateDedicatedWorkerResponse {
+export interface CaptchaWorkerSessionRow {
+  worker_session_id: string
+  instance_id?: string
+  captcha_worker_id?: number | null
+  captcha_worker_key_label?: string | null
+  captcha_worker_key_prefix?: string | null
+  connected_at?: number
+}
+
+export interface ListCaptchaWorkerKeysResponse {
   success?: boolean
-  worker?: DedicatedExtensionWorkerRow
-  worker_registration_key?: string
+  keys?: CaptchaWorkerKeyRow[]
+  sessions?: CaptchaWorkerSessionRow[]
+}
+
+export interface CreateCaptchaWorkerKeyResponse {
+  success?: boolean
+  key?: CaptchaWorkerKeyRow
+  captcha_worker_key?: string
   detail?: string
 }
 
-export interface ListDedicatedWorkersResponse {
+export interface DeleteCaptchaWorkerKeyResponse {
   success?: boolean
-  workers?: DedicatedExtensionWorkerRow[]
-}
-
-/** Response from DELETE /api/admin/dedicated-extension/workers/{worker_id} */
-export interface DeleteDedicatedWorkerResponse {
-  success?: boolean
-  worker_id?: number
+  key_id?: number
   detail?: string
 }
 
-/** Response from POST /api/admin/dedicated-extension/workers/kill-sessions */
-export interface KillDedicatedWorkerSessionsResponse {
+export interface KillCaptchaWorkerSessionsResponse {
   success?: boolean
   killed_count?: number
   message?: string

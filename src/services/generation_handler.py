@@ -1848,6 +1848,7 @@ class GenerationHandler:
 
             local_url = image_url
             cache_started_at = time.time()
+            requires_cached_fallback = bool(upsample_resolution)
             if config.cache_enabled:
                 await self._update_request_log_progress(
                     request_log_state,
@@ -1872,10 +1873,31 @@ class GenerationHandler:
                         yield self._create_stream_chunk("✅ 1K 图片缓存成功,准备返回缓存地址...\n")
                 except Exception as e:
                     debug_logger.log_error(f"Failed to cache 1K image: {str(e)}")
+                    if requires_cached_fallback:
+                        error_msg = (
+                            "Upscale failed and 1K fallback cache failed; "
+                            "refusing to return source Google URL"
+                        )
+                        if stream:
+                            cache_error = self._normalize_error_message(e, max_length=120)
+                            yield self._create_stream_chunk(f"{error_msg}: {cache_error}\n")
+                        self._mark_generation_failed(generation_result, error_msg)
+                        yield self._create_error_response(error_msg, status_code=502)
+                        return
                     local_url = image_url
                     if stream:
                         cache_error = self._normalize_error_message(e, max_length=120)
                         yield self._create_stream_chunk(f"⚠️ 缓存失败: {cache_error}\n正在返回源链接...\n")
+            elif requires_cached_fallback:
+                error_msg = (
+                    "Upscale failed and file cache is disabled; "
+                    "refusing to return source Google URL"
+                )
+                if stream:
+                    yield self._create_stream_chunk(f"{error_msg}\n")
+                self._mark_generation_failed(generation_result, error_msg)
+                yield self._create_error_response(error_msg, status_code=502)
+                return
             elif stream:
                 yield self._create_stream_chunk("缓存已关闭,正在返回官方图片链接...\n")
             if image_trace is not None:

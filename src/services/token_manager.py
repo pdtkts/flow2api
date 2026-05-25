@@ -730,7 +730,6 @@ class TokenManager:
                         if code in (
                             "extension_worker_offline",
                             "extension_session_refresh_disabled",
-                            "extension_no_dedicated_worker",
                         ):
                             ext_routing_failure_code = code
                     else:
@@ -768,7 +767,6 @@ class TokenManager:
                     if ext_routing_failure_code not in (
                         "extension_worker_offline",
                         "extension_session_refresh_disabled",
-                        "extension_no_dedicated_worker",
                     ):
                         self._set_st_refresh_reason(token_id, "local_timeout_after_extension")
                 else:
@@ -783,7 +781,6 @@ class TokenManager:
                     if ext_routing_failure_code not in (
                         "extension_worker_offline",
                         "extension_session_refresh_disabled",
-                        "extension_no_dedicated_worker",
                     ):
                         self._set_st_refresh_reason(token_id, "local_error_after_extension")
                 else:
@@ -794,7 +791,6 @@ class TokenManager:
             _preserve_ext_routing_reason = ext_routing_failure_code in (
                 "extension_worker_offline",
                 "extension_session_refresh_disabled",
-                "extension_no_dedicated_worker",
             )
             if local_st is not None or not _preserve_ext_routing_reason:
                 persisted_local = await _persist_if_new(local_st, "local_headed")
@@ -810,7 +806,6 @@ class TokenManager:
                 if ext_routing_failure_code in (
                     "extension_worker_offline",
                     "extension_session_refresh_disabled",
-                    "extension_no_dedicated_worker",
                 ):
                     pass
                 else:

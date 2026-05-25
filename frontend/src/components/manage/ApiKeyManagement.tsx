@@ -10,9 +10,16 @@ import { Label } from "../ui/label"
 import { Switch } from "../ui/switch"
 import { Badge } from "../ui/badge"
 import { toast } from "sonner"
-import { ChevronLeft, ChevronRight, Eye, FolderKanban, Loader2, Pencil, Plus, RefreshCw, Trash2 } from "lucide-react"
+import { ChevronLeft, ChevronRight, Copy, Eye, FolderKanban, KeyRound, Loader2, Pencil, Plus, RefreshCw, Trash2, Unplug } from "lucide-react"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select"
-import type { ManagedApiKeyProjectsResponse } from "../../types/admin"
+import type {
+  CaptchaWorkerKeyRow,
+  CreateCaptchaWorkerKeyResponse,
+  DeleteCaptchaWorkerKeyResponse,
+  KillCaptchaWorkerSessionsResponse,
+  ListCaptchaWorkerKeysResponse,
+  ManagedApiKeyProjectsResponse,
+} from "../../types/admin"
 
 type TokenRow = { id: number; email?: string; is_active?: boolean }
 type ManagedApiKey = {
@@ -92,6 +99,11 @@ const AVAILABLE_SCOPES: ScopeOption[] = [
 /** All selectable scope ids (no wildcard); used for Select all and legacy `*` expansion. */
 const ALL_MANAGED_SCOPE_IDS: string[] = AVAILABLE_SCOPES.map((s) => s.id)
 
+function asEnabled(v: unknown, defaultValue = true): boolean {
+  if (v === null || v === undefined) return defaultValue
+  return v === true || v === 1 || v === "1"
+}
+
 function parseScopesFromKey(scopesRaw?: string | null): string[] {
   const parsed = String(scopesRaw || "")
     .split(",")
@@ -135,6 +147,13 @@ export function ApiKeyManagement() {
   const [adobeUsageOpRows, setAdobeUsageOpRows] = useState<AdobeUsageOpRow[]>([])
   const [adobeUsageLoading, setAdobeUsageLoading] = useState(false)
   const [createdKey, setCreatedKey] = useState("")
+  const [captchaWorkerKeys, setCaptchaWorkerKeys] = useState<CaptchaWorkerKeyRow[]>([])
+  const [captchaWorkerSessions, setCaptchaWorkerSessions] = useState<NonNullable<ListCaptchaWorkerKeysResponse["sessions"]>>([])
+  const [captchaWorkerLabel, setCaptchaWorkerLabel] = useState("")
+  const [createdCaptchaWorkerKey, setCreatedCaptchaWorkerKey] = useState("")
+  const [captchaWorkerSaving, setCaptchaWorkerSaving] = useState(false)
+  const [captchaWorkerBusyId, setCaptchaWorkerBusyId] = useState<number | null>(null)
+  const [captchaWorkerDraftLabels, setCaptchaWorkerDraftLabels] = useState<Record<number, string>>({})
 
   const [keyProjectsPage, setKeyProjectsPage] = useState(0)
   const [keyProjectsLoading, setKeyProjectsLoading] = useState(false)
@@ -152,18 +171,27 @@ export function ApiKeyManagement() {
     setLoading(true)
     try {
       const auditOffset = auditPage * AUDIT_PAGE_SIZE
-      const [k, t, a] = await Promise.all([
+      const [k, t, a, cw] = await Promise.all([
         adminJson<{ success?: boolean; keys?: ManagedApiKey[] }>("/api/admin/managed-apikeys", token),
         adminJson<TokenRow[]>("/api/tokens", token),
         adminJson<{ success?: boolean; logs?: AuditLog[]; total?: number }>(
           `/api/admin/managed-apikeys/audit?limit=${AUDIT_PAGE_SIZE}&offset=${auditOffset}`,
           token
         ),
+        adminJson<ListCaptchaWorkerKeysResponse>("/api/admin/captcha-worker-keys", token),
       ])
       if (k.ok && k.data?.keys) setKeys(k.data.keys)
       if (t.ok && Array.isArray(t.data)) setTokens(t.data)
       if (a.ok && a.data?.logs) setAuditLogs(a.data.logs)
       if (a.ok && typeof a.data?.total === "number") setAuditTotal(a.data.total)
+      if (cw.ok && cw.data?.success) {
+        const rows = Array.isArray(cw.data.keys) ? cw.data.keys : []
+        setCaptchaWorkerKeys(rows)
+        setCaptchaWorkerSessions(Array.isArray(cw.data.sessions) ? cw.data.sessions : [])
+        const drafts: Record<number, string> = {}
+        for (const row of rows) drafts[row.id] = String(row.label || "")
+        setCaptchaWorkerDraftLabels(drafts)
+      }
     } finally {
       setLoading(false)
     }
@@ -287,6 +315,117 @@ export function ApiKeyManagement() {
       }
     } finally {
       setSaving(false)
+    }
+  }
+
+  const createCaptchaWorkerKey = async () => {
+    if (!token) return
+    setCaptchaWorkerSaving(true)
+    setCreatedCaptchaWorkerKey("")
+    try {
+      const r = await adminJson<CreateCaptchaWorkerKeyResponse>("/api/admin/captcha-worker-keys", token, {
+        method: "POST",
+        body: JSON.stringify({ label: captchaWorkerLabel.trim() || "Captcha worker" }),
+      })
+      if (r.ok && r.data?.success && r.data.captcha_worker_key) {
+        setCreatedCaptchaWorkerKey(r.data.captcha_worker_key)
+        setCaptchaWorkerLabel("")
+        toast.success("Captcha worker key created")
+        await loadAll()
+      } else {
+        toast.error(r.data?.detail || "Create captcha worker key failed")
+      }
+    } finally {
+      setCaptchaWorkerSaving(false)
+    }
+  }
+
+  const saveCaptchaWorkerKey = async (row: CaptchaWorkerKeyRow) => {
+    if (!token) return
+    setCaptchaWorkerBusyId(row.id)
+    try {
+      const r = await adminJson<{ success?: boolean; detail?: string }>(`/api/admin/captcha-worker-keys/${row.id}`, token, {
+        method: "PATCH",
+        body: JSON.stringify({ label: captchaWorkerDraftLabels[row.id] ?? "" }),
+      })
+      if (r.ok && r.data?.success) {
+        toast.success("Captcha worker key updated")
+        await loadAll()
+      } else {
+        toast.error(r.data?.detail || "Update failed")
+      }
+    } finally {
+      setCaptchaWorkerBusyId(null)
+    }
+  }
+
+  const toggleCaptchaWorkerKey = async (row: CaptchaWorkerKeyRow) => {
+    if (!token) return
+    setCaptchaWorkerBusyId(row.id)
+    try {
+      const enabled = asEnabled(row.is_active)
+      const r = await adminJson<{ success?: boolean; detail?: string }>(`/api/admin/captcha-worker-keys/${row.id}`, token, {
+        method: "PATCH",
+        body: JSON.stringify({ is_active: !enabled }),
+      })
+      if (r.ok && r.data?.success) {
+        toast.success(!enabled ? "Captcha worker enabled" : "Captcha worker disabled")
+        await loadAll()
+      } else {
+        toast.error(r.data?.detail || "Update failed")
+      }
+    } finally {
+      setCaptchaWorkerBusyId(null)
+    }
+  }
+
+  const deleteCaptchaWorkerKey = async (row: CaptchaWorkerKeyRow) => {
+    if (!token) return
+    if (!confirm("Delete this captcha worker key? Connected workers using it will not be able to reconnect.")) return
+    setCaptchaWorkerBusyId(row.id)
+    try {
+      const r = await adminJson<DeleteCaptchaWorkerKeyResponse>(`/api/admin/captcha-worker-keys/${row.id}`, token, {
+        method: "DELETE",
+      })
+      if (r.ok && r.data?.success) {
+        toast.success("Captcha worker key deleted")
+        await loadAll()
+      } else {
+        toast.error(r.data?.detail || "Delete failed")
+      }
+    } finally {
+      setCaptchaWorkerBusyId(null)
+    }
+  }
+
+  const killCaptchaWorkerSessions = async (row: CaptchaWorkerKeyRow) => {
+    if (!token) return
+    setCaptchaWorkerBusyId(row.id)
+    try {
+      const r = await adminJson<KillCaptchaWorkerSessionsResponse>(
+        `/api/admin/captcha-worker-keys/${row.id}/kill-sessions`,
+        token,
+        { method: "POST" }
+      )
+      if (r.ok && r.data?.success) {
+        toast.success(r.data.message || `${r.data.killed_count ?? 0} session(s) closed`)
+        await loadAll()
+      } else {
+        toast.error(r.data?.detail || "Kill sessions failed")
+      }
+    } finally {
+      setCaptchaWorkerBusyId(null)
+    }
+  }
+
+  const copyCaptchaWorkerKey = async (value: string) => {
+    const v = String(value || "").trim()
+    if (!v) return toast.error("Full key not available")
+    try {
+      await navigator.clipboard.writeText(v)
+      toast.success("Copied")
+    } catch {
+      toast.error("Copy failed")
     }
   }
 
@@ -542,6 +681,119 @@ export function ApiKeyManagement() {
               )}
             </TableBody>
           </Table>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader className="flex flex-row items-center justify-between">
+          <CardTitle>Captcha worker keys</CardTitle>
+          <Button size="icon" variant="outline" onClick={() => loadAll()} disabled={loading}>
+            <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
+          </Button>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid gap-3 sm:grid-cols-[1fr_auto]">
+            <Input
+              value={captchaWorkerLabel}
+              onChange={(e) => setCaptchaWorkerLabel(e.target.value)}
+              placeholder="Worker label"
+            />
+            <Button onClick={() => void createCaptchaWorkerKey()} disabled={captchaWorkerSaving}>
+              {captchaWorkerSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : <KeyRound className="h-4 w-4 mr-2" />}
+              New captcha key
+            </Button>
+          </div>
+          {createdCaptchaWorkerKey ? (
+            <div className="rounded-md border bg-muted/30 p-3">
+              <Label>Captcha worker key</Label>
+              <div className="mt-2 flex gap-2">
+                <Input readOnly className="font-mono text-xs" value={createdCaptchaWorkerKey} />
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="icon"
+                  onClick={() => void copyCaptchaWorkerKey(createdCaptchaWorkerKey)}
+                  title="Copy key"
+                >
+                  <Copy className="h-4 w-4" />
+                </Button>
+              </div>
+            </div>
+          ) : null}
+          <div className="rounded-md border">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Label</TableHead>
+                  <TableHead>Prefix</TableHead>
+                  <TableHead>Sessions</TableHead>
+                  <TableHead>Last seen</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead className="text-right">Action</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {!captchaWorkerKeys.length ? (
+                  <TableRow>
+                    <TableCell colSpan={6} className="text-center text-muted-foreground py-8">
+                      No captcha worker keys
+                    </TableCell>
+                  </TableRow>
+                ) : (
+                  captchaWorkerKeys.map((row) => {
+                    const activeSessions = captchaWorkerSessions.filter((s) => s.captcha_worker_id === row.id).length
+                    const enabled = asEnabled(row.is_active)
+                    const busy = captchaWorkerBusyId === row.id
+                    return (
+                      <TableRow key={row.id}>
+                        <TableCell className="min-w-[180px]">
+                          <Input
+                            className="h-8"
+                            value={captchaWorkerDraftLabels[row.id] ?? ""}
+                            onChange={(e) =>
+                              setCaptchaWorkerDraftLabels((prev) => ({ ...prev, [row.id]: e.target.value }))
+                            }
+                          />
+                        </TableCell>
+                        <TableCell className="font-mono text-xs">
+                          <button
+                            type="button"
+                            className="max-w-full text-left break-all text-primary hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                            onClick={() => void copyCaptchaWorkerKey(String(row.key_plaintext || ""))}
+                            title="Click to copy full key"
+                          >
+                            {row.key_prefix}
+                          </button>
+                        </TableCell>
+                        <TableCell>{activeSessions}</TableCell>
+                        <TableCell className="text-xs">{row.last_seen_at || "-"}</TableCell>
+                        <TableCell>
+                          <Badge variant={enabled ? "default" : "secondary"}>{enabled ? "Active" : "Disabled"}</Badge>
+                        </TableCell>
+                        <TableCell className="text-right">
+                          <div className="inline-flex flex-wrap justify-end gap-2">
+                            <Button size="icon" variant="outline" disabled={busy} onClick={() => void saveCaptchaWorkerKey(row)} title="Save label">
+                              {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Pencil className="h-4 w-4" />}
+                            </Button>
+                            <Button type="button" size="icon" variant="outline" onClick={() => void copyCaptchaWorkerKey(String(row.key_plaintext || ""))} title="Copy full key">
+                              <Copy className="h-4 w-4" />
+                            </Button>
+                            <Button size="icon" variant="outline" disabled={busy} onClick={() => void killCaptchaWorkerSessions(row)} title="Kill sessions">
+                              <Unplug className="h-4 w-4" />
+                            </Button>
+                            <Button size="icon" variant="destructive" disabled={busy} onClick={() => void deleteCaptchaWorkerKey(row)} title="Delete key">
+                              <Trash2 className="h-4 w-4" />
+                            </Button>
+                            <Switch checked={enabled} disabled={busy} onCheckedChange={() => void toggleCaptchaWorkerKey(row)} />
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    )
+                  })
+                )}
+              </TableBody>
+            </Table>
+          </div>
         </CardContent>
       </Card>
 

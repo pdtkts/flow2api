@@ -902,6 +902,10 @@ def _extract_async_delivery_fields(
                 if not delivery_urls:
                     delivery_urls = list(base_result_urls)
                     result_urls = list(base_result_urls)
+            final_image_url = generated_assets.get("final_image_url")
+            if isinstance(final_image_url, str) and final_image_url.strip():
+                result_urls = [final_image_url.strip()]
+                delivery_urls = [final_image_url.strip()]
             upscaled_image = generated_assets.get("upscaled_image")
             if isinstance(upscaled_image, dict):
                 upscale_url = upscaled_image.get("url") or upscaled_image.get("local_url")
@@ -919,8 +923,8 @@ def _extract_async_delivery_fields(
                     upscale_status = "completed"
             elif requested_resolution is not None:
                 upscale_status = "failed"
-                if base_result_urls:
-                    delivery_urls = list(base_result_urls)
+                if delivery_urls:
+                    output_resolution = "1k"
         elif asset_type == "video":
             final_video_url = generated_assets.get("final_video_url")
             if isinstance(final_video_url, str) and final_video_url.strip():
@@ -2245,25 +2249,70 @@ async def stream_generate_content(
 
 @router.websocket("/captcha_ws")
 async def captcha_websocket_endpoint(websocket: WebSocket):
+    captcha_worker_key = (
+        websocket.query_params.get("captcha_worker_key")
+        or websocket.query_params.get("captcha_key")
+        or websocket.headers.get("x-flow2-captcha-worker-key")
+    )
+    if captcha_worker_key:
+        handler_db = generation_handler.db if generation_handler is not None else None
+        if handler_db is None or not hasattr(handler_db, "get_captcha_worker_key_by_hash"):
+            await websocket.accept()
+            await websocket.close(code=1011, reason="Captcha worker auth unavailable")
+            return
+        captcha_worker_key_hash = hashlib.sha256(captcha_worker_key.encode("utf-8")).hexdigest()
+        captcha_worker = await handler_db.get_captcha_worker_key_by_hash(captcha_worker_key_hash)
+        if not captcha_worker or not bool(captcha_worker.get("is_active", True)):
+            await websocket.accept()
+            await websocket.close(code=1008, reason="Invalid captcha worker key")
+            return
+        service = await ExtensionCaptchaService.get_instance(db=handler_db)
+        await service.connect(websocket, authenticated_captcha_worker=captcha_worker)
+        try:
+            while True:
+                data = await websocket.receive_text()
+                await service.handle_message(websocket, data)
+        except WebSocketDisconnect:
+            service.disconnect(websocket)
+        except Exception as exc:
+            debug_logger.log_error(f"WebSocket error: {exc}")
+            service.disconnect(websocket)
+        return
+
     worker_key = (
         websocket.query_params.get("worker_key")
         or websocket.query_params.get("worker_auth_key")
         or websocket.headers.get("x-flow2-worker-key")
     )
     if worker_key:
-        handler_db = generation_handler.db if generation_handler is not None else None
-        if handler_db is None or not hasattr(handler_db, "get_dedicated_extension_worker_by_key_hash"):
+        await websocket.accept()
+        await websocket.close(code=1008, reason="Refresh worker keys removed; use refresh_token_id")
+        return
+
+    raw_refresh_token_id = websocket.query_params.get("refresh_token_id")
+    if raw_refresh_token_id is not None:
+        try:
+            refresh_token_id = int(str(raw_refresh_token_id).strip())
+        except (TypeError, ValueError):
             await websocket.accept()
-            await websocket.close(code=1011, reason="Dedicated worker auth unavailable")
+            await websocket.close(code=1008, reason="refresh_token_id must be a positive integer")
             return
-        worker_key_hash = hashlib.sha256(worker_key.encode("utf-8")).hexdigest()
-        worker = await handler_db.get_dedicated_extension_worker_by_key_hash(worker_key_hash)
-        if not worker or not bool(worker.get("is_active", True)):
+        if refresh_token_id <= 0:
             await websocket.accept()
-            await websocket.close(code=1008, reason="Invalid worker registration key")
+            await websocket.close(code=1008, reason="refresh_token_id must be a positive integer")
+            return
+        handler_db = generation_handler.db if generation_handler is not None else None
+        if handler_db is None or not hasattr(handler_db, "get_token"):
+            await websocket.accept()
+            await websocket.close(code=1011, reason="Refresh token lookup unavailable")
+            return
+        refresh_token = await handler_db.get_token(refresh_token_id)
+        if not refresh_token:
+            await websocket.accept()
+            await websocket.close(code=1008, reason="refresh_token_id token not found")
             return
         service = await ExtensionCaptchaService.get_instance(db=handler_db)
-        await service.connect(websocket, authenticated_worker=worker)
+        await service.connect(websocket, refresh_token_id=refresh_token_id)
         try:
             while True:
                 data = await websocket.receive_text()

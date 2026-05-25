@@ -20,7 +20,7 @@ from urllib.parse import urlparse
 from curl_cffi.requests import AsyncSession
 from ..core.auth import AuthManager
 from ..core.api_key_manager import ApiKeyManager
-from ..core.database import Database, _DEDICATED_WORKER_UPDATE_OMIT
+from ..core.database import Database
 from ..core.config import config, get_yescaptcha_min_score, normalize_yescaptcha_task_type
 from ..core.models import GenerationConfig
 from ..core.monitoring import build_public_health_snapshot
@@ -49,8 +49,8 @@ _ADMIN_SESSION_TTL_BROWSER = 24 * 3600  # 24 hours when off
 SUPPORTED_API_CAPTCHA_METHODS = {"yescaptcha", "capmonster", "ezcaptcha", "capsolver"}
 
 
-def _generate_worker_registration_key() -> str:
-    return f"wk_{secrets.token_urlsafe(32)}"
+def _generate_captcha_worker_key() -> str:
+    return f"cwk_{secrets.token_urlsafe(32)}"
 
 
 def _hash_worker_registration_key(raw_key: str) -> str:
@@ -722,27 +722,13 @@ class ExtensionWorkerKillRequest(BaseModel):
     worker_session_id: str
 
 
-class DedicatedWorkerCreateRequest(BaseModel):
+class CaptchaWorkerKeyCreateRequest(BaseModel):
     label: str = ""
-    token_id: Optional[int] = None
-    route_key: Optional[str] = None
-    allow_captcha: bool = True
-    allow_session_refresh: bool = True
-    allow_generation: bool = False
 
 
-class DedicatedWorkerUpdateRequest(BaseModel):
+class CaptchaWorkerKeyUpdateRequest(BaseModel):
     label: Optional[str] = None
-    token_id: Optional[int] = None
-    route_key: Optional[str] = None
     is_active: Optional[bool] = None
-    allow_captcha: Optional[bool] = None
-    allow_session_refresh: Optional[bool] = None
-    allow_generation: Optional[bool] = None
-
-
-class DedicatedWorkerKillSessionsRequest(BaseModel):
-    token_id: int
 
 
 class UpdateDebugConfigRequest(BaseModel):
@@ -2303,6 +2289,86 @@ async def delete_managed_api_key(
     return {"success": True, "message": "Managed API key deleted"}
 
 
+@router.get("/api/admin/captcha-worker-keys")
+async def list_captcha_worker_keys(token: str = Depends(verify_admin_token)):
+    from ..services.browser_captcha_extension import ExtensionCaptchaService
+
+    keys = await db.list_captcha_worker_keys()
+    service = await ExtensionCaptchaService.get_instance(db=db)
+    active_workers = await service.list_active_workers()
+    captcha_sessions = [
+        w for w in active_workers
+        if w.get("captcha_worker_id") is not None
+    ]
+    return {"success": True, "keys": keys, "sessions": captcha_sessions}
+
+
+@router.post("/api/admin/captcha-worker-keys")
+async def create_captcha_worker_key(
+    request: CaptchaWorkerKeyCreateRequest,
+    token: str = Depends(verify_admin_token),
+):
+    raw_key = _generate_captcha_worker_key()
+    key_id = await db.create_captcha_worker_key(
+        key_prefix=_worker_key_prefix(raw_key),
+        key_hash=_hash_worker_registration_key(raw_key),
+        label=(request.label or "").strip(),
+        key_plaintext=raw_key.strip(),
+    )
+    row = await db.get_captcha_worker_key(key_id)
+    return {"success": True, "key": row, "captcha_worker_key": raw_key}
+
+
+@router.patch("/api/admin/captcha-worker-keys/{key_id}")
+async def update_captcha_worker_key(
+    key_id: int,
+    request: CaptchaWorkerKeyUpdateRequest,
+    token: str = Depends(verify_admin_token),
+):
+    existing = await db.get_captcha_worker_key(key_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Captcha worker key not found")
+    fs = request.model_fields_set
+    await db.update_captcha_worker_key(
+        key_id,
+        label=request.label if "label" in fs else _DEDICATED_WORKER_UPDATE_OMIT,
+        is_active=request.is_active if "is_active" in fs else _DEDICATED_WORKER_UPDATE_OMIT,
+    )
+    updated = await db.get_captcha_worker_key(key_id)
+    return {"success": True, "key": updated}
+
+
+@router.delete("/api/admin/captcha-worker-keys/{key_id}")
+async def delete_captcha_worker_key(
+    key_id: int,
+    token: str = Depends(verify_admin_token),
+):
+    existing = await db.get_captcha_worker_key(key_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Captcha worker key not found")
+    await db.delete_captcha_worker_key(key_id)
+    return {"success": True, "key_id": key_id}
+
+
+@router.post("/api/admin/captcha-worker-keys/{key_id}/kill-sessions")
+async def kill_captcha_worker_key_sessions(
+    key_id: int,
+    token: str = Depends(verify_admin_token),
+):
+    existing = await db.get_captcha_worker_key(key_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Captcha worker key not found")
+    from ..services.browser_captcha_extension import ExtensionCaptchaService
+
+    service = await ExtensionCaptchaService.get_instance(db=db)
+    killed = await service.kill_captcha_worker_sessions_for_key(key_id)
+    return {
+        "success": True,
+        "killed_count": killed,
+        "message": f"Terminated {killed} active session(s)" if killed else "No active captcha worker sessions for this key",
+    }
+
+
 @router.get("/api/admin/extension/workers")
 async def list_extension_workers(token: str = Depends(verify_admin_token)):
     from ..services.browser_captcha_extension import ExtensionCaptchaService
@@ -2313,8 +2379,8 @@ async def list_extension_workers(token: str = Depends(verify_admin_token)):
     queue_stats = service.get_queue_stats()
     return {
         "success": True,
-        "mode": "managed_key_primary_with_dedicated_fallback",
-        "note": "Requests prefer workers bound to the same managed API key; dedicated worker-mode connections can be used as token-bound fallback when managed-key binding is absent.",
+        "mode": "three_worker_types",
+        "note": "Extension mode uses server-side captcha workers, managed-key end user captcha workers, and token-bound refresh workers.",
         "workers": active_workers,
         "bindings": bindings,
         "queue_stats": queue_stats,
@@ -2375,128 +2441,6 @@ async def kill_extension_worker(
     if not killed:
         return {"success": False, "message": "Worker not found"}
     return {"success": True, "message": "Worker terminated", "worker_session_id": worker_session_id}
-
-
-@router.get("/api/admin/dedicated-extension/workers")
-async def list_dedicated_extension_workers(token: str = Depends(verify_admin_token)):
-    workers = await db.list_dedicated_extension_workers()
-    return {"success": True, "workers": workers}
-
-
-@router.post("/api/admin/dedicated-extension/workers/kill-sessions")
-async def kill_dedicated_extension_worker_sessions(
-    request: DedicatedWorkerKillSessionsRequest,
-    token: str = Depends(verify_admin_token),
-):
-    """Disconnect all Worker-mode (dedicated registration key) extension clients for this token."""
-    from ..services.browser_captcha_extension import ExtensionCaptchaService
-
-    tid = int(request.token_id)
-    token_obj = await db.get_token(tid)
-    if not token_obj:
-        raise HTTPException(status_code=404, detail="Token not found")
-    service = await ExtensionCaptchaService.get_instance(db=db)
-    killed = await service.kill_dedicated_worker_sessions_for_token(tid)
-    return {
-        "success": True,
-        "killed_count": killed,
-        "message": f"Terminated {killed} active session(s)" if killed else "No active dedicated worker sessions for this token",
-    }
-
-
-@router.post("/api/admin/dedicated-extension/workers")
-async def create_dedicated_extension_worker(
-    request: DedicatedWorkerCreateRequest,
-    token: str = Depends(verify_admin_token),
-):
-    if not request.allow_captcha and not request.allow_session_refresh and not request.allow_generation:
-        raise HTTPException(
-            status_code=400,
-            detail="At least one of allow_captcha, allow_session_refresh, or allow_generation must be true",
-        )
-    token_id = int(request.token_id) if request.token_id is not None else None
-    if token_id is not None:
-        existing_token = await db.get_token(token_id)
-        if not existing_token:
-            raise HTTPException(status_code=404, detail="Token not found")
-    worker_key = _generate_worker_registration_key()
-    worker_id = await db.create_dedicated_extension_worker(
-        worker_key_prefix=_worker_key_prefix(worker_key),
-        worker_key_hash=_hash_worker_registration_key(worker_key),
-        label=(request.label or "").strip(),
-        token_id=token_id,
-        route_key=(request.route_key or "").strip() or None,
-        allow_captcha=bool(request.allow_captcha),
-        allow_session_refresh=bool(request.allow_session_refresh),
-        allow_generation=bool(request.allow_generation),
-        worker_key_plaintext=worker_key.strip(),
-    )
-    worker = await db.get_dedicated_extension_worker(worker_id)
-    return {"success": True, "worker": worker, "worker_registration_key": worker_key}
-
-
-@router.patch("/api/admin/dedicated-extension/workers/{worker_id}")
-async def update_dedicated_extension_worker(
-    worker_id: int,
-    request: DedicatedWorkerUpdateRequest,
-    token: str = Depends(verify_admin_token),
-):
-    existing = await db.get_dedicated_extension_worker(worker_id)
-    if not existing:
-        raise HTTPException(status_code=404, detail="Dedicated worker not found")
-    if request.token_id is not None:
-        token_obj = await db.get_token(int(request.token_id))
-        if not token_obj:
-            raise HTTPException(status_code=404, detail="Token not found")
-    cur_captcha = bool(int(existing.get("allow_captcha") or 1))
-    cur_refresh = bool(int(existing.get("allow_session_refresh") or 1))
-    cur_generation = bool(int(existing.get("allow_generation") or 0))
-    next_captcha = cur_captcha if request.allow_captcha is None else bool(request.allow_captcha)
-    next_refresh = cur_refresh if request.allow_session_refresh is None else bool(request.allow_session_refresh)
-    next_generation = cur_generation if request.allow_generation is None else bool(request.allow_generation)
-    if not next_captcha and not next_refresh and not next_generation:
-        raise HTTPException(
-            status_code=400,
-            detail="At least one of allow_captcha, allow_session_refresh, or allow_generation must remain true",
-        )
-    fs = request.model_fields_set
-    await db.update_dedicated_extension_worker(
-        worker_id,
-        label=request.label if "label" in fs else _DEDICATED_WORKER_UPDATE_OMIT,
-        token_id=request.token_id if "token_id" in fs else _DEDICATED_WORKER_UPDATE_OMIT,
-        route_key=request.route_key if "route_key" in fs else _DEDICATED_WORKER_UPDATE_OMIT,
-        is_active=request.is_active if "is_active" in fs else _DEDICATED_WORKER_UPDATE_OMIT,
-        allow_captcha=request.allow_captcha if "allow_captcha" in fs else _DEDICATED_WORKER_UPDATE_OMIT,
-        allow_session_refresh=request.allow_session_refresh if "allow_session_refresh" in fs else _DEDICATED_WORKER_UPDATE_OMIT,
-        allow_generation=request.allow_generation if "allow_generation" in fs else _DEDICATED_WORKER_UPDATE_OMIT,
-    )
-    updated = await db.get_dedicated_extension_worker(worker_id)
-    return {"success": True, "worker": updated}
-
-
-@router.post("/api/admin/dedicated-extension/workers/{worker_id}/unbind")
-async def unbind_dedicated_extension_worker(
-    worker_id: int,
-    token: str = Depends(verify_admin_token),
-):
-    existing = await db.get_dedicated_extension_worker(worker_id)
-    if not existing:
-        raise HTTPException(status_code=404, detail="Dedicated worker not found")
-    await db.update_dedicated_extension_worker(worker_id, clear_token_binding=True)
-    updated = await db.get_dedicated_extension_worker(worker_id)
-    return {"success": True, "worker": updated}
-
-
-@router.delete("/api/admin/dedicated-extension/workers/{worker_id}")
-async def delete_dedicated_extension_worker(
-    worker_id: int,
-    token: str = Depends(verify_admin_token),
-):
-    existing = await db.get_dedicated_extension_worker(worker_id)
-    if not existing:
-        raise HTTPException(status_code=404, detail="Dedicated worker not found")
-    await db.delete_dedicated_extension_worker(worker_id)
-    return {"success": True, "worker_id": worker_id}
 
 
 @router.post("/api/admin/debug")

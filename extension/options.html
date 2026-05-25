@@ -543,10 +543,11 @@
       </div>
 
       <h2>Authentication Mode</h2>
-      <p>Choose <strong>End user</strong> (managed API key) or <strong>Worker</strong> (dedicated registration key).</p>
+      <p>Choose <strong>End user worker</strong>, <strong>Captcha worker</strong>, or <strong>Refresh worker</strong>.</p>
       <div class="inner-tabs" role="tablist">
-        <button type="button" class="inner-tab" id="tabEndUser" role="tab" aria-selected="true" aria-controls="panelEndUser">End User</button>
-        <button type="button" class="inner-tab" id="tabWorker" role="tab" aria-selected="false" aria-controls="panelWorker">Worker</button>
+        <button type="button" class="inner-tab" id="tabEndUser" role="tab" aria-selected="true" aria-controls="panelEndUser">End User Worker</button>
+        <button type="button" class="inner-tab" id="tabCaptchaWorker" role="tab" aria-selected="false" aria-controls="panelCaptchaWorker">Captcha Worker</button>
+        <button type="button" class="inner-tab" id="tabRefreshWorker" role="tab" aria-selected="false" aria-controls="panelRefreshWorker">Refresh Worker</button>
       </div>
 
       <div id="panelEndUser" class="tabpanel" role="tabpanel" aria-hidden="false">
@@ -555,19 +556,22 @@
           <input id="clientLabel" type="text" placeholder="e.g. main-worker">
         </div>
         <div class="form-group">
-          <label for="routeKey">Route Key</label>
-          <input id="routeKey" type="text" placeholder="e.g. 9223 (optional)">
-        </div>
-        <div class="form-group">
           <label for="apiKey">API Key</label>
           <input id="apiKey" type="password" placeholder="Paste managed API key here">
         </div>
       </div>
 
-      <div id="panelWorker" class="tabpanel" role="tabpanel" aria-hidden="true">
+      <div id="panelCaptchaWorker" class="tabpanel" role="tabpanel" aria-hidden="true">
         <div class="form-group">
-          <label for="workerAuthKey">Worker Registration Key</label>
-          <input id="workerAuthKey" type="password" placeholder="Paste dedicated worker key here">
+          <label for="captchaWorkerAuthKey">Captcha Worker Key</label>
+          <input id="captchaWorkerAuthKey" type="password" placeholder="Paste captcha worker key here">
+        </div>
+      </div>
+
+      <div id="panelRefreshWorker" class="tabpanel" role="tabpanel" aria-hidden="true">
+        <div class="form-group">
+          <label for="refreshTokenId">Token ID</label>
+          <input id="refreshTokenId" type="number" min="1" step="1" placeholder="Enter token ID for ST refresh">
         </div>
       </div>
 
@@ -582,7 +586,7 @@
       
       <div class="form-group">
         <label for="workerPageUrl">Worker Page URL</label>
-        <input id="workerPageUrl" type="text" placeholder="https://labs.google/fx/tools/flow">
+        <input id="workerPageUrl" type="text" placeholder="https://labs.google/fx/api/auth/providers">
       </div>
       
       <div class="form-group">
