@@ -113,6 +113,7 @@ const defaultCaptcha: CaptchaForm = {
 
 type ExtensionWorkerRow = {
   worker_session_id: string
+  instance_id?: string
   client_label: string
   managed_api_key_id: number | null
   binding_source: string
@@ -1399,8 +1400,9 @@ export function SystemSettings({ active }: { active: boolean }) {
               <div className="space-y-3">
                 <div className="rounded-md border">
                   <div className="px-3 py-2 text-xs font-medium border-b bg-muted/30">Captcha worker server side</div>
-                  <div className="grid grid-cols-7 gap-2 px-3 py-2 text-xs font-medium border-b">
+                  <div className="grid grid-cols-8 gap-2 px-3 py-2 text-xs font-medium border-b">
                     <span>Worker ID</span>
+                    <span>Instance</span>
                     <span>Captcha key</span>
                     <span>Label</span>
                     <span>Work</span>
@@ -1409,8 +1411,9 @@ export function SystemSettings({ active }: { active: boolean }) {
                     <span>Action</span>
                   </div>
                   {captchaWorkers.map((w) => (
-                    <div key={w.worker_session_id} className="grid grid-cols-7 gap-2 px-3 py-2 text-xs border-b last:border-b-0 items-start">
+                    <div key={w.worker_session_id} className="grid grid-cols-8 gap-2 px-3 py-2 text-xs border-b last:border-b-0 items-start">
                       <span className="font-mono min-w-0 break-all whitespace-normal">{w.worker_session_id || "-"}</span>
+                      <span className="font-mono min-w-0 break-all whitespace-normal">{w.instance_id || "-"}</span>
                       <span>{w.captcha_worker_key_prefix || w.captcha_worker_id || "-"}</span>
                       <span className="min-w-0 break-words whitespace-normal">{w.captcha_worker_key_label || "-"}</span>
                       <span>reCAPTCHA only</span>
@@ -1434,8 +1437,9 @@ export function SystemSettings({ active }: { active: boolean }) {
                 </div>
                 <div className="rounded-md border">
                   <div className="px-3 py-2 text-xs font-medium border-b bg-muted/30">End user worker for captcha</div>
-                  <div className="grid grid-cols-6 gap-2 px-3 py-2 text-xs font-medium border-b">
+                  <div className="grid grid-cols-7 gap-2 px-3 py-2 text-xs font-medium border-b">
                     <span>Worker ID</span>
+                    <span>Instance</span>
                     <span>Label</span>
                     <span>Managed key</span>
                     <span>Source</span>
@@ -1443,8 +1447,9 @@ export function SystemSettings({ active }: { active: boolean }) {
                     <span>Action</span>
                   </div>
                   {endUserWorkers.map((w) => (
-                    <div key={w.worker_session_id} className="grid grid-cols-6 gap-2 px-3 py-2 text-xs border-b last:border-b-0 items-start">
+                    <div key={w.worker_session_id} className="grid grid-cols-7 gap-2 px-3 py-2 text-xs border-b last:border-b-0 items-start">
                       <span className="font-mono min-w-0 break-all whitespace-normal">{w.worker_session_id || "-"}</span>
+                      <span className="font-mono min-w-0 break-all whitespace-normal">{w.instance_id || "-"}</span>
                       <span className="min-w-0 break-words whitespace-normal">{w.client_label || "-"}</span>
                       <span>{w.managed_api_key_id ?? "-"}</span>
                       <span className="min-w-0 break-words whitespace-normal">{w.binding_source || "-"}</span>
@@ -1467,8 +1472,9 @@ export function SystemSettings({ active }: { active: boolean }) {
                 </div>
                 <div className="rounded-md border">
                   <div className="px-3 py-2 text-xs font-medium border-b bg-muted/30">Refresh workers</div>
-                  <div className="grid grid-cols-6 gap-2 px-3 py-2 text-xs font-medium border-b">
+                  <div className="grid grid-cols-7 gap-2 px-3 py-2 text-xs font-medium border-b">
                     <span>Worker ID</span>
+                    <span>Instance</span>
                     <span>Token ID</span>
                     <span>Work</span>
                     <span>Source</span>
@@ -1476,8 +1482,9 @@ export function SystemSettings({ active }: { active: boolean }) {
                     <span>Action</span>
                   </div>
                   {refreshWorkers.map((w) => (
-                    <div key={w.worker_session_id} className="grid grid-cols-6 gap-2 px-3 py-2 text-xs border-b last:border-b-0 items-start">
+                    <div key={w.worker_session_id} className="grid grid-cols-7 gap-2 px-3 py-2 text-xs border-b last:border-b-0 items-start">
                       <span className="font-mono min-w-0 break-all whitespace-normal">{w.worker_session_id || "-"}</span>
+                      <span className="font-mono min-w-0 break-all whitespace-normal">{w.instance_id || "-"}</span>
                       <span>{w.refresh_token_id ?? "-"}</span>
                       <span>ST refresh only</span>
                       <span className="min-w-0 break-words whitespace-normal">{w.binding_source || "-"}</span>
