@@ -14,7 +14,7 @@ import urllib.error
 import urllib.request
 from curl_cffi.requests import AsyncSession
 from ..core.logger import debug_logger
-from ..core.config import config, get_yescaptcha_min_score
+from ..core.config import config, get_runtime_tmp_dir, get_yescaptcha_min_score
 from .extension_generation_service import ExtensionGenerationService
 from .browser_captcha_extension import NoExtensionGenerationWorkerError
 
@@ -2805,13 +2805,13 @@ class FlowClient:
             if encoded_video and "SUCCESSFUL" in status:
                 video_bytes = base64.b64decode(encoded_video)
                 video_filename = f"concat_{uuid.uuid4().hex[:12]}.mp4"
-                save_dir = "tmp"
-                os.makedirs(save_dir, exist_ok=True)
-                save_path = os.path.join(save_dir, video_filename)
+                save_dir = get_runtime_tmp_dir()
+                save_dir.mkdir(parents=True, exist_ok=True)
+                save_path = save_dir / video_filename
                 with open(save_path, "wb") as f:
                     f.write(video_bytes)
                 result["outputUri"] = f"/tmp/{video_filename}"
-                result["local_file"] = save_path
+                result["local_file"] = str(save_path)
                 return result
             if "FAILED" in status or "ERROR" in status:
                 raise Exception(f"视频拼接失败: {status}")

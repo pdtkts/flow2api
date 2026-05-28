@@ -402,8 +402,11 @@ export function SystemSettings({ active }: { active: boolean }) {
     })
     if (!r) return
     const d = await r.json()
-    if (d.success) toast.success(enabled ? "Debug on" : "Debug off")
-    else {
+    if (d.success) {
+      const actualEnabled = !!d.enabled
+      setDebugEnabled(actualEnabled)
+      toast.success(d.message || (actualEnabled ? "Debug on" : "Debug off"))
+    } else {
       setDebugEnabled(prev)
       toast.error(d.detail || "Failed")
     }

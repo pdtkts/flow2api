@@ -2455,8 +2455,18 @@ async def update_debug_config(
         # Hot reload updated value into runtime config.
         await db.reload_config_to_memory()
 
-        status = "enabled" if request.enabled else "disabled"
-        return {"success": True, "message": f"Debug mode {status}", "enabled": request.enabled}
+        actual_enabled = config.debug_enabled
+        status = "enabled" if actual_enabled else "disabled"
+        env_override_active = bool(actual_enabled != request.enabled)
+        message = f"Debug mode {status}"
+        if env_override_active:
+            message += " (environment override active)"
+        return {
+            "success": True,
+            "message": message,
+            "enabled": actual_enabled,
+            "env_override_active": env_override_active,
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to update debug config: {str(e)}")
 

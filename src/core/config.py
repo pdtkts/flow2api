@@ -1,4 +1,5 @@
 """Configuration management for Flow2API"""
+import os
 import tomli
 from pathlib import Path
 from typing import Dict, Any, Optional, List
@@ -23,6 +24,113 @@ def get_yescaptcha_min_score(task_type: Optional[str]) -> Optional[float]:
     return YESCAPTCHA_TASK_TYPE_OPTIONS.get(normalize_yescaptcha_task_type(task_type))
 
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+SUPPORTED_CAPTCHA_METHODS = {
+    "extension",
+    "browser",
+    "personal",
+    "remote_browser",
+    "yescaptcha",
+    "capmonster",
+    "ezcaptcha",
+    "capsolver",
+}
+
+
+def _env_value(name: str) -> str:
+    return (os.environ.get(name) or "").strip()
+
+
+def _env_bool(name: str) -> Optional[bool]:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return None
+
+    value = raw.strip().lower()
+    if value in {"1", "true", "t", "yes", "y", "on"}:
+        return True
+    if value in {"0", "false", "f", "no", "n", "off"}:
+        return False
+
+    raise ValueError(
+        f"{name} must be a boolean: true/false, 1/0, yes/no, or on/off"
+    )
+
+
+def _coerce_port(value: Any, fallback: int) -> int:
+    try:
+        port = int(str(value).strip())
+    except Exception:
+        return fallback
+    if 1 <= port <= 65535:
+        return port
+    return fallback
+
+
+def _apply_text_override(
+    config_dict: Dict[str, Any],
+    section: str,
+    key: str,
+    env_name: str,
+) -> None:
+    value = _env_value(env_name)
+    if not value:
+        return
+    config_dict.setdefault(section, {})[key] = value
+
+
+def _apply_bool_override(
+    config_dict: Dict[str, Any],
+    section: str,
+    key: str,
+    env_name: str,
+) -> None:
+    value = _env_bool(env_name)
+    if value is None:
+        return
+    config_dict.setdefault(section, {})[key] = value
+
+
+def _apply_env_overrides(config_dict: Dict[str, Any]) -> Dict[str, Any]:
+    """Apply deployment-time seed values before first-run DB initialization."""
+    _apply_text_override(config_dict, "global", "api_key", "FLOW2API_API_KEY")
+    _apply_text_override(config_dict, "global", "admin_username", "FLOW2API_ADMIN_USERNAME")
+    _apply_text_override(config_dict, "global", "admin_password", "FLOW2API_ADMIN_PASSWORD")
+    _apply_bool_override(config_dict, "debug", "enabled", "FLOW2API_DEBUG_ENABLED")
+    _apply_bool_override(config_dict, "debug", "log_requests", "FLOW2API_DEBUG_LOG_REQUESTS")
+    _apply_bool_override(config_dict, "debug", "log_responses", "FLOW2API_DEBUG_LOG_RESPONSES")
+    _apply_bool_override(config_dict, "debug", "mask_token", "FLOW2API_DEBUG_MASK_TOKEN")
+    _apply_bool_override(config_dict, "debug", "recaptcha_trace", "FLOW2API_DEBUG_RECAPTCHA_TRACE")
+    _apply_bool_override(config_dict, "debug", "recaptcha_console", "FLOW2API_DEBUG_RECAPTCHA_CONSOLE")
+
+    captcha_method = _env_value("FLOW2API_CAPTCHA_METHOD").lower()
+    if captcha_method:
+        if captcha_method not in SUPPORTED_CAPTCHA_METHODS:
+            raise ValueError(
+                "FLOW2API_CAPTCHA_METHOD must be one of: "
+                + ", ".join(sorted(SUPPORTED_CAPTCHA_METHODS))
+            )
+        config_dict.setdefault("captcha", {})["captcha_method"] = captcha_method
+
+    return config_dict
+
+
+def get_runtime_data_dir() -> Path:
+    """Return the directory that should hold the SQLite database."""
+    volume_mount = _env_value("RAILWAY_VOLUME_MOUNT_PATH")
+    if volume_mount:
+        return Path(volume_mount).expanduser() / "data"
+    return REPO_ROOT / "data"
+
+
+def get_runtime_tmp_dir() -> Path:
+    """Return the directory that should hold generated/cache files."""
+    volume_mount = _env_value("RAILWAY_VOLUME_MOUNT_PATH")
+    if volume_mount:
+        return Path(volume_mount).expanduser() / "tmp"
+    return REPO_ROOT / "tmp"
+
+
 class Config:
     """Application configuration"""
 
@@ -33,12 +141,12 @@ class Config:
 
     def _load_config(self) -> Dict[str, Any]:
         """Load configuration from setting.toml, falling back to the example file."""
-        config_dir = Path(__file__).parent.parent.parent / "config"
+        config_dir = REPO_ROOT / "config"
         config_path = config_dir / "setting.toml"
         if not config_path.exists():
             config_path = config_dir / "setting_example.toml"
         with open(config_path, "rb") as f:
-            return tomli.load(f)
+            return _apply_env_overrides(tomli.load(f))
 
     def reload_config(self):
         """Reload configuration from file"""
@@ -238,30 +346,48 @@ class Config:
 
     @property
     def server_port(self) -> int:
-        return self._config["server"]["port"]
+        return _coerce_port(os.environ.get("PORT"), self._config["server"]["port"])
 
     @property
     def debug_enabled(self) -> bool:
-        return self._config.get("debug", {}).get("enabled", False)
+        override = _env_bool("FLOW2API_DEBUG_ENABLED")
+        if override is not None:
+            return override
+        return bool(self._config.get("debug", {}).get("enabled", False))
 
     @property
     def debug_log_requests(self) -> bool:
-        return self._config.get("debug", {}).get("log_requests", True)
+        override = _env_bool("FLOW2API_DEBUG_LOG_REQUESTS")
+        if override is not None:
+            return override
+        return bool(self._config.get("debug", {}).get("log_requests", True))
 
     @property
     def debug_log_responses(self) -> bool:
-        return self._config.get("debug", {}).get("log_responses", True)
+        override = _env_bool("FLOW2API_DEBUG_LOG_RESPONSES")
+        if override is not None:
+            return override
+        return bool(self._config.get("debug", {}).get("log_responses", True))
 
     @property
     def debug_mask_token(self) -> bool:
-        return self._config.get("debug", {}).get("mask_token", True)
+        override = _env_bool("FLOW2API_DEBUG_MASK_TOKEN")
+        if override is not None:
+            return override
+        return bool(self._config.get("debug", {}).get("mask_token", True))
 
     @property
     def debug_recaptcha_trace(self) -> bool:
+        override = _env_bool("FLOW2API_DEBUG_RECAPTCHA_TRACE")
+        if override is not None:
+            return override
         return bool(self._config.get("debug", {}).get("recaptcha_trace", False))
 
     @property
     def debug_recaptcha_console(self) -> bool:
+        override = _env_bool("FLOW2API_DEBUG_RECAPTCHA_CONSOLE")
+        if override is not None:
+            return override
         return bool(self._config.get("debug", {}).get("recaptcha_console", False))
 
     # Mutable properties for runtime updates

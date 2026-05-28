@@ -5,11 +5,10 @@ import json
 import time
 import re
 from datetime import datetime
-from pathlib import Path
 from urllib.parse import quote
 from typing import Optional, AsyncGenerator, List, Dict, Any
 from ..core.logger import debug_logger
-from ..core.config import config
+from ..core.config import config, get_runtime_tmp_dir
 from ..core.monitoring import record_generation_result
 from ..core.models import Task, RequestLog
 from ..core.account_tiers import (
@@ -937,7 +936,7 @@ class GenerationHandler:
     """统一生成处理器"""
 
     def __init__(self, flow_client, token_manager, load_balancer, db, concurrency_manager, proxy_manager):
-        cache_dir = Path(__file__).resolve().parents[2] / "tmp"
+        cache_dir = get_runtime_tmp_dir()
         self.flow_client = flow_client
         self.token_manager = token_manager
         self.load_balancer = load_balancer
