@@ -5,9 +5,11 @@ import inspect
 import json
 import mimetypes
 import hashlib
+import shutil
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from fastapi import APIRouter, Depends, HTTPException, Header, Query, Request
+from fastapi import APIRouter, Depends, File, HTTPException, Header, Query, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
@@ -47,6 +49,9 @@ _ADMIN_SESSION_TTL_REMEMBER = 30 * 24 * 3600  # 30 days when "remember me" is on
 _ADMIN_SESSION_TTL_BROWSER = 24 * 3600  # 24 hours when off
 
 SUPPORTED_API_CAPTCHA_METHODS = {"yescaptcha", "capmonster", "ezcaptcha", "capsolver"}
+MAX_SQLITE_RESTORE_BYTES = 512 * 1024 * 1024
+REQUIRED_SQLITE_RESTORE_TABLES = {"admin_config", "tokens"}
+_database_restore_lock = asyncio.Lock()
 
 
 def _generate_captcha_worker_key() -> str:
@@ -77,6 +82,40 @@ def _truncate_text(text: Any, limit: int = 240) -> str:
     if len(value) <= limit:
         return value
     return f"{value[:limit - 3]}..."
+
+
+def _validate_uploaded_sqlite_database(path: Path) -> Dict[str, Any]:
+    """Validate a candidate Flow2API SQLite DB before swapping it into place."""
+    if not path.exists() or path.stat().st_size <= 0:
+        raise HTTPException(status_code=400, detail="Uploaded database is empty")
+
+    try:
+        with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as conn:
+            row = conn.execute("PRAGMA integrity_check").fetchone()
+            integrity = row[0] if row else ""
+            if integrity != "ok":
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"SQLite integrity check failed: {integrity or 'unknown'}",
+                )
+
+            table_rows = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+            tables = {str(r[0]) for r in table_rows}
+    except HTTPException:
+        raise
+    except sqlite3.DatabaseError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid SQLite database: {exc}") from exc
+
+    missing = REQUIRED_SQLITE_RESTORE_TABLES - tables
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Uploaded database is missing required table(s): {', '.join(sorted(missing))}",
+        )
+
+    return {"size": path.stat().st_size, "table_count": len(tables)}
 
 
 def _extract_error_summary(payload: Any) -> str:
@@ -1997,6 +2036,63 @@ async def update_api_key(
     await db.reload_config_to_memory()
 
     return {"success": True, "message": "API Key更新成功"}
+
+
+@router.post("/api/admin/database/restore")
+async def restore_sqlite_database(
+    database: UploadFile = File(...),
+    token: str = Depends(verify_admin_token),
+):
+    """Restore flow.db from an uploaded SQLite file."""
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database service is not initialized")
+
+    db_path = Path(db.db_path)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    upload_path = db_path.with_name(f"{db_path.name}.upload-{int(time.time())}-{secrets.token_hex(4)}")
+    backup_path = db_path.with_name(
+        f"{db_path.name}.backup-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
+    )
+
+    written = 0
+    try:
+        async with _database_restore_lock:
+            with open(upload_path, "wb") as out:
+                while True:
+                    chunk = await database.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    written += len(chunk)
+                    if written > MAX_SQLITE_RESTORE_BYTES:
+                        raise HTTPException(status_code=413, detail="Uploaded database is too large")
+                    out.write(chunk)
+
+            validation = _validate_uploaded_sqlite_database(upload_path)
+
+            if db_path.exists():
+                shutil.copy2(db_path, backup_path)
+
+            upload_path.replace(db_path)
+
+            await db.init_db()
+            await db.check_and_migrate_db(config.get_raw_config())
+            await db.reload_config_to_memory()
+
+        return {
+            "success": True,
+            "message": "Database restored. Log in again if your session is replaced by the uploaded DB.",
+            "database_path": str(db_path),
+            "backup_path": str(backup_path) if backup_path.exists() else None,
+            "size": validation["size"],
+            "table_count": validation["table_count"],
+        }
+    finally:
+        await database.close()
+        try:
+            if upload_path.exists():
+                upload_path.unlink()
+        except Exception:
+            pass
 
 
 @router.get("/api/admin/managed-apikeys")

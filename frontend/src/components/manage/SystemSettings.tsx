@@ -17,7 +17,7 @@ import {
   SelectValue,
 } from "../ui/select"
 import { toast } from "sonner"
-import { Loader2 } from "lucide-react"
+import { Loader2, Upload } from "lucide-react"
 
 type CaptchaForm = {
   captcha_method: string
@@ -135,6 +135,10 @@ export function SystemSettings({ active }: { active: boolean }) {
   const [oldPwd, setOldPwd] = useState("")
   const [newPwd, setNewPwd] = useState("")
   const [newApiKeyInput, setNewApiKeyInput] = useState("")
+  const [dbRestoreFile, setDbRestoreFile] = useState<File | null>(null)
+  const [dbRestoreBusy, setDbRestoreBusy] = useState(false)
+  const [dbRestoreResult, setDbRestoreResult] = useState("")
+  const [dbRestoreInputKey, setDbRestoreInputKey] = useState(0)
   const [errorBan, setErrorBan] = useState("3")
   const [errorBanEnabled, setErrorBanEnabled] = useState(true)
   const [debugEnabled, setDebugEnabled] = useState(false)
@@ -389,6 +393,39 @@ export function SystemSettings({ active }: { active: boolean }) {
       } else toast.error(d.detail || "Failed")
     } finally {
       setBusy(false)
+    }
+  }
+
+  const restoreDatabase = async () => {
+    if (!token) return
+    if (!dbRestoreFile) {
+      toast.error("Choose a flow.db file first")
+      return
+    }
+    if (!confirm("Replace the server database with this file? A backup will be created first.")) return
+
+    setDbRestoreBusy(true)
+    setDbRestoreResult("")
+    try {
+      const body = new FormData()
+      body.append("database", dbRestoreFile, dbRestoreFile.name || "flow.db")
+      const r = await adminFetch("/api/admin/database/restore", token, {
+        method: "POST",
+        body,
+      })
+      if (!r) return
+      const d = await r.json().catch(() => null)
+      if (r.ok && d?.success) {
+        const mb = typeof d.size === "number" ? `${(d.size / 1024 / 1024).toFixed(2)} MB` : "uploaded"
+        toast.success("Database restored")
+        setDbRestoreResult(`Restored ${mb}. Backup: ${d.backup_path || "none"}. Re-login if your session expires.`)
+        setDbRestoreFile(null)
+        setDbRestoreInputKey((value) => value + 1)
+      } else {
+        toast.error(d?.detail || "Database restore failed")
+      }
+    } finally {
+      setDbRestoreBusy(false)
     }
   }
 
@@ -732,6 +769,35 @@ export function SystemSettings({ active }: { active: boolean }) {
           <Button className="w-full" onClick={saveApiKey} disabled={busy}>
             Update API key
           </Button>
+        </CardContent>
+      </Card>
+
+      <Card className="lg:col-span-2">
+        <CardHeader>
+          <CardTitle>Database restore</CardTitle>
+          <CardDescription>Upload a local flow.db to replace the server SQLite database</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div>
+            <Label htmlFor="db-restore-file">SQLite database file</Label>
+            <Input
+              key={dbRestoreInputKey}
+              id="db-restore-file"
+              className="mt-1"
+              type="file"
+              accept=".db,.sqlite,.sqlite3,application/octet-stream"
+              onChange={(e) => setDbRestoreFile(e.target.files?.[0] || null)}
+              disabled={dbRestoreBusy}
+            />
+            <p className="text-xs text-muted-foreground mt-1">
+              The current database is backed up first. Active sessions may need to log in again after restore.
+            </p>
+          </div>
+          <Button onClick={restoreDatabase} disabled={dbRestoreBusy || !dbRestoreFile}>
+            {dbRestoreBusy ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <Upload className="h-4 w-4 mr-2" />}
+            Restore database
+          </Button>
+          {dbRestoreResult ? <p className="text-xs text-muted-foreground">{dbRestoreResult}</p> : null}
         </CardContent>
       </Card>
 
