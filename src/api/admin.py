@@ -2677,9 +2677,10 @@ async def _sync_runtime_cache_config():
 async def get_cache_config(token: str = Depends(verify_admin_token)):
     """Get cache configuration"""
     cache_config = await db.get_cache_config()
+    cache_base_url = config.cache_base_url
 
     # Calculate effective base URL
-    effective_base_url = cache_config.cache_base_url if cache_config.cache_base_url else f"http://127.0.0.1:8000"
+    effective_base_url = cache_base_url if cache_base_url else f"http://127.0.0.1:8000"
 
     ct = cache_config.cache_timeout or 0
     timeout_days = 0.0 if ct <= 0 else round(ct / 86400.0, 4)
@@ -2690,7 +2691,7 @@ async def get_cache_config(token: str = Depends(verify_admin_token)):
             "enabled": cache_config.cache_enabled,
             "timeout": cache_config.cache_timeout,
             "timeout_days": timeout_days,
-            "base_url": cache_config.cache_base_url or "",
+            "base_url": cache_base_url or "",
             "effective_base_url": effective_base_url
         }
     }

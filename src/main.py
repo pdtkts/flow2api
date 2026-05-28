@@ -68,9 +68,11 @@ def _path_allowed_on_api_only_host(path: str) -> bool:
     - OpenAI / Chat Completions style: /v1/chat/completions, /v1/models, /v1/models/aliases, /v1/projects, …
     - Gemini (Google) style: /v1beta/models/…:generateContent, :streamGenerateContent, list models, …
     - Same body on alternate paths: /models, /models/{m}:generateContent, …
-    - Cached media (authenticated): /api/cache/file, /api/cache/file/{project_id}, /api/cache/blob/..., discovery, liveness: /openapi.json, /health, /metrics
+    - Cached media (authenticated): /api/cache/file, /api/cache/file/{project_id}, /api/cache/blob/...
+    - Extension workers: /captcha_ws
+    - Discovery/liveness: /openapi.json, /health, /metrics
     """
-    if path in ("/openapi.json", "/health", "/metrics"):
+    if path in ("/openapi.json", "/health", "/metrics", "/captcha_ws"):
         return True
     if path.startswith(("/v1/", "/v1beta/")) or path in ("/v1", "/v1beta"):
         return True

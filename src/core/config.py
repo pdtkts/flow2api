@@ -96,6 +96,7 @@ def _apply_env_overrides(config_dict: Dict[str, Any]) -> Dict[str, Any]:
     _apply_text_override(config_dict, "global", "api_key", "FLOW2API_API_KEY")
     _apply_text_override(config_dict, "global", "admin_username", "FLOW2API_ADMIN_USERNAME")
     _apply_text_override(config_dict, "global", "admin_password", "FLOW2API_ADMIN_PASSWORD")
+    _apply_text_override(config_dict, "cache", "base_url", "FLOW2API_CACHE_BASE_URL")
     _apply_bool_override(config_dict, "debug", "enabled", "FLOW2API_DEBUG_ENABLED")
     _apply_bool_override(config_dict, "debug", "log_requests", "FLOW2API_DEBUG_LOG_REQUESTS")
     _apply_bool_override(config_dict, "debug", "log_responses", "FLOW2API_DEBUG_LOG_RESPONSES")
@@ -933,6 +934,9 @@ class Config:
     @property
     def cache_base_url(self) -> str:
         """Get cache base URL"""
+        override = _env_value("FLOW2API_CACHE_BASE_URL")
+        if override:
+            return override.rstrip("/")
         return self._config.get("cache", {}).get("base_url", "")
 
     def set_cache_base_url(self, base_url: str):
