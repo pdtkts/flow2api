@@ -158,6 +158,9 @@ class Config:
 
     @property
     def admin_username(self) -> str:
+        override = _env_value("FLOW2API_ADMIN_USERNAME")
+        if override:
+            return override
         # If admin_username is set from database, use it; otherwise fall back to config file
         if self._admin_username is not None:
             return self._admin_username
@@ -393,6 +396,9 @@ class Config:
     # Mutable properties for runtime updates
     @property
     def api_key(self) -> str:
+        override = _env_value("FLOW2API_API_KEY")
+        if override:
+            return override
         return self._config["global"]["api_key"]
 
     @api_key.setter
@@ -401,6 +407,9 @@ class Config:
 
     @property
     def admin_password(self) -> str:
+        override = _env_value("FLOW2API_ADMIN_PASSWORD")
+        if override:
+            return override
         # If admin_password is set from database, use it; otherwise fall back to config file
         if self._admin_password is not None:
             return self._admin_password

@@ -88,6 +88,22 @@ class RailwayRuntimeConfigTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 Config()
 
+    def test_admin_env_wins_after_runtime_db_reload(self):
+        env = {
+            "FLOW2API_ADMIN_USERNAME": "railadmin",
+            "FLOW2API_ADMIN_PASSWORD": "rail-secret",
+            "FLOW2API_API_KEY": "rail-api-key",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            cfg = Config()
+            cfg.set_admin_username_from_db("admin")
+            cfg.set_admin_password_from_db("admin")
+            cfg.api_key = "db-api-key"
+
+            self.assertEqual(cfg.admin_username, "railadmin")
+            self.assertEqual(cfg.admin_password, "rail-secret")
+            self.assertEqual(cfg.api_key, "rail-api-key")
+
 
 class RailwayFreshSeedTests(unittest.IsolatedAsyncioTestCase):
     async def test_first_startup_config_rows_use_flow2api_env_seed_values(self):

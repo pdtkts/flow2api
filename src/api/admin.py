@@ -794,8 +794,6 @@ async def verify_admin_token(authorization: str = Header(None)):
 @router.post("/api/admin/login")
 async def admin_login(request: LoginRequest):
     """Admin login - returns session token (NOT API key)"""
-    admin_config = await db.get_admin_config()
-
     if not AuthManager.verify_admin(request.username, request.password):
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
@@ -809,7 +807,7 @@ async def admin_login(request: LoginRequest):
     return {
         "success": True,
         "token": session_token,  # Session token (NOT API key)
-        "username": admin_config.username
+        "username": config.admin_username
     }
 
 
@@ -826,10 +824,8 @@ async def change_password(
     token: str = Depends(verify_admin_token)
 ):
     """Change admin password"""
-    admin_config = await db.get_admin_config()
-
     # Verify old password
-    if not AuthManager.verify_admin(admin_config.username, request.old_password):
+    if not AuthManager.verify_admin(config.admin_username, request.old_password):
         raise HTTPException(status_code=400, detail="旧密码错误")
 
     # Update password and username in database
@@ -1953,8 +1949,8 @@ async def get_admin_config(token: str = Depends(verify_admin_token)):
     admin_config = await db.get_admin_config()
 
     return {
-        "admin_username": admin_config.username,
-        "api_key": admin_config.api_key,
+        "admin_username": config.admin_username,
+        "api_key": config.api_key,
         "error_ban_threshold": admin_config.error_ban_threshold,
         "error_ban_enabled": admin_config.error_ban_enabled,
         "debug_enabled": config.debug_enabled  # Return actual debug status
