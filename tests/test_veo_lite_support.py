@@ -11,6 +11,28 @@ from src.services.flow_client import FlowClient
 from src.services.generation_handler import MODEL_CONFIG, GenerationHandler
 
 
+class FlowClientTransportErrorTests(unittest.TestCase):
+    def setUp(self):
+        self.client = FlowClient(proxy_manager=None)
+
+    def test_curl_http2_error_uses_urllib_fallback(self):
+        self.assertTrue(
+            self.client._should_fallback_to_urllib("Failed to perform, curl: (16) .")
+        )
+
+    def test_curl_http2_error_is_retryable_network_error(self):
+        error = "Flow API request failed: Failed to perform, curl: (16) ."
+
+        self.assertTrue(self.client._is_retryable_network_error(error))
+        self.assertIn("TLS", self.client._get_retry_reason(error))
+
+    def test_http2_framing_text_is_retryable_network_error(self):
+        error = "CURLE_HTTP2: problem detected in the HTTP/2 framing layer"
+
+        self.assertTrue(self.client._should_fallback_to_urllib(error))
+        self.assertTrue(self.client._is_retryable_network_error(error))
+
+
 class AsyncImageDeliveryFieldTests(unittest.TestCase):
     def test_failed_upscale_suppresses_cached_1k_fallback(self):
         google_url = "https://flow-content.google/image/source"

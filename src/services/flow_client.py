@@ -701,10 +701,16 @@ class FlowClient:
             for keyword in [
                 "curl: (6)",
                 "curl: (7)",
+                "curl: (16)",
                 "curl: (28)",
                 "curl: (35)",
                 "curl: (52)",
                 "curl: (56)",
+                "curle_http2",
+                "http/2 framing",
+                "http2 framing",
+                "http/2 stream",
+                "http2 stream",
                 "connection timed out",
                 "could not connect",
                 "failed to connect",
@@ -800,9 +806,15 @@ class FlowClient:
         """识别可重试的 TLS/连接类网络错误。"""
         error_lower = (error_str or "").lower()
         return any(keyword in error_lower for keyword in [
+            "curl: (16)",
             "curl: (35)",
             "curl: (52)",
             "curl: (56)",
+            "curle_http2",
+            "http/2 framing",
+            "http2 framing",
+            "http/2 stream",
+            "http2 stream",
             "ssl_error_syscall",
             "tls connect error",
             "ssl connect error",
