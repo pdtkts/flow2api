@@ -29,6 +29,7 @@ from ..core.monitoring import build_public_health_snapshot
 from ..services.token_manager import TokenManager
 from ..services.proxy_manager import ProxyManager
 from ..services.concurrency_manager import ConcurrencyManager
+from ..services.runway_service import RunwayService
 
 try:
     import httpx
@@ -43,6 +44,7 @@ proxy_manager: ProxyManager = None
 db: Database = None
 concurrency_manager: Optional[ConcurrencyManager] = None
 api_key_manager: Optional[ApiKeyManager] = None
+runway_service: Optional[RunwayService] = None
 
 # Admin session TTLs (seconds)
 _ADMIN_SESSION_TTL_REMEMBER = 30 * 24 * 3600  # 30 days when "remember me" is on
@@ -603,14 +605,16 @@ def set_dependencies(
     database: Database,
     cm: Optional[ConcurrencyManager] = None,
     akm: Optional[ApiKeyManager] = None,
+    rs: Optional[RunwayService] = None,
 ):
     """Set service instances"""
-    global token_manager, proxy_manager, db, concurrency_manager, api_key_manager
+    global token_manager, proxy_manager, db, concurrency_manager, api_key_manager, runway_service
     token_manager = tm
     proxy_manager = pm
     db = database
     concurrency_manager = cm
     api_key_manager = akm
+    runway_service = rs
 
 
 # ========== Request Models ==========
@@ -777,6 +781,48 @@ class UpdateDebugConfigRequest(BaseModel):
 class UpdateAdminConfigRequest(BaseModel):
     error_ban_threshold: Optional[int] = None
     error_ban_enabled: Optional[bool] = None
+
+
+class RunwayConfigUpdateRequest(BaseModel):
+    enabled: Optional[bool] = None
+    base_url: Optional[str] = None
+    poll_interval_sec: Optional[float] = None
+    timeout_sec: Optional[float] = None
+    cache_outputs: Optional[bool] = None
+
+
+class RunwayAccountRequest(BaseModel):
+    label: str = ""
+    raw_credential: str = ""
+    is_active: bool = True
+    concurrency_limit: int = 1
+
+
+class RunwayAccountUpdateRequest(BaseModel):
+    label: Optional[str] = None
+    raw_credential: Optional[str] = None
+    is_active: Optional[bool] = None
+    concurrency_limit: Optional[int] = None
+
+
+class RunwayModelRequest(BaseModel):
+    public_model_id: str
+    display_name: str = ""
+    kind: str = "image"
+    task_type: str
+    default_options: str = "{}"
+    request_mapping: str = "{}"
+    is_enabled: bool = True
+
+
+class RunwayModelUpdateRequest(BaseModel):
+    public_model_id: Optional[str] = None
+    display_name: Optional[str] = None
+    kind: Optional[str] = None
+    task_type: Optional[str] = None
+    default_options: Optional[str] = None
+    request_mapping: Optional[str] = None
+    is_enabled: Optional[bool] = None
 
 
 class ST2ATRequest(BaseModel):
@@ -1741,6 +1787,255 @@ async def update_generation_config(
     await db.reload_config_to_memory()
 
     return {"success": True, "message": "生成配置更新成功"}
+
+
+def _require_runway_service() -> RunwayService:
+    if runway_service is None:
+        raise HTTPException(status_code=500, detail="Runway service not initialized")
+    return runway_service
+
+
+def _validate_json_object_text(raw: str, field_name: str) -> str:
+    text = (raw or "").strip() or "{}"
+    try:
+        parsed = json.loads(text)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"{field_name} must be valid JSON") from exc
+    if not isinstance(parsed, dict):
+        raise HTTPException(status_code=400, detail=f"{field_name} must be a JSON object")
+    return json.dumps(parsed, ensure_ascii=False)
+
+
+def _runway_account_payload(account) -> Dict[str, Any]:
+    return {
+        "id": account.id,
+        "label": account.label,
+        "raw_credential": account.raw_credential,
+        "is_active": bool(account.is_active),
+        "workspace_id": account.workspace_id or "",
+        "team_id": account.team_id or "",
+        "concurrency_limit": account.concurrency_limit,
+        "in_flight": account.in_flight,
+        "last_status": account.last_status or "",
+        "last_error": account.last_error or "",
+        "last_used_at": account.last_used_at.isoformat() if account.last_used_at else None,
+        "created_at": account.created_at.isoformat() if account.created_at else None,
+        "updated_at": account.updated_at.isoformat() if account.updated_at else None,
+    }
+
+
+def _runway_model_payload(model) -> Dict[str, Any]:
+    return {
+        "id": model.id,
+        "public_model_id": model.public_model_id,
+        "display_name": model.display_name,
+        "kind": model.kind,
+        "task_type": model.task_type,
+        "default_options": model.default_options,
+        "request_mapping": model.request_mapping,
+        "is_enabled": bool(model.is_enabled),
+        "created_at": model.created_at.isoformat() if model.created_at else None,
+        "updated_at": model.updated_at.isoformat() if model.updated_at else None,
+    }
+
+
+@router.get("/api/admin/runway/config")
+async def get_runway_admin_config(token: str = Depends(verify_admin_token)):
+    cfg = await db.get_runway_config()
+    accounts = await db.list_runway_accounts()
+    models = await db.list_runway_models()
+    return {
+        "success": True,
+        "config": {
+            "enabled": bool(cfg.enabled),
+            "base_url": cfg.base_url,
+            "poll_interval_sec": cfg.poll_interval_sec,
+            "timeout_sec": cfg.timeout_sec,
+            "cache_outputs": bool(cfg.cache_outputs),
+        },
+        "accounts": [_runway_account_payload(account) for account in accounts],
+        "models": [_runway_model_payload(model) for model in models],
+    }
+
+
+@router.post("/api/admin/runway/config")
+async def update_runway_admin_config(
+    request: RunwayConfigUpdateRequest,
+    token: str = Depends(verify_admin_token),
+):
+    cfg = await db.update_runway_config(
+        enabled=request.enabled,
+        base_url=request.base_url,
+        poll_interval_sec=request.poll_interval_sec,
+        timeout_sec=request.timeout_sec,
+        cache_outputs=request.cache_outputs,
+    )
+    return {
+        "success": True,
+        "config": {
+            "enabled": bool(cfg.enabled),
+            "base_url": cfg.base_url,
+            "poll_interval_sec": cfg.poll_interval_sec,
+            "timeout_sec": cfg.timeout_sec,
+            "cache_outputs": bool(cfg.cache_outputs),
+        },
+    }
+
+
+@router.post("/api/admin/runway/accounts")
+async def create_runway_account(
+    request: RunwayAccountRequest,
+    token: str = Depends(verify_admin_token),
+):
+    if not request.raw_credential.strip():
+        raise HTTPException(status_code=400, detail="Runway credential is required")
+    meta = RunwayService.describe_credential(request.raw_credential)
+    account_id = await db.create_runway_account(
+        label=request.label.strip() or "Runway account",
+        raw_credential=request.raw_credential.strip(),
+        is_active=request.is_active,
+        workspace_id=str(meta.get("workspace_id") or "") or None,
+        team_id=str(meta.get("team_id") or "") or None,
+        concurrency_limit=max(-1, int(request.concurrency_limit or 1)),
+        last_status=str(meta.get("status") or ""),
+        last_error=str(meta.get("error") or ""),
+    )
+    account = await db.get_runway_account(account_id)
+    return {"success": True, "account": _runway_account_payload(account)}
+
+
+@router.patch("/api/admin/runway/accounts/{account_id}")
+async def update_runway_account(
+    account_id: int,
+    request: RunwayAccountUpdateRequest,
+    token: str = Depends(verify_admin_token),
+):
+    account = await db.get_runway_account(account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="Runway account not found")
+    updates: Dict[str, Any] = {}
+    if request.label is not None:
+        updates["label"] = request.label.strip()
+    if request.raw_credential is not None:
+        updates["raw_credential"] = request.raw_credential.strip()
+        meta = RunwayService.describe_credential(request.raw_credential)
+        updates["workspace_id"] = str(meta.get("workspace_id") or "") or None
+        updates["team_id"] = str(meta.get("team_id") or "") or None
+        updates["last_status"] = str(meta.get("status") or "")
+        updates["last_error"] = str(meta.get("error") or "")
+    if request.is_active is not None:
+        updates["is_active"] = request.is_active
+    if request.concurrency_limit is not None:
+        updates["concurrency_limit"] = max(-1, int(request.concurrency_limit))
+    await db.update_runway_account(account_id, **updates)
+    account = await db.get_runway_account(account_id)
+    return {"success": True, "account": _runway_account_payload(account)}
+
+
+@router.delete("/api/admin/runway/accounts/{account_id}")
+async def delete_runway_account(
+    account_id: int,
+    token: str = Depends(verify_admin_token),
+):
+    await db.delete_runway_account(account_id)
+    return {"success": True, "account_id": account_id}
+
+
+@router.post("/api/admin/runway/accounts/{account_id}/test")
+async def test_runway_account(
+    account_id: int,
+    token: str = Depends(verify_admin_token),
+):
+    service = _require_runway_service()
+    result = await service.test_account(account_id)
+    account = await db.get_runway_account(account_id)
+    return {
+        "success": bool(result.get("success")),
+        "status": result.get("status"),
+        "error": result.get("error"),
+        "account": _runway_account_payload(account) if account else None,
+    }
+
+
+@router.post("/api/admin/runway/models")
+async def upsert_runway_model(
+    request: RunwayModelRequest,
+    token: str = Depends(verify_admin_token),
+):
+    public_id = request.public_model_id.strip()
+    if not public_id.startswith("runway-"):
+        raise HTTPException(status_code=400, detail="Runway public model id must start with runway-")
+    if request.kind not in {"image", "video", "upscale"}:
+        raise HTTPException(status_code=400, detail="kind must be image, video, or upscale")
+    if not request.task_type.strip():
+        raise HTTPException(status_code=400, detail="task_type is required")
+    await db.upsert_runway_model(
+        public_model_id=public_id,
+        display_name=request.display_name.strip() or public_id,
+        kind=request.kind,
+        task_type=request.task_type.strip(),
+        default_options=_validate_json_object_text(request.default_options, "default_options"),
+        request_mapping=_validate_json_object_text(request.request_mapping, "request_mapping"),
+        is_enabled=request.is_enabled,
+    )
+    model = await db.get_runway_model(public_id)
+    return {"success": True, "model": _runway_model_payload(model)}
+
+
+@router.patch("/api/admin/runway/models/{model_id}")
+async def update_runway_model(
+    model_id: int,
+    request: RunwayModelUpdateRequest,
+    token: str = Depends(verify_admin_token),
+):
+    models = await db.list_runway_models()
+    existing = next((m for m in models if m.id == model_id), None)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Runway model not found")
+    public_id = (request.public_model_id if request.public_model_id is not None else existing.public_model_id).strip()
+    if not public_id.startswith("runway-"):
+        raise HTTPException(status_code=400, detail="Runway public model id must start with runway-")
+    kind = (request.kind if request.kind is not None else existing.kind).strip()
+    if kind not in {"image", "video", "upscale"}:
+        raise HTTPException(status_code=400, detail="kind must be image, video, or upscale")
+    await db.upsert_runway_model(
+        public_model_id=public_id,
+        display_name=(request.display_name if request.display_name is not None else existing.display_name).strip() or public_id,
+        kind=kind,
+        task_type=(request.task_type if request.task_type is not None else existing.task_type).strip(),
+        default_options=_validate_json_object_text(
+            request.default_options if request.default_options is not None else existing.default_options,
+            "default_options",
+        ),
+        request_mapping=_validate_json_object_text(
+            request.request_mapping if request.request_mapping is not None else existing.request_mapping,
+            "request_mapping",
+        ),
+        is_enabled=bool(request.is_enabled if request.is_enabled is not None else existing.is_enabled),
+    )
+    if public_id != existing.public_model_id:
+        await db.delete_runway_model(model_id)
+    model = await db.get_runway_model(public_id)
+    return {"success": True, "model": _runway_model_payload(model)}
+
+
+@router.delete("/api/admin/runway/models/{model_id}")
+async def delete_runway_model(
+    model_id: int,
+    token: str = Depends(verify_admin_token),
+):
+    await db.delete_runway_model(model_id)
+    return {"success": True, "model_id": model_id}
+
+
+@router.post("/api/admin/runway/models/sync")
+async def sync_runway_models(token: str = Depends(verify_admin_token)):
+    count = await db.sync_default_runway_models()
+    return {
+        "success": True,
+        "synced": count,
+        "models": [_runway_model_payload(m) for m in await db.list_runway_models()],
+    }
 
 
 def _event_calendar_path() -> Path:

@@ -332,6 +332,73 @@ class CaptchaWorkerKey(BaseModel):
     updated_at: Optional[datetime] = None
 
 
+class RunwayConfig(BaseModel):
+    """Global Runway integration configuration."""
+
+    id: int = 1
+    enabled: bool = False
+    base_url: str = "https://api.runwayml.com/v1"
+    poll_interval_sec: float = 3.0
+    timeout_sec: float = 600.0
+    cache_outputs: bool = True
+    updated_at: Optional[datetime] = None
+
+
+class RunwayAccount(BaseModel):
+    """Runway web-account credential entry."""
+
+    id: Optional[int] = None
+    label: str = ""
+    raw_credential: str = ""
+    is_active: bool = True
+    workspace_id: Optional[str] = None
+    team_id: Optional[str] = None
+    concurrency_limit: int = 1
+    in_flight: int = 0
+    last_status: Optional[str] = None
+    last_error: Optional[str] = None
+    last_used_at: Optional[datetime] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+
+class RunwayModel(BaseModel):
+    """Admin-editable Runway model registry entry."""
+
+    id: Optional[int] = None
+    public_model_id: str
+    display_name: str = ""
+    kind: Literal["image", "video", "upscale"] = "image"
+    task_type: str
+    default_options: str = "{}"
+    request_mapping: str = "{}"
+    is_enabled: bool = True
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+
+class RunwayTask(BaseModel):
+    """Runway task/job state tracked by Flow2API."""
+
+    id: Optional[int] = None
+    job_id: str
+    upstream_task_id: Optional[str] = None
+    account_id: Optional[int] = None
+    api_key_id: Optional[int] = None
+    public_model_id: str
+    prompt: str = ""
+    status: str = "processing"
+    progress: int = 0
+    raw_artifact_urls: Optional[List[str]] = None
+    cached_artifact_urls: Optional[List[str]] = None
+    request_payload: Optional[str] = None
+    response_payload: Optional[str] = None
+    error_message: Optional[str] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+
+
 # OpenAI Compatible Request Models
 class ChatMessage(BaseModel):
     """Chat message"""

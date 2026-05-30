@@ -94,6 +94,11 @@ const AVAILABLE_SCOPES: ScopeOption[] = [
     label: "Adobe task tracker",
     description: "Allows `POST /api/tracker/contributor` and `POST /api/tracker/keyword`.",
   },
+  {
+    id: "runway:generate",
+    label: "Runway generation",
+    description: "Allows Runway models through `/v1/chat/completions` and `/v1/runway/*` task routes.",
+  },
 ]
 
 /** All selectable scope ids (no wildcard); used for Select all and legacy `*` expansion. */

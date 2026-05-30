@@ -9,11 +9,12 @@ import { CacheManagement } from "../components/manage/CacheManagement"
 import { AgentGateway } from "../components/manage/AgentGateway"
 import { ApiKeyManagement } from "../components/manage/ApiKeyManagement"
 import { AdobeSettings } from "../components/manage/AdobeSettings"
+import { RunwaySettings } from "../components/manage/RunwaySettings"
 import { cn } from "@/lib/utils"
 import { useAuth } from "../contexts/AuthContext"
 import { adminJson } from "../lib/adminApi"
 
-const MANAGE_TABS = ["tokens", "apikeys", "settings", "logs", "adobe", "cache", "agent"] as const
+const MANAGE_TABS = ["tokens", "apikeys", "settings", "logs", "adobe", "runway", "cache", "agent"] as const
 type ManageTab = (typeof MANAGE_TABS)[number]
 
 function parseManageTab(raw: string | null): ManageTab {
@@ -109,6 +110,14 @@ export default function Manage() {
               Adobe
             </TabsTrigger>
             <TabsTrigger
+              value="runway"
+              className={cn(
+                "rounded-none border-b-2 border-transparent px-1 py-3 data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:shadow-none"
+              )}
+            >
+              Runway
+            </TabsTrigger>
+            <TabsTrigger
               value="cache"
               className={cn(
                 "rounded-none border-b-2 border-transparent px-1 py-3 data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:shadow-none"
@@ -160,6 +169,11 @@ export default function Manage() {
         <TabsContent value="adobe" className="mt-0 outline-none focus-visible:ring-0">
           <div className="animate-in fade-in duration-300">
             <AdobeSettings active={tab === "adobe"} />
+          </div>
+        </TabsContent>
+        <TabsContent value="runway" className="mt-0 outline-none focus-visible:ring-0">
+          <div className="animate-in fade-in duration-300">
+            <RunwaySettings active={tab === "runway"} />
           </div>
         </TabsContent>
         <TabsContent value="cache" className="mt-0 outline-none focus-visible:ring-0">

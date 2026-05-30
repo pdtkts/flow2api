@@ -20,6 +20,7 @@ from .services.token_manager import TokenManager
 from .services.load_balancer import LoadBalancer
 from .services.concurrency_manager import ConcurrencyManager
 from .services.generation_handler import GenerationHandler
+from .services.runway_service import RunwayService
 from .services.st_refresh_reasons import describe_st_refresh_reason
 from .api import routes, admin
 from .core.api_key_manager import ApiKeyManager
@@ -406,11 +407,13 @@ generation_handler = GenerationHandler(
     concurrency_manager,
     proxy_manager  # 添加 proxy_manager 参数
 )
+runway_service = RunwayService(db, generation_handler.file_cache, proxy_manager)
 managed_api_key_manager = ApiKeyManager(db, legacy_api_key_provider=lambda: config.api_key)
 
 # Set dependencies
 routes.set_generation_handler(generation_handler)
-admin.set_dependencies(token_manager, proxy_manager, db, concurrency_manager, managed_api_key_manager)
+routes.set_runway_service(runway_service)
+admin.set_dependencies(token_manager, proxy_manager, db, concurrency_manager, managed_api_key_manager, runway_service)
 set_api_key_manager(managed_api_key_manager)
 
 # Create FastAPI app

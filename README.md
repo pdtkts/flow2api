@@ -40,6 +40,7 @@
 - 本地自测 `remote_browser` 模式时，可在宿主机运行 Node 模拟打码服务（仅验 HTTP 与鉴权，不产出真实 reCAPTCHA token）：见 [`tools/remote-browser-mock/`](./tools/remote-browser-mock/)。
 - 生产向 **Agent Gateway**（Flow2API → HTTP，用户 PC 通过 WebSocket 接任务）：见 [`docs/agent-gateway.md`](./docs/agent-gateway.md) 与 [`src/agent_gateway/`](./src/agent_gateway/)。
 - 异步任务提交与轮询（`/v1/async/chat/completions`、`/v1/jobs/{job_id}`）：见 [`docs/async-polling.md`](./docs/async-polling.md)。
+- Runway web-task integration is available through the admin `Runway` tab, `runway-*` models, and `/v1/runway/*` routes. See [`docs/runway.md`](./docs/runway.md).
 
 - 自动更新st浏览器拓展：[Flow2API-Token-Updater](https://github.com/TheSmallHanCat/Flow2API-Token-Updater)
 

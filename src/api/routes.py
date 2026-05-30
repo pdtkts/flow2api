@@ -16,8 +16,9 @@ from urllib.parse import parse_qs, quote, urlparse
 from curl_cffi.requests import AsyncSession
 from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from pydantic import BaseModel, Field
 
 from ..core import auth as auth_core
 from ..core.auth import verify_api_key_flexible
@@ -36,6 +37,7 @@ from ..core.models import (
     GeminiContent,
     GeminiGenerateContentRequest,
     Project,
+    RunwayTask,
     Task,
     TaskTrackerContributorFetchRequest,
     TaskTrackerKeywordSearchRequest,
@@ -45,6 +47,7 @@ from ..services.browser_captcha_extension import ExtensionCaptchaService
 from ..services.cloning_metadata_service import CloningMetadataService
 from ..services.generation_handler import MODEL_CONFIG, GenerationHandler
 from ..services.llm_provider_chain import LlmProviderChain
+from ..services.runway_service import RunwayService
 from ..services.tas_tracker_service import TaskTrackerService
 
 router = APIRouter()
@@ -92,6 +95,7 @@ GEMINI_STATUS_MAP = {
 
 # Dependency injection will be set up in main.py
 generation_handler: GenerationHandler = None
+runway_service: RunwayService = None
 _llm_chain = LlmProviderChain()
 cloning_metadata_service = CloningMetadataService(_llm_chain)
 task_tracker_service = TaskTrackerService()
@@ -109,6 +113,24 @@ class NormalizedGenerationRequest:
     project_id: Optional[str] = None
 
 
+class RunwayMediaInput(BaseModel):
+    url: Optional[str] = None
+    data_url: Optional[str] = None
+    uri: Optional[str] = None
+
+
+class RunwayTaskCreateRequest(BaseModel):
+    model: str
+    prompt: str = ""
+    media: List[RunwayMediaInput] = Field(default_factory=list)
+    aspect_ratio: Optional[str] = None
+    duration: Optional[int] = None
+    image_size: Optional[str] = None
+    num_outputs: Optional[int] = None
+    seed: Optional[int] = None
+    options: Dict[str, Any] = Field(default_factory=dict)
+
+
 def _strip_optional_project_id(value: Optional[str]) -> Optional[str]:
     if not value or not isinstance(value, str):
         return None
@@ -122,10 +144,22 @@ def set_generation_handler(handler: GenerationHandler):
     generation_handler = handler
 
 
+def set_runway_service(service: RunwayService):
+    """Set Runway service instance."""
+    global runway_service
+    runway_service = service
+
+
 def _ensure_generation_handler() -> GenerationHandler:
     if generation_handler is None:
         raise HTTPException(status_code=500, detail="Generation handler not initialized")
     return generation_handler
+
+
+def _ensure_runway_service() -> RunwayService:
+    if runway_service is None:
+        raise HTTPException(status_code=500, detail="Runway service not initialized")
+    return runway_service
 
 
 LOG_OP_ADOBE_CLONING_PROMPTS = "adobe:cloning_prompts"
@@ -145,6 +179,12 @@ def _require_managed_scope(auth_ctx: AuthContext, scope_id: str) -> None:
         status_code=403,
         detail=f"Missing scope: {scope_id}",
     )
+
+
+def _require_runway_scope(auth_ctx: AuthContext) -> None:
+    if auth_ctx.key_id is None:
+        raise HTTPException(status_code=403, detail="Managed API key required for Runway")
+    _require_managed_scope(auth_ctx, "runway:generate")
 
 
 async def _logged_managed_adobe_call(
@@ -206,6 +246,22 @@ def _get_openai_model_catalog() -> List[Dict[str, str]]:
             "description": _build_model_description(model_config),
         }
         for model_id, model_config in MODEL_CONFIG.items()
+    ]
+
+
+async def _get_runway_openai_model_catalog() -> List[Dict[str, str]]:
+    if runway_service is None:
+        return []
+    cfg = await runway_service.db.get_runway_config()
+    if not cfg.enabled:
+        return []
+    models = await runway_service.db.list_runway_models(enabled_only=True)
+    return [
+        {
+            "id": model.public_model_id,
+            "description": f"Runway {model.kind} generation - {model.task_type}",
+        }
+        for model in models
     ]
 
 
@@ -722,6 +778,152 @@ async def _collect_non_stream_result(
         raise HTTPException(status_code=500, detail="Generation failed: No response")
 
     return result
+
+
+def _is_runway_model(model: str) -> bool:
+    return RunwayService.is_runway_model(model)
+
+
+def _request_extra_dict(request: Any) -> Dict[str, Any]:
+    extra = getattr(request, "model_extra", None)
+    return dict(extra) if isinstance(extra, dict) else {}
+
+
+def _runway_media_from_images(images: List[bytes]) -> List[Dict[str, Any]]:
+    media: List[Dict[str, Any]] = []
+    for image in images or []:
+        mime_type = _detect_image_mime_type(image)
+        media.append(
+            {
+                "data_url": f"data:{mime_type};base64,{base64.b64encode(image).decode('ascii')}",
+            }
+        )
+    return media
+
+
+def _runway_request_params_from_openai(
+    request: ChatCompletionRequest,
+    normalized: NormalizedGenerationRequest,
+) -> Dict[str, Any]:
+    extras = _request_extra_dict(request)
+    gen_cfg = request.generationConfig
+    image_cfg = getattr(gen_cfg, "imageConfig", None) if gen_cfg is not None else None
+    aspect_ratio = (
+        extras.get("aspect_ratio")
+        or extras.get("aspectRatio")
+        or getattr(gen_cfg, "aspectRatio", None)
+        or getattr(image_cfg, "aspectRatio", None)
+    )
+    image_size = (
+        extras.get("image_size")
+        or extras.get("imageSize")
+        or getattr(gen_cfg, "imageSize", None)
+        or getattr(image_cfg, "imageSize", None)
+    )
+    duration = extras.get("duration")
+    num_outputs = extras.get("num_outputs", extras.get("n"))
+    seed = extras.get("seed")
+    options = extras.get("options") or extras.get("runway_options") or {}
+    return {
+        "media": _runway_media_from_images(normalized.images),
+        "aspect_ratio": str(aspect_ratio) if aspect_ratio else None,
+        "duration": int(duration) if duration is not None and str(duration).strip().isdigit() else None,
+        "image_size": str(image_size) if image_size else None,
+        "num_outputs": int(num_outputs) if num_outputs is not None and str(num_outputs).strip().isdigit() else None,
+        "seed": int(seed) if seed is not None and str(seed).strip().lstrip("-").isdigit() else None,
+        "options": options if isinstance(options, dict) else {},
+    }
+
+
+def _runway_openai_chunk(content: str, *, role: Optional[str] = None) -> str:
+    delta: Dict[str, Any] = {}
+    if role:
+        delta["role"] = role
+    if content:
+        delta["content"] = content
+    payload = {
+        "id": f"chatcmpl-runway-{int(time.time())}",
+        "object": "chat.completion.chunk",
+        "created": int(time.time()),
+        "model": "runway",
+        "choices": [{"index": 0, "delta": delta, "finish_reason": None}],
+    }
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+def _runway_openai_done_chunk() -> str:
+    payload = {
+        "id": f"chatcmpl-runway-{int(time.time())}",
+        "object": "chat.completion.chunk",
+        "created": int(time.time()),
+        "model": "runway",
+        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+    }
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+async def _start_runway_from_openai_request(
+    request: ChatCompletionRequest,
+    normalized: NormalizedGenerationRequest,
+    api_key_id: Optional[int],
+) -> RunwayTask:
+    service = _ensure_runway_service()
+    params = _runway_request_params_from_openai(request, normalized)
+    return await service.start_task(
+        public_model_id=normalized.model,
+        prompt=normalized.prompt,
+        media=params["media"],
+        aspect_ratio=params["aspect_ratio"],
+        duration=params["duration"],
+        image_size=params["image_size"],
+        num_outputs=params["num_outputs"],
+        seed=params["seed"],
+        options=params["options"],
+        api_key_id=api_key_id,
+    )
+
+
+async def _runway_openai_non_stream(
+    request: ChatCompletionRequest,
+    normalized: NormalizedGenerationRequest,
+    *,
+    api_key_id: Optional[int],
+    base_url: Optional[str],
+) -> Dict[str, Any]:
+    service = _ensure_runway_service()
+    task = await _start_runway_from_openai_request(request, normalized, api_key_id)
+    final = await service.wait_for_task(task.job_id, api_key_id=api_key_id, base_url=base_url)
+    return service.task_to_openai_payload(final)
+
+
+async def _iterate_runway_openai_stream(
+    request: ChatCompletionRequest,
+    normalized: NormalizedGenerationRequest,
+    *,
+    api_key_id: Optional[int],
+    base_url: Optional[str],
+):
+    service = _ensure_runway_service()
+    yield _runway_openai_chunk("Runway task submitted.\n", role="assistant")
+    task = await _start_runway_from_openai_request(request, normalized, api_key_id)
+    last_progress = -1
+    while True:
+        current = await service.poll_task(task.job_id, api_key_id=api_key_id, base_url=base_url)
+        if current.progress != last_progress and current.status == "processing":
+            last_progress = current.progress
+            yield _runway_openai_chunk(f"Runway progress: {current.progress}%\n")
+        if current.status in {"completed", "failed"}:
+            payload = service.task_to_openai_payload(current)
+            if "error" in payload:
+                yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+            else:
+                content = _extract_openai_message_content(payload)
+                yield _runway_openai_chunk(content)
+                yield _runway_openai_done_chunk()
+            yield "data: [DONE]\n\n"
+            return
+        cfg = await service.db.get_runway_config()
+        await asyncio.sleep(float(cfg.poll_interval_sec))
 
 
 def _parse_handler_result(result: str) -> Dict[str, Any]:
@@ -1945,6 +2147,15 @@ async def list_models(auth_ctx: AuthContext = Depends(verify_api_key_flexible)):
         }
         for model in _get_openai_model_catalog()
     ]
+    models.extend(
+        {
+            "id": model["id"],
+            "object": "model",
+            "owned_by": "runway",
+            "description": model["description"],
+        }
+        for model in await _get_runway_openai_model_catalog()
+    )
 
     return {"object": "list", "data": models}
 
@@ -1995,6 +2206,107 @@ async def get_gemini_model(model: str, auth_ctx: AuthContext = Depends(verify_ap
     return _build_gemini_model_resource(model, description)
 
 
+@router.get("/v1/runway/models")
+async def list_runway_models(auth_ctx: AuthContext = Depends(verify_api_key_flexible)):
+    _require_runway_scope(auth_ctx)
+    service = _ensure_runway_service()
+    cfg = await service.db.get_runway_config()
+    models = await service.db.list_runway_models(enabled_only=False)
+    return {
+        "success": True,
+        "enabled": bool(cfg.enabled),
+        "models": [
+            {
+                "id": model.public_model_id,
+                "display_name": model.display_name,
+                "kind": model.kind,
+                "task_type": model.task_type,
+                "is_enabled": bool(model.is_enabled),
+            }
+            for model in models
+        ],
+    }
+
+
+@router.post("/v1/runway/uploads")
+async def upload_runway_media(
+    raw_request: Request,
+    file: UploadFile = File(...),
+    auth_ctx: AuthContext = Depends(verify_api_key_flexible),
+):
+    _require_runway_scope(auth_ctx)
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+    handler = _ensure_generation_handler()
+    filename_raw = Path(file.filename or "upload.bin").name
+    suffix = Path(filename_raw).suffix.lower()
+    content_type = file.content_type or mimetypes.guess_type(filename_raw)[0] or "application/octet-stream"
+    if not suffix:
+        suffix = mimetypes.guess_extension(content_type) or ".bin"
+    safe_name = f"runway_upload_{uuid.uuid4().hex}{suffix}"
+    target = (handler.file_cache.cache_dir / safe_name).resolve()
+    cache_dir = handler.file_cache.cache_dir.resolve()
+    try:
+        target.relative_to(cache_dir)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid upload filename")
+    with open(target, "wb") as fh:
+        fh.write(content)
+    base_url = _get_request_base_url(raw_request) or ""
+    url = f"{base_url.rstrip()}/api/cache/blob/{quote(safe_name, safe='')}" if base_url else f"/api/cache/blob/{quote(safe_name, safe='')}"
+    return {
+        "success": True,
+        "filename": safe_name,
+        "url": url,
+        "data_url": f"data:{content_type};base64,{base64.b64encode(content).decode('ascii')}",
+        "content_type": content_type,
+        "size": len(content),
+    }
+
+
+@router.post("/v1/runway/tasks")
+async def create_runway_task(
+    request: RunwayTaskCreateRequest,
+    auth_ctx: AuthContext = Depends(verify_api_key_flexible),
+):
+    _require_runway_scope(auth_ctx)
+    service = _ensure_runway_service()
+    try:
+        task = await service.start_task(
+            public_model_id=request.model,
+            prompt=request.prompt,
+            media=[item.model_dump(exclude_none=True) for item in request.media],
+            aspect_ratio=request.aspect_ratio,
+            duration=request.duration,
+            image_size=request.image_size,
+            num_outputs=request.num_outputs,
+            seed=request.seed,
+            options=request.options,
+            api_key_id=auth_ctx.key_id,
+        )
+        return JSONResponse(status_code=202, content=service.task_to_public_dict(task))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.get("/v1/runway/tasks/{job_id}")
+async def get_runway_task(
+    job_id: str,
+    raw_request: Request,
+    auth_ctx: AuthContext = Depends(verify_api_key_flexible),
+):
+    _require_runway_scope(auth_ctx)
+    service = _ensure_runway_service()
+    try:
+        task = await service.poll_task(job_id, api_key_id=auth_ctx.key_id, base_url=_get_request_base_url(raw_request))
+        return service.task_to_public_dict(task)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Runway job not found")
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+
+
 @router.post("/v1/chat/completions")
 async def create_chat_completion(
     request: ChatCompletionRequest,
@@ -2016,6 +2328,32 @@ async def create_chat_completion(
             raise HTTPException(status_code=400, detail="Prompt cannot be empty")
 
         request_base_url = _get_request_base_url(raw_request)
+        if _is_runway_model(normalized.model):
+            _require_runway_scope(auth_ctx)
+            if request.stream:
+                return StreamingResponse(
+                    _iterate_runway_openai_stream(
+                        request,
+                        normalized,
+                        api_key_id=auth_ctx.key_id,
+                        base_url=request_base_url,
+                    ),
+                    media_type="text/event-stream",
+                    headers={
+                        "Cache-Control": "no-cache",
+                        "Connection": "keep-alive",
+                        "X-Accel-Buffering": "no",
+                    },
+                )
+            return _build_openai_json_response(
+                await _runway_openai_non_stream(
+                    request,
+                    normalized,
+                    api_key_id=auth_ctx.key_id,
+                    base_url=request_base_url,
+                )
+            )
+
         allowed_token_ids, selected_project_id = await _select_random_active_project_for_api_key(
             auth_ctx,
             normalized.model,
@@ -2083,6 +2421,23 @@ async def create_chat_completion_async(
             raise HTTPException(status_code=400, detail="Prompt cannot be empty")
 
         request_base_url = _get_request_base_url(raw_request)
+        if _is_runway_model(normalized.model):
+            _require_runway_scope(auth_ctx)
+            task = await _start_runway_from_openai_request(
+                request,
+                normalized,
+                api_key_id=auth_ctx.key_id,
+            )
+            return JSONResponse(
+                status_code=202,
+                content={
+                    "job_id": task.job_id,
+                    "status": task.status,
+                    "model": task.public_model_id,
+                    "upstream_task_id": task.upstream_task_id,
+                },
+            )
+
         allowed_token_ids, selected_project_id = await _select_random_active_project_for_api_key(
             auth_ctx,
             normalized.model,
@@ -2136,12 +2491,24 @@ async def create_chat_completion_async(
 @router.get("/v1/jobs/{job_id}")
 async def get_job_status(
     job_id: str,
+    raw_request: Request,
     auth_ctx: AuthContext = Depends(verify_api_key_flexible),
 ):
     """Poll async generation job status."""
     handler = _ensure_generation_handler()
     task = await handler.db.get_task(job_id)
     if not task:
+        if runway_service is not None:
+            runway_task = await runway_service.db.get_runway_task(job_id)
+            if runway_task:
+                if auth_ctx.key_id is None or runway_task.api_key_id != auth_ctx.key_id:
+                    raise HTTPException(status_code=403, detail="Not authorized to view this job")
+                runway_task = await runway_service.poll_task(
+                    job_id,
+                    api_key_id=auth_ctx.key_id,
+                    base_url=_get_request_base_url(raw_request),
+                )
+                return runway_service.task_to_public_dict(runway_task)
         raise HTTPException(status_code=404, detail="Job not found")
 
     if auth_ctx.key_id is None or task.api_key_id != auth_ctx.key_id:

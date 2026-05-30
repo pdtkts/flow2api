@@ -7,7 +7,25 @@ from datetime import date, datetime
 from typing import Optional, List, Dict, Any, Tuple
 from pathlib import Path
 from .config import DEFAULT_YESCAPTCHA_TASK_TYPE, get_runtime_data_dir, normalize_yescaptcha_task_type
-from .models import Token, TokenStats, Task, RequestLog, AdminConfig, ProxyConfig, GenerationConfig, CacheConfig, Project, CaptchaConfig, PluginConfig, CallLogicConfig, DebugConfig
+from .models import (
+    Token,
+    TokenStats,
+    Task,
+    RequestLog,
+    AdminConfig,
+    ProxyConfig,
+    GenerationConfig,
+    CacheConfig,
+    Project,
+    CaptchaConfig,
+    PluginConfig,
+    CallLogicConfig,
+    DebugConfig,
+    RunwayConfig,
+    RunwayAccount,
+    RunwayModel,
+    RunwayTask,
+)
 
 
 class _DedicatedWorkerUpdateOmit:
@@ -27,6 +45,69 @@ def derive_adobe_ints_from_scopes_csv(scopes_csv: str) -> Tuple[int, int, int]:
         1 if "adobe:metadata" in parts else 0,
         1 if "adobe:tracker" in parts else 0,
     )
+
+
+RUNWAY_DEFAULT_MODELS = [
+    {
+        "public_model_id": "runway-gemini-3-1-flash-image",
+        "display_name": "Runway Gemini 3.1 Flash Image",
+        "kind": "image",
+        "task_type": "gemini_3_1_flash_image",
+        "default_options": {
+            "model": "gemini-3.1-flash-image-preview",
+            "aspect_ratio": "21:9",
+            "num_images": 1,
+            "image_size": "4K",
+            "exploreMode": False,
+            "creationSource": "tool-mode",
+        },
+        "request_mapping": {
+            "prompt": "text_prompt",
+            "aspect_ratio": "aspect_ratio",
+            "image_size": "image_size",
+            "num_outputs": "num_images",
+            "media": "reference_images",
+        },
+    },
+    {
+        "public_model_id": "runway-gen4-image",
+        "display_name": "Runway Gen-4 Image",
+        "kind": "image",
+        "task_type": "gen4_image",
+        "default_options": {
+            "model": "gen4_image",
+            "aspect_ratio": "16:9",
+            "num_images": 1,
+            "exploreMode": False,
+            "creationSource": "tool-mode",
+        },
+        "request_mapping": {
+            "prompt": "text_prompt",
+            "aspect_ratio": "aspect_ratio",
+            "num_outputs": "num_images",
+            "media": "reference_images",
+        },
+    },
+    {
+        "public_model_id": "runway-gen45-video",
+        "display_name": "Runway Gen-4.5 Video",
+        "kind": "video",
+        "task_type": "gen4_5",
+        "default_options": {
+            "model": "gen4.5",
+            "ratio": "1280:720",
+            "duration": 5,
+            "exploreMode": False,
+            "creationSource": "tool-mode",
+        },
+        "request_mapping": {
+            "prompt": "text_prompt",
+            "aspect_ratio": "ratio",
+            "duration": "duration",
+            "media": "prompt_image",
+        },
+    },
+]
 
 
 class Database:
@@ -86,6 +167,92 @@ class Database:
             return any(col[1] == column_name for col in columns)
         except:
             return False
+
+    async def _ensure_runway_tables(self, db) -> None:
+        """Create Runway integration tables and starter model registry rows."""
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS runway_config (
+                id INTEGER PRIMARY KEY DEFAULT 1,
+                enabled BOOLEAN DEFAULT 0,
+                base_url TEXT DEFAULT 'https://api.runwayml.com/v1',
+                poll_interval_sec REAL DEFAULT 3.0,
+                timeout_sec REAL DEFAULT 600.0,
+                cache_outputs BOOLEAN DEFAULT 1,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS runway_accounts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                label TEXT DEFAULT '',
+                raw_credential TEXT DEFAULT '',
+                is_active BOOLEAN DEFAULT 1,
+                workspace_id TEXT,
+                team_id TEXT,
+                concurrency_limit INTEGER DEFAULT 1,
+                in_flight INTEGER DEFAULT 0,
+                last_status TEXT,
+                last_error TEXT,
+                last_used_at TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS runway_models (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                public_model_id TEXT UNIQUE NOT NULL,
+                display_name TEXT DEFAULT '',
+                kind TEXT NOT NULL DEFAULT 'image',
+                task_type TEXT NOT NULL,
+                default_options TEXT DEFAULT '{}',
+                request_mapping TEXT DEFAULT '{}',
+                is_enabled BOOLEAN DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS runway_tasks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id TEXT UNIQUE NOT NULL,
+                upstream_task_id TEXT,
+                account_id INTEGER,
+                api_key_id INTEGER,
+                public_model_id TEXT NOT NULL,
+                prompt TEXT DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'processing',
+                progress INTEGER DEFAULT 0,
+                raw_artifact_urls TEXT,
+                cached_artifact_urls TEXT,
+                request_payload TEXT,
+                response_payload TEXT,
+                error_message TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                completed_at TIMESTAMP,
+                FOREIGN KEY (account_id) REFERENCES runway_accounts(id),
+                FOREIGN KEY (api_key_id) REFERENCES api_keys(id)
+            )
+        """)
+        await db.execute("INSERT OR IGNORE INTO runway_config (id) VALUES (1)")
+        for model in RUNWAY_DEFAULT_MODELS:
+            await db.execute(
+                """
+                INSERT OR IGNORE INTO runway_models (
+                    public_model_id, display_name, kind, task_type, default_options, request_mapping, is_enabled
+                )
+                VALUES (?, ?, ?, ?, ?, ?, 1)
+                """,
+                (
+                    model["public_model_id"],
+                    model["display_name"],
+                    model["kind"],
+                    model["task_type"],
+                    json.dumps(model["default_options"], ensure_ascii=False),
+                    json.dumps(model["request_mapping"], ensure_ascii=False),
+                ),
+            )
 
     async def _ensure_config_rows(self, db, config_dict: dict = None):
         """Ensure all config tables have their default rows
@@ -462,11 +629,12 @@ class Database:
             print("Checking database integrity and performing migrations...")
             await db.execute("PRAGMA journal_mode = WAL")
             await db.execute("PRAGMA synchronous = NORMAL")
+            await self._ensure_runway_tables(db)
 
             # ========== Step 1: Create missing tables ==========
             # Check and create cache_config table if missing
             if not await self._table_exists(db, "cache_config"):
-                print("  ✓ Creating missing table: cache_config")
+                print("  OK Creating missing table: cache_config")
                 await db.execute("""
                     CREATE TABLE cache_config (
                         id INTEGER PRIMARY KEY DEFAULT 1,
@@ -480,7 +648,7 @@ class Database:
 
             # Check and create proxy_config table if missing
             if not await self._table_exists(db, "proxy_config"):
-                print("  ✓ Creating missing table: proxy_config")
+                print("  OK Creating missing table: proxy_config")
                 await db.execute("""
                     CREATE TABLE proxy_config (
                         id INTEGER PRIMARY KEY DEFAULT 1,
@@ -506,7 +674,7 @@ class Database:
 
             # Check and create captcha_config table if missing
             if not await self._table_exists(db, "captcha_config"):
-                print("  ✓ Creating missing table: captcha_config")
+                print("  OK Creating missing table: captcha_config")
                 await db.execute("""
                     CREATE TABLE captcha_config (
                         id INTEGER PRIMARY KEY DEFAULT 1,
@@ -538,7 +706,7 @@ class Database:
 
             # Check and create plugin_config table if missing
             if not await self._table_exists(db, "plugin_config"):
-                print("  ✓ Creating missing table: plugin_config")
+                print("  OK Creating missing table: plugin_config")
                 await db.execute("""
                     CREATE TABLE plugin_config (
                         id INTEGER PRIMARY KEY DEFAULT 1,
@@ -550,7 +718,7 @@ class Database:
                 """)
 
             if not await self._table_exists(db, "extension_worker_bindings"):
-                print("  ✓ Creating missing table: extension_worker_bindings")
+                print("  OK Creating missing table: extension_worker_bindings")
                 await db.execute("""
                     CREATE TABLE extension_worker_bindings (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -563,7 +731,7 @@ class Database:
                 """)
 
             if not await self._table_exists(db, "captcha_worker_keys"):
-                print("  âœ“ Creating missing table: captcha_worker_keys")
+                print("  OK Creating missing table: captcha_worker_keys")
                 await db.execute("""
                     CREATE TABLE captcha_worker_keys (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -581,7 +749,7 @@ class Database:
                 """)
 
             if not await self._table_exists(db, "api_clients"):
-                print("  ✓ Creating missing table: api_clients")
+                print("  OK Creating missing table: api_clients")
                 await db.execute("""
                     CREATE TABLE api_clients (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -593,7 +761,7 @@ class Database:
                 """)
 
             if not await self._table_exists(db, "api_keys"):
-                print("  ✓ Creating missing table: api_keys")
+                print("  OK Creating missing table: api_keys")
                 await db.execute("""
                     CREATE TABLE api_keys (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -616,7 +784,7 @@ class Database:
                 """)
 
             if not await self._table_exists(db, "api_key_accounts"):
-                print("  ✓ Creating missing table: api_key_accounts")
+                print("  OK Creating missing table: api_key_accounts")
                 await db.execute("""
                     CREATE TABLE api_key_accounts (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -629,7 +797,7 @@ class Database:
                 """)
 
             if not await self._table_exists(db, "api_key_rate_limits"):
-                print("  ✓ Creating missing table: api_key_rate_limits")
+                print("  OK Creating missing table: api_key_rate_limits")
                 await db.execute("""
                     CREATE TABLE api_key_rate_limits (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -646,7 +814,7 @@ class Database:
                 """)
 
             if not await self._table_exists(db, "api_key_audit_logs"):
-                print("  ✓ Creating missing table: api_key_audit_logs")
+                print("  OK Creating missing table: api_key_audit_logs")
                 await db.execute("""
                     CREATE TABLE api_key_audit_logs (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -663,7 +831,7 @@ class Database:
                 """)
 
             if not await self._table_exists(db, "cache_files"):
-                print("  ✓ Creating missing table: cache_files")
+                print("  OK Creating missing table: cache_files")
                 await db.execute("""
                     CREATE TABLE cache_files (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -705,24 +873,24 @@ class Database:
                     if not await self._column_exists(db, "tokens", col_name):
                         try:
                             await db.execute(f"ALTER TABLE tokens ADD COLUMN {col_name} {col_type}")
-                            print(f"  ✓ Added column '{col_name}' to tokens table")
+                            print(f"  OK Added column '{col_name}' to tokens table")
                         except Exception as e:
-                            print(f"  ✗ Failed to add column '{col_name}': {e}")
+                            print(f"  ERR Failed to add column '{col_name}': {e}")
 
             # Check and add missing columns to admin_config table
             if await self._table_exists(db, "admin_config"):
                 if not await self._column_exists(db, "admin_config", "error_ban_threshold"):
                     try:
                         await db.execute("ALTER TABLE admin_config ADD COLUMN error_ban_threshold INTEGER DEFAULT 3")
-                        print("  ✓ Added column 'error_ban_threshold' to admin_config table")
+                        print("  OK Added column 'error_ban_threshold' to admin_config table")
                     except Exception as e:
-                        print(f"  ✗ Failed to add column 'error_ban_threshold': {e}")
+                        print(f"  ERR Failed to add column 'error_ban_threshold': {e}")
                 if not await self._column_exists(db, "admin_config", "error_ban_enabled"):
                     try:
                         await db.execute("ALTER TABLE admin_config ADD COLUMN error_ban_enabled INTEGER DEFAULT 1")
-                        print("  ✓ Added column 'error_ban_enabled' to admin_config table")
+                        print("  OK Added column 'error_ban_enabled' to admin_config table")
                     except Exception as e:
-                        print(f"  ✗ Failed to add column 'error_ban_enabled': {e}")
+                        print(f"  ERR Failed to add column 'error_ban_enabled': {e}")
 
             # Check and add missing columns to proxy_config table
             if await self._table_exists(db, "proxy_config"):
@@ -735,9 +903,9 @@ class Database:
                     if not await self._column_exists(db, "proxy_config", col_name):
                         try:
                             await db.execute(f"ALTER TABLE proxy_config ADD COLUMN {col_name} {col_type}")
-                            print(f"  ✓ Added column '{col_name}' to proxy_config table")
+                            print(f"  OK Added column '{col_name}' to proxy_config table")
                         except Exception as e:
-                            print(f"  ✗ Failed to add column '{col_name}': {e}")
+                            print(f"  ERR Failed to add column '{col_name}': {e}")
 
             # Check and add missing columns to generation_config table
             if await self._table_exists(db, "generation_config"):
@@ -789,33 +957,33 @@ class Database:
                     if not await self._column_exists(db, "generation_config", col_name):
                         try:
                             await db.execute(f"ALTER TABLE generation_config ADD COLUMN {col_name} {col_type}")
-                            print(f"  ✓ Added column '{col_name}' to generation_config table")
+                            print(f"  OK Added column '{col_name}' to generation_config table")
                         except Exception as e:
-                            print(f"  ✗ Failed to add column '{col_name}': {e}")
+                            print(f"  ERR Failed to add column '{col_name}': {e}")
 
             if await self._table_exists(db, "projects"):
                 if not await self._column_exists(db, "projects", "api_key_id"):
                     try:
                         await db.execute("ALTER TABLE projects ADD COLUMN api_key_id INTEGER")
-                        print("  ✓ Added column 'api_key_id' to projects table")
+                        print("  OK Added column 'api_key_id' to projects table")
                     except Exception as e:
-                        print(f"  ✗ Failed to add column 'api_key_id' to projects: {e}")
+                        print(f"  ERR Failed to add column 'api_key_id' to projects: {e}")
 
             if await self._table_exists(db, "tasks"):
                 if not await self._column_exists(db, "tasks", "api_key_id"):
                     try:
                         await db.execute("ALTER TABLE tasks ADD COLUMN api_key_id INTEGER")
-                        print("  ✓ Added column 'api_key_id' to tasks table")
+                        print("  OK Added column 'api_key_id' to tasks table")
                     except Exception as e:
-                        print(f"  ✗ Failed to add column 'api_key_id' to tasks: {e}")
+                        print(f"  ERR Failed to add column 'api_key_id' to tasks: {e}")
 
             if await self._table_exists(db, "request_logs"):
                 if not await self._column_exists(db, "request_logs", "api_key_id"):
                     try:
                         await db.execute("ALTER TABLE request_logs ADD COLUMN api_key_id INTEGER")
-                        print("  ✓ Added column 'api_key_id' to request_logs table")
+                        print("  OK Added column 'api_key_id' to request_logs table")
                     except Exception as e:
-                        print(f"  ✗ Failed to add column 'api_key_id' to request_logs: {e}")
+                        print(f"  ERR Failed to add column 'api_key_id' to request_logs: {e}")
 
             # Check and add missing columns to captcha_config table
             if await self._table_exists(db, "captcha_config"):
@@ -863,9 +1031,9 @@ class Database:
                     if not await self._column_exists(db, "captcha_config", col_name):
                         try:
                             await db.execute(f"ALTER TABLE captcha_config ADD COLUMN {col_name} {col_type}")
-                            print(f"  ✓ Added column '{col_name}' to captcha_config table")
+                            print(f"  OK Added column '{col_name}' to captcha_config table")
                         except Exception as e:
-                            print(f"  ✗ Failed to add column '{col_name}': {e}")
+                            print(f"  ERR Failed to add column '{col_name}': {e}")
 
             # Check and add missing columns to token_stats table
             if await self._table_exists(db, "token_stats"):
@@ -881,9 +1049,9 @@ class Database:
                     if not await self._column_exists(db, "token_stats", col_name):
                         try:
                             await db.execute(f"ALTER TABLE token_stats ADD COLUMN {col_name} {col_type}")
-                            print(f"  ✓ Added column '{col_name}' to token_stats table")
+                            print(f"  OK Added column '{col_name}' to token_stats table")
                         except Exception as e:
-                            print(f"  ✗ Failed to add column '{col_name}': {e}")
+                            print(f"  ERR Failed to add column '{col_name}': {e}")
 
             # Check and add missing columns to plugin_config table
             if await self._table_exists(db, "plugin_config"):
@@ -895,9 +1063,9 @@ class Database:
                     if not await self._column_exists(db, "plugin_config", col_name):
                         try:
                             await db.execute(f"ALTER TABLE plugin_config ADD COLUMN {col_name} {col_type}")
-                            print(f"  ✓ Added column '{col_name}' to plugin_config table")
+                            print(f"  OK Added column '{col_name}' to plugin_config table")
                         except Exception as e:
-                            print(f"  ✗ Failed to add column '{col_name}': {e}")
+                            print(f"  ERR Failed to add column '{col_name}': {e}")
 
             # Check and add missing columns to api_keys table
             if await self._table_exists(db, "api_keys"):
@@ -912,9 +1080,9 @@ class Database:
                     if not await self._column_exists(db, "api_keys", col_name):
                         try:
                             await db.execute(f"ALTER TABLE api_keys ADD COLUMN {col_name} {col_type}")
-                            print(f"  ✓ Added column '{col_name}' to api_keys table")
+                            print(f"  OK Added column '{col_name}' to api_keys table")
                         except Exception as e:
-                            print(f"  ✗ Failed to add column '{col_name}': {e}")
+                            print(f"  ERR Failed to add column '{col_name}': {e}")
 
             # Check and add missing columns to captcha_config table
             if await self._table_exists(db, "captcha_config"):
@@ -929,17 +1097,17 @@ class Database:
                     if not await self._column_exists(db, "captcha_config", col_name):
                         try:
                             await db.execute(f"ALTER TABLE captcha_config ADD COLUMN {col_name} {col_type}")
-                            print(f"  ✓ Added column '{col_name}' to captcha_config table")
+                            print(f"  OK Added column '{col_name}' to captcha_config table")
                         except Exception as e:
-                            print(f"  ✗ Failed to add column '{col_name}': {e}")
+                            print(f"  ERR Failed to add column '{col_name}': {e}")
 
             if await self._table_exists(db, "cache_files"):
                 if not await self._column_exists(db, "cache_files", "flow_project_id"):
                     try:
                         await db.execute("ALTER TABLE cache_files ADD COLUMN flow_project_id TEXT")
-                        print("  ✓ Added column 'flow_project_id' to cache_files table")
+                        print("  OK Added column 'flow_project_id' to cache_files table")
                     except Exception as e:
-                        print(f"  ✗ Failed to add column 'flow_project_id' to cache_files: {e}")
+                        print(f"  ERR Failed to add column 'flow_project_id' to cache_files: {e}")
 
             await self._ensure_tokens_use_extension_for_generation_column(db)
 
@@ -1174,6 +1342,8 @@ class Database:
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+
+            await self._ensure_runway_tables(db)
 
             # Call logic config table
             await db.execute("""
@@ -1415,9 +1585,9 @@ class Database:
                 await db.execute(
                     "ALTER TABLE tokens ADD COLUMN use_extension_for_generation INTEGER NOT NULL DEFAULT 1"
                 )
-                print("  ✓ Added column 'use_extension_for_generation' to tokens table")
+                print("  OK Added column 'use_extension_for_generation' to tokens table")
         except Exception as e:
-            print(f"  ✗ tokens use_extension_for_generation migration failed: {e}")
+            print(f"  ERR tokens use_extension_for_generation migration failed: {e}")
 
     async def _ensure_api_key_ownership_columns(self, db):
         """Add api_key_id to core tables when upgrading from older schemas (before indexes on those columns)."""
@@ -1425,21 +1595,21 @@ class Database:
             if await self._table_exists(db, "projects"):
                 if not await self._column_exists(db, "projects", "api_key_id"):
                     await db.execute("ALTER TABLE projects ADD COLUMN api_key_id INTEGER")
-                    print("  ✓ Added column 'api_key_id' to projects (init_db upgrade)")
+                    print("  OK Added column 'api_key_id' to projects (init_db upgrade)")
             if await self._table_exists(db, "tasks"):
                 if not await self._column_exists(db, "tasks", "api_key_id"):
                     await db.execute("ALTER TABLE tasks ADD COLUMN api_key_id INTEGER")
-                    print("  ✓ Added column 'api_key_id' to tasks (init_db upgrade)")
+                    print("  OK Added column 'api_key_id' to tasks (init_db upgrade)")
             if await self._table_exists(db, "request_logs"):
                 if not await self._column_exists(db, "request_logs", "api_key_id"):
                     await db.execute("ALTER TABLE request_logs ADD COLUMN api_key_id INTEGER")
-                    print("  ✓ Added column 'api_key_id' to request_logs (init_db upgrade)")
+                    print("  OK Added column 'api_key_id' to request_logs (init_db upgrade)")
             if await self._table_exists(db, "cache_files"):
                 if not await self._column_exists(db, "cache_files", "flow_project_id"):
                     await db.execute("ALTER TABLE cache_files ADD COLUMN flow_project_id TEXT")
-                    print("  ✓ Added column 'flow_project_id' to cache_files (init_db upgrade)")
+                    print("  OK Added column 'flow_project_id' to cache_files (init_db upgrade)")
         except Exception as e:
-            print(f"  ✗ api_key_id column upgrade failed: {e}")
+            print(f"  ERR api_key_id column upgrade failed: {e}")
             raise
 
     async def _ensure_task_async_columns(self, db):
@@ -1462,9 +1632,9 @@ class Database:
             for column_name, column_type in async_columns.items():
                 if not await self._column_exists(db, "tasks", column_name):
                     await db.execute(f"ALTER TABLE tasks ADD COLUMN {column_name} {column_type}")
-                    print(f"  ✓ Added column '{column_name}' to tasks (init_db upgrade)")
+                    print(f"  OK Added column '{column_name}' to tasks (init_db upgrade)")
         except Exception as e:
-            print(f"  ✗ tasks async columns upgrade failed: {e}")
+            print(f"  ERR tasks async columns upgrade failed: {e}")
             raise
 
     async def _migrate_request_logs(self, db):
@@ -1939,6 +2109,369 @@ class Database:
                 query = f"UPDATE tasks SET {', '.join(updates)} WHERE task_id = ?"
                 await db.execute(query, params)
                 await db.commit()
+
+    def _coerce_runway_task_row(self, row: Dict[str, Any]) -> RunwayTask:
+        for key in ("raw_artifact_urls", "cached_artifact_urls"):
+            value = row.get(key)
+            if isinstance(value, str) and value.strip():
+                try:
+                    row[key] = json.loads(value)
+                except Exception:
+                    row[key] = [value]
+        return RunwayTask(**row)
+
+    async def get_runway_config(self) -> RunwayConfig:
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("SELECT * FROM runway_config WHERE id = 1")
+            row = await cursor.fetchone()
+            if row:
+                return RunwayConfig(**dict(row))
+            return RunwayConfig()
+
+    async def update_runway_config(
+        self,
+        *,
+        enabled: Optional[bool] = None,
+        base_url: Optional[str] = None,
+        poll_interval_sec: Optional[float] = None,
+        timeout_sec: Optional[float] = None,
+        cache_outputs: Optional[bool] = None,
+    ) -> RunwayConfig:
+        current = await self.get_runway_config()
+        values = {
+            "enabled": int(current.enabled if enabled is None else bool(enabled)),
+            "base_url": (base_url if base_url is not None else current.base_url).strip().rstrip("/") or "https://api.runwayml.com/v1",
+            "poll_interval_sec": max(0.5, float(current.poll_interval_sec if poll_interval_sec is None else poll_interval_sec)),
+            "timeout_sec": max(10.0, float(current.timeout_sec if timeout_sec is None else timeout_sec)),
+            "cache_outputs": int(current.cache_outputs if cache_outputs is None else bool(cache_outputs)),
+        }
+        async with self._connect(write=True) as db:
+            await db.execute(
+                """
+                INSERT INTO runway_config (
+                    id, enabled, base_url, poll_interval_sec, timeout_sec, cache_outputs, updated_at
+                )
+                VALUES (1, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(id) DO UPDATE SET
+                    enabled = excluded.enabled,
+                    base_url = excluded.base_url,
+                    poll_interval_sec = excluded.poll_interval_sec,
+                    timeout_sec = excluded.timeout_sec,
+                    cache_outputs = excluded.cache_outputs,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (
+                    values["enabled"],
+                    values["base_url"],
+                    values["poll_interval_sec"],
+                    values["timeout_sec"],
+                    values["cache_outputs"],
+                ),
+            )
+            await db.commit()
+        return await self.get_runway_config()
+
+    async def list_runway_accounts(self) -> List[RunwayAccount]:
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT * FROM runway_accounts ORDER BY is_active DESC, id ASC"
+            )
+            rows = await cursor.fetchall()
+            return [RunwayAccount(**dict(row)) for row in rows]
+
+    async def get_runway_account(self, account_id: int) -> Optional[RunwayAccount]:
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("SELECT * FROM runway_accounts WHERE id = ?", (account_id,))
+            row = await cursor.fetchone()
+            return RunwayAccount(**dict(row)) if row else None
+
+    async def create_runway_account(
+        self,
+        *,
+        label: str,
+        raw_credential: str,
+        is_active: bool = True,
+        workspace_id: Optional[str] = None,
+        team_id: Optional[str] = None,
+        concurrency_limit: int = 1,
+        last_status: Optional[str] = None,
+        last_error: Optional[str] = None,
+    ) -> int:
+        async with self._connect(write=True) as db:
+            cursor = await db.execute(
+                """
+                INSERT INTO runway_accounts (
+                    label, raw_credential, is_active, workspace_id, team_id,
+                    concurrency_limit, last_status, last_error
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    (label or "").strip(),
+                    raw_credential or "",
+                    int(bool(is_active)),
+                    workspace_id,
+                    team_id,
+                    int(concurrency_limit or 1),
+                    last_status,
+                    last_error,
+                ),
+            )
+            await db.commit()
+            return int(cursor.lastrowid)
+
+    async def update_runway_account(self, account_id: int, **kwargs) -> None:
+        allowed = {
+            "label",
+            "raw_credential",
+            "is_active",
+            "workspace_id",
+            "team_id",
+            "concurrency_limit",
+            "in_flight",
+            "last_status",
+            "last_error",
+            "last_used_at",
+        }
+        updates = []
+        params = []
+        for key, value in kwargs.items():
+            if key not in allowed:
+                continue
+            if key in {"is_active"}:
+                value = int(bool(value))
+            if key in {"concurrency_limit", "in_flight"} and value is not None:
+                value = int(value)
+            updates.append(f"{key} = ?")
+            params.append(value)
+        if not updates:
+            return
+        updates.append("updated_at = CURRENT_TIMESTAMP")
+        params.append(account_id)
+        async with self._connect(write=True) as db:
+            await db.execute(
+                f"UPDATE runway_accounts SET {', '.join(updates)} WHERE id = ?",
+                params,
+            )
+            await db.commit()
+
+    async def delete_runway_account(self, account_id: int) -> None:
+        async with self._connect(write=True) as db:
+            await db.execute("DELETE FROM runway_accounts WHERE id = ?", (account_id,))
+            await db.commit()
+
+    async def acquire_runway_account(self) -> Optional[RunwayAccount]:
+        """Round-robin-ish active account acquisition with a simple in-flight guard."""
+        async with self._connect(write=True) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT * FROM runway_accounts
+                WHERE is_active = 1
+                  AND TRIM(COALESCE(raw_credential, '')) != ''
+                  AND (concurrency_limit < 0 OR in_flight < concurrency_limit)
+                ORDER BY COALESCE(last_used_at, '1970-01-01 00:00:00') ASC, id ASC
+                LIMIT 1
+                """
+            )
+            row = await cursor.fetchone()
+            if not row:
+                return None
+            account = RunwayAccount(**dict(row))
+            await db.execute(
+                """
+                UPDATE runway_accounts
+                SET in_flight = in_flight + 1,
+                    last_used_at = CURRENT_TIMESTAMP,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (account.id,),
+            )
+            await db.commit()
+            account.in_flight += 1
+            return account
+
+    async def release_runway_account(self, account_id: Optional[int]) -> None:
+        if not account_id:
+            return
+        async with self._connect(write=True) as db:
+            await db.execute(
+                """
+                UPDATE runway_accounts
+                SET in_flight = CASE WHEN in_flight > 0 THEN in_flight - 1 ELSE 0 END,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (int(account_id),),
+            )
+            await db.commit()
+
+    async def list_runway_models(self, enabled_only: bool = False) -> List[RunwayModel]:
+        query = "SELECT * FROM runway_models"
+        params: tuple[Any, ...] = ()
+        if enabled_only:
+            query += " WHERE is_enabled = 1"
+        query += " ORDER BY is_enabled DESC, public_model_id ASC"
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(query, params)
+            rows = await cursor.fetchall()
+            return [RunwayModel(**dict(row)) for row in rows]
+
+    async def get_runway_model(self, public_model_id: str) -> Optional[RunwayModel]:
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT * FROM runway_models WHERE public_model_id = ?",
+                ((public_model_id or "").strip(),),
+            )
+            row = await cursor.fetchone()
+            return RunwayModel(**dict(row)) if row else None
+
+    async def upsert_runway_model(
+        self,
+        *,
+        public_model_id: str,
+        display_name: str,
+        kind: str,
+        task_type: str,
+        default_options: str,
+        request_mapping: str = "{}",
+        is_enabled: bool = True,
+    ) -> int:
+        public_id = (public_model_id or "").strip()
+        async with self._connect(write=True) as db:
+            cursor = await db.execute(
+                """
+                INSERT INTO runway_models (
+                    public_model_id, display_name, kind, task_type,
+                    default_options, request_mapping, is_enabled
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(public_model_id) DO UPDATE SET
+                    display_name = excluded.display_name,
+                    kind = excluded.kind,
+                    task_type = excluded.task_type,
+                    default_options = excluded.default_options,
+                    request_mapping = excluded.request_mapping,
+                    is_enabled = excluded.is_enabled,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (
+                    public_id,
+                    (display_name or "").strip(),
+                    (kind or "image").strip(),
+                    (task_type or "").strip(),
+                    default_options or "{}",
+                    request_mapping or "{}",
+                    int(bool(is_enabled)),
+                ),
+            )
+            await db.commit()
+            if cursor.lastrowid:
+                return int(cursor.lastrowid)
+        model = await self.get_runway_model(public_id)
+        return int(model.id or 0) if model else 0
+
+    async def delete_runway_model(self, model_id: int) -> None:
+        async with self._connect(write=True) as db:
+            await db.execute("DELETE FROM runway_models WHERE id = ?", (model_id,))
+            await db.commit()
+
+    async def sync_default_runway_models(self) -> int:
+        count = 0
+        for model in RUNWAY_DEFAULT_MODELS:
+            await self.upsert_runway_model(
+                public_model_id=model["public_model_id"],
+                display_name=model["display_name"],
+                kind=model["kind"],
+                task_type=model["task_type"],
+                default_options=json.dumps(model["default_options"], ensure_ascii=False),
+                request_mapping=json.dumps(model["request_mapping"], ensure_ascii=False),
+                is_enabled=True,
+            )
+            count += 1
+        return count
+
+    async def create_runway_task(self, task: RunwayTask) -> int:
+        async with self._connect(write=True) as db:
+            cursor = await db.execute(
+                """
+                INSERT INTO runway_tasks (
+                    job_id, upstream_task_id, account_id, api_key_id, public_model_id,
+                    prompt, status, progress, raw_artifact_urls, cached_artifact_urls,
+                    request_payload, response_payload, error_message, completed_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    task.job_id,
+                    task.upstream_task_id,
+                    task.account_id,
+                    task.api_key_id,
+                    task.public_model_id,
+                    task.prompt,
+                    task.status,
+                    task.progress,
+                    json.dumps(task.raw_artifact_urls) if isinstance(task.raw_artifact_urls, list) else task.raw_artifact_urls,
+                    json.dumps(task.cached_artifact_urls) if isinstance(task.cached_artifact_urls, list) else task.cached_artifact_urls,
+                    task.request_payload,
+                    task.response_payload,
+                    task.error_message,
+                    task.completed_at,
+                ),
+            )
+            await db.commit()
+            return int(cursor.lastrowid)
+
+    async def get_runway_task(self, job_id: str) -> Optional[RunwayTask]:
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("SELECT * FROM runway_tasks WHERE job_id = ?", (job_id,))
+            row = await cursor.fetchone()
+            if not row:
+                return None
+            return self._coerce_runway_task_row(dict(row))
+
+    async def update_runway_task(self, job_id: str, **kwargs) -> None:
+        allowed = {
+            "upstream_task_id",
+            "account_id",
+            "api_key_id",
+            "public_model_id",
+            "prompt",
+            "status",
+            "progress",
+            "raw_artifact_urls",
+            "cached_artifact_urls",
+            "request_payload",
+            "response_payload",
+            "error_message",
+            "completed_at",
+        }
+        updates = []
+        params = []
+        for key, value in kwargs.items():
+            if key not in allowed:
+                continue
+            if key in {"raw_artifact_urls", "cached_artifact_urls"} and isinstance(value, list):
+                value = json.dumps(value)
+            updates.append(f"{key} = ?")
+            params.append(value)
+        if not updates:
+            return
+        updates.append("updated_at = CURRENT_TIMESTAMP")
+        params.append(job_id)
+        async with self._connect(write=True) as db:
+            await db.execute(
+                f"UPDATE runway_tasks SET {', '.join(updates)} WHERE job_id = ?",
+                params,
+            )
+            await db.commit()
 
     # Token stats operations (kept for compatibility, now delegates to specific methods)
     async def increment_token_stats(self, token_id: int, stat_type: str):
