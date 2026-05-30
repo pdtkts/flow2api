@@ -1,17 +1,37 @@
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useMemo, useState } from "react"
 import { useAuth } from "../../contexts/AuthContext"
 import { adminFetch, adminJson } from "../../lib/adminApi"
+import { Badge } from "../ui/badge"
 import { Button } from "../ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "../ui/card"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "../ui/dialog"
 import { Input } from "../ui/input"
 import { Label } from "../ui/label"
+import { ScrollArea } from "../ui/scroll-area"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select"
 import { Switch } from "../ui/switch"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../ui/table"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs"
 import { Textarea } from "../ui/textarea"
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select"
-import { Badge } from "../ui/badge"
 import { toast } from "sonner"
-import { CheckCircle2, Plus, RefreshCw, Trash2 } from "lucide-react"
+import {
+  CheckCircle2,
+  Edit3,
+  FileJson,
+  Plus,
+  RefreshCw,
+  RotateCcw,
+  Save,
+  Search,
+  Trash2,
+} from "lucide-react"
 
 type RunwayConfig = {
   enabled: boolean
@@ -35,6 +55,8 @@ type RunwayAccount = {
 }
 
 type RunwayModelKind = "image" | "video" | "audio" | "upscale"
+type KindFilter = "all" | RunwayModelKind | "blocked"
+type StatusFilter = "all" | "enabled" | "disabled" | "available" | "blocked"
 
 type RunwayModel = {
   id: number
@@ -58,13 +80,23 @@ type RunwayModel = {
   is_enabled: boolean
 }
 
-type RunwayAccountForm = {
+type RunwayAccountDraft = {
+  id?: number
   label: string
   raw_credential: string
+  is_active: boolean
   concurrency_limit: string
 }
 
-type RunwayModelForm = Omit<RunwayModel, "id">
+type RunwayModelDraft = Omit<RunwayModel, "id"> & { id?: number }
+type JsonFieldKey =
+  | "default_options"
+  | "request_mapping"
+  | "capability_schema"
+  | "limits"
+  | "media_roles"
+  | "supported_modes"
+  | "feature_flags"
 
 const DEFAULT_CONFIG: RunwayConfig = {
   enabled: false,
@@ -74,13 +106,14 @@ const DEFAULT_CONFIG: RunwayConfig = {
   cache_outputs: true,
 }
 
-const EMPTY_ACCOUNT: RunwayAccountForm = {
+const EMPTY_ACCOUNT: RunwayAccountDraft = {
   label: "",
   raw_credential: "",
+  is_active: true,
   concurrency_limit: "1",
 }
 
-const EMPTY_MODEL: RunwayModelForm = {
+const EMPTY_MODEL: RunwayModelDraft = {
   public_model_id: "runway-",
   display_name: "",
   kind: "image",
@@ -100,14 +133,163 @@ const EMPTY_MODEL: RunwayModelForm = {
   is_enabled: true,
 }
 
+function cloneModel(model: RunwayModel | RunwayModelDraft): RunwayModelDraft {
+  return { ...model }
+}
+
+function modelPayload(model: RunwayModelDraft) {
+  return {
+    ...model,
+    display_name: model.display_name.trim() || model.public_model_id.trim(),
+    public_model_id: model.public_model_id.trim(),
+    task_type: model.task_type.trim(),
+    builder_key: model.builder_key.trim(),
+    cost_feature: model.cost_feature.trim(),
+    source_version: model.source_version.trim(),
+    disabled_reason: model.disabled_reason.trim(),
+  }
+}
+
+function jsonText(value: string, fallback: "{}" | "[]") {
+  const raw = (value || "").trim() || fallback
+  return JSON.stringify(JSON.parse(raw), null, 2)
+}
+
+function validateModelJson(model: RunwayModelDraft) {
+  try {
+    jsonText(model.default_options, "{}")
+    jsonText(model.request_mapping, "{}")
+    jsonText(model.capability_schema, "{}")
+    jsonText(model.limits, "{}")
+    const arrayFields: JsonFieldKey[] = ["media_roles", "supported_modes", "feature_flags"]
+    for (const key of arrayFields) {
+      const parsed = JSON.parse((model[key] || "").trim() || "[]")
+      if (!Array.isArray(parsed)) throw new Error(`${key} must be an array`)
+    }
+    return true
+  } catch (error) {
+    toast.error(error instanceof Error ? error.message : "Model JSON is invalid")
+    return false
+  }
+}
+
+function parseStringArray(value: string) {
+  try {
+    const parsed = JSON.parse((value || "").trim() || "[]")
+    return Array.isArray(parsed) ? parsed.map(String).filter(Boolean) : []
+  } catch {
+    return []
+  }
+}
+
+function stringArrayJson(value: string) {
+  const parts = value
+    .split(",")
+    .map((part) => part.trim())
+    .filter(Boolean)
+  return JSON.stringify(parts, null, 2)
+}
+
+function kindBadgeVariant(kind: RunwayModelKind) {
+  return kind === "video" ? "default" : kind === "audio" ? "secondary" : "outline"
+}
+
+function availabilityBadge(model: RunwayModel) {
+  if (!model.live_available) return <Badge variant="destructive">blocked</Badge>
+  return <Badge variant="secondary">available</Badge>
+}
+
+function enabledBadge(model: RunwayModel) {
+  return model.is_enabled ? <Badge>enabled</Badge> : <Badge variant="outline">disabled</Badge>
+}
+
+function StatBox({ label, value }: { label: string; value: string | number }) {
+  return (
+    <div className="rounded-md border bg-muted/20 px-3 py-2">
+      <div className="text-xs text-muted-foreground">{label}</div>
+      <div className="text-lg font-semibold tabular-nums">{value}</div>
+    </div>
+  )
+}
+
+function JsonEditor({
+  label,
+  value,
+  fallback,
+  onChange,
+  onFormat,
+}: {
+  label: string
+  value: string
+  fallback: "{}" | "[]"
+  onChange: (value: string) => void
+  onFormat: () => void
+}) {
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between gap-2">
+        <Label>{label}</Label>
+        <Button type="button" size="sm" variant="outline" onClick={onFormat}>
+          <FileJson className="mr-2 h-4 w-4" />
+          Format
+        </Button>
+      </div>
+      <Textarea
+        className="min-h-[220px] resize-y font-mono text-xs leading-5"
+        value={value || fallback}
+        spellCheck={false}
+        onChange={(event) => onChange(event.target.value)}
+      />
+    </div>
+  )
+}
+
+function ChipListEditor({
+  label,
+  value,
+  onChange,
+}: {
+  label: string
+  value: string
+  onChange: (value: string) => void
+}) {
+  const items = parseStringArray(value)
+  return (
+    <div className="space-y-2">
+      <Label>{label}</Label>
+      <Input
+        value={items.join(", ")}
+        onChange={(event) => onChange(stringArrayJson(event.target.value))}
+        placeholder="comma, separated, values"
+      />
+      <div className="flex min-h-7 flex-wrap gap-1.5">
+        {items.length ? (
+          items.map((item) => (
+            <Badge key={item} variant="outline" className="font-mono font-normal">
+              {item}
+            </Badge>
+          ))
+        ) : (
+          <span className="text-xs text-muted-foreground">No values</span>
+        )}
+      </div>
+    </div>
+  )
+}
+
 export function RunwaySettings({ active }: { active: boolean }) {
   const { token } = useAuth()
   const [busy, setBusy] = useState(false)
   const [config, setConfig] = useState<RunwayConfig>(DEFAULT_CONFIG)
   const [accounts, setAccounts] = useState<RunwayAccount[]>([])
   const [models, setModels] = useState<RunwayModel[]>([])
-  const [newAccount, setNewAccount] = useState<RunwayAccountForm>(EMPTY_ACCOUNT)
-  const [newModel, setNewModel] = useState<RunwayModelForm>(EMPTY_MODEL)
+  const [accountOpen, setAccountOpen] = useState(false)
+  const [accountDraft, setAccountDraft] = useState<RunwayAccountDraft>(EMPTY_ACCOUNT)
+  const [modelOpen, setModelOpen] = useState(false)
+  const [modelDraft, setModelDraft] = useState<RunwayModelDraft>(EMPTY_MODEL)
+  const [modelSearch, setModelSearch] = useState("")
+  const [kindFilter, setKindFilter] = useState<KindFilter>("all")
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>("all")
 
   const load = useCallback(async () => {
     if (!token || !active) return
@@ -126,6 +308,35 @@ export function RunwaySettings({ active }: { active: boolean }) {
   useEffect(() => {
     void load()
   }, [load])
+
+  const stats = useMemo(() => {
+    return {
+      accounts: accounts.length,
+      activeAccounts: accounts.filter((account) => account.is_active).length,
+      enabledModels: models.filter((model) => model.is_enabled).length,
+      blockedModels: models.filter((model) => !model.live_available).length,
+    }
+  }, [accounts, models])
+
+  const filteredModels = useMemo(() => {
+    const query = modelSearch.trim().toLowerCase()
+    return models.filter((model) => {
+      const searchable = [
+        model.display_name,
+        model.public_model_id,
+        model.task_type,
+        model.builder_key,
+      ].join(" ").toLowerCase()
+      if (query && !searchable.includes(query)) return false
+      if (kindFilter === "blocked" && model.live_available) return false
+      if (kindFilter !== "all" && kindFilter !== "blocked" && model.kind !== kindFilter) return false
+      if (statusFilter === "enabled" && !model.is_enabled) return false
+      if (statusFilter === "disabled" && model.is_enabled) return false
+      if (statusFilter === "available" && !model.live_available) return false
+      if (statusFilter === "blocked" && model.live_available) return false
+      return true
+    })
+  }, [kindFilter, modelSearch, models, statusFilter])
 
   const saveConfig = async () => {
     if (!token) return
@@ -152,27 +363,48 @@ export function RunwaySettings({ active }: { active: boolean }) {
     }
   }
 
-  const addAccount = async () => {
+  const openAddAccount = () => {
+    setAccountDraft({ ...EMPTY_ACCOUNT })
+    setAccountOpen(true)
+  }
+
+  const openEditAccount = (account: RunwayAccount) => {
+    setAccountDraft({
+      id: account.id,
+      label: account.label,
+      raw_credential: account.raw_credential,
+      is_active: account.is_active,
+      concurrency_limit: String(account.concurrency_limit || 1),
+    })
+    setAccountOpen(true)
+  }
+
+  const saveAccount = async () => {
     if (!token) return
-    if (!newAccount.raw_credential.trim()) return toast.error("Credential required")
+    if (!accountDraft.raw_credential.trim()) return toast.error("Credential required")
     setBusy(true)
     try {
-      const r = await adminFetch("/api/admin/runway/accounts", token, {
-        method: "POST",
-        body: JSON.stringify({
-          label: newAccount.label.trim() || "Runway account",
-          raw_credential: newAccount.raw_credential.trim(),
-          is_active: true,
-          concurrency_limit: Number(newAccount.concurrency_limit) || 1,
-        }),
-      })
+      const payload = {
+        label: accountDraft.label.trim() || "Runway account",
+        raw_credential: accountDraft.raw_credential.trim(),
+        is_active: accountDraft.is_active,
+        concurrency_limit: Number(accountDraft.concurrency_limit) || 1,
+      }
+      const r = await adminFetch(
+        accountDraft.id ? `/api/admin/runway/accounts/${accountDraft.id}` : "/api/admin/runway/accounts",
+        token,
+        {
+          method: accountDraft.id ? "PATCH" : "POST",
+          body: JSON.stringify(payload),
+        }
+      )
       if (!r) return
       const d = await r.json()
       if (d.success) {
-        toast.success("Runway account added")
-        setNewAccount(EMPTY_ACCOUNT)
+        toast.success(accountDraft.id ? "Account saved" : "Runway account added")
+        setAccountOpen(false)
         await load()
-      } else toast.error(d.detail || "Add failed")
+      } else toast.error(d.detail || "Save failed")
     } finally {
       setBusy(false)
     }
@@ -217,33 +449,65 @@ export function RunwaySettings({ active }: { active: boolean }) {
     }
   }
 
-  const saveModel = async (model: RunwayModel | RunwayModelForm, isNew = false) => {
-    if (!token) return
-    if (!model.public_model_id.trim().startsWith("runway-")) return toast.error("Model id must start with runway-")
-    if (!model.task_type.trim()) return toast.error("Task type required")
-    try {
-      JSON.parse(model.default_options || "{}")
-      JSON.parse(model.request_mapping || "{}")
-      JSON.parse(model.capability_schema || "{}")
-      JSON.parse(model.media_roles || "[]")
-      JSON.parse(model.supported_modes || "[]")
-      JSON.parse(model.limits || "{}")
-      JSON.parse(model.feature_flags || "[]")
-    } catch {
-      return toast.error("Model JSON is invalid")
+  const openAddModel = () => {
+    setModelDraft({ ...EMPTY_MODEL })
+    setModelOpen(true)
+  }
+
+  const openEditModel = (model: RunwayModel) => {
+    setModelDraft(cloneModel(model))
+    setModelOpen(true)
+  }
+
+  const resetModelDraft = () => {
+    if (!modelDraft.id) {
+      setModelDraft({ ...EMPTY_MODEL })
+      return
     }
-    const url = isNew ? "/api/admin/runway/models" : `/api/admin/runway/models/${(model as RunwayModel).id}`
-    const r = await adminFetch(url, token, {
+    const current = models.find((model) => model.id === modelDraft.id)
+    if (current) setModelDraft(cloneModel(current))
+  }
+
+  const saveModel = async (model: RunwayModelDraft, isNew = !model.id) => {
+    if (!token) return false
+    if (!model.public_model_id.trim().startsWith("runway-")) {
+      toast.error("Model id must start with runway-")
+      return false
+    }
+    if (!model.task_type.trim()) {
+      toast.error("Task type required")
+      return false
+    }
+    if (!validateModelJson(model)) return false
+    const r = await adminFetch(isNew ? "/api/admin/runway/models" : `/api/admin/runway/models/${model.id}`, token, {
       method: isNew ? "POST" : "PATCH",
-      body: JSON.stringify(model),
+      body: JSON.stringify(modelPayload(model)),
     })
-    if (!r) return
+    if (!r) return false
     const d = await r.json()
     if (d.success) {
       toast.success(isNew ? "Model added" : "Model saved")
-      if (isNew) setNewModel(EMPTY_MODEL)
       await load()
-    } else toast.error(d.detail || "Save failed")
+      return true
+    }
+    toast.error(d.detail || "Save failed")
+    return false
+  }
+
+  const saveModelDialog = async () => {
+    setBusy(true)
+    try {
+      const ok = await saveModel(modelDraft, !modelDraft.id)
+      if (ok) setModelOpen(false)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const toggleModelEnabled = async (model: RunwayModel, is_enabled: boolean) => {
+    setModels((rows) => rows.map((row) => (row.id === model.id ? { ...row, is_enabled } : row)))
+    const ok = await saveModel({ ...model, is_enabled }, false)
+    if (!ok) await load()
   }
 
   const deleteModel = async (model: RunwayModel) => {
@@ -260,136 +524,163 @@ export function RunwaySettings({ active }: { active: boolean }) {
 
   const syncModels = async () => {
     if (!token) return
-    const r = await adminFetch("/api/admin/runway/models/sync", token, { method: "POST" })
-    if (!r) return
-    const d = await r.json()
-    if (d.success) {
-      toast.success(`Synced ${d.synced || 0} model presets`)
-      await load()
-    } else toast.error(d.detail || "Sync failed")
+    setBusy(true)
+    try {
+      const r = await adminFetch("/api/admin/runway/models/sync", token, { method: "POST" })
+      if (!r) return
+      const d = await r.json()
+      if (d.success) {
+        toast.success(`Synced ${d.synced || 0} model presets`)
+        await load()
+      } else toast.error(d.detail || "Sync failed")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const updateDraft = <K extends keyof RunwayModelDraft>(key: K, value: RunwayModelDraft[K]) => {
+    setModelDraft((draft) => ({ ...draft, [key]: value }))
+  }
+
+  const formatDraftJson = (key: JsonFieldKey, fallback: "{}" | "[]") => {
+    try {
+      updateDraft(key, jsonText(modelDraft[key], fallback) as RunwayModelDraft[JsonFieldKey])
+    } catch {
+      toast.error(`${key} is not valid JSON`)
+    }
   }
 
   if (!active) return null
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 overflow-x-hidden">
       <Card>
-        <CardHeader>
-          <CardTitle>Runway</CardTitle>
+        <CardHeader className="flex flex-col gap-3 border-b pb-4 lg:flex-row lg:items-center lg:justify-between">
+          <CardTitle>Runway Overview</CardTitle>
+          <div className="flex flex-wrap gap-2">
+            <Button variant="outline" onClick={syncModels} disabled={busy}>
+              <RefreshCw className="mr-2 h-4 w-4" />
+              Sync presets
+            </Button>
+            <Button onClick={saveConfig} disabled={busy}>
+              <Save className="mr-2 h-4 w-4" />
+              Save config
+            </Button>
+          </div>
         </CardHeader>
-        <CardContent className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
-          <div className="flex items-center gap-3">
-            <Switch checked={config.enabled} onCheckedChange={(enabled) => setConfig((c) => ({ ...c, enabled }))} />
-            <Label>Enabled</Label>
+        <CardContent className="space-y-4 pt-4">
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
+            <StatBox label="Active accounts" value={`${stats.activeAccounts}/${stats.accounts}`} />
+            <StatBox label="Enabled models" value={stats.enabledModels} />
+            <StatBox label="Blocked models" value={stats.blockedModels} />
+            <div className="rounded-md border bg-muted/20 px-3 py-2">
+              <div className="text-xs text-muted-foreground">Runway</div>
+              <div className="mt-1 flex items-center gap-2">
+                <Switch checked={config.enabled} onCheckedChange={(enabled) => setConfig((c) => ({ ...c, enabled }))} />
+                <span className="text-sm font-medium">{config.enabled ? "Enabled" : "Disabled"}</span>
+              </div>
+            </div>
+            <div className="rounded-md border bg-muted/20 px-3 py-2">
+              <div className="text-xs text-muted-foreground">Cache outputs</div>
+              <div className="mt-1 flex items-center gap-2">
+                <Switch checked={config.cache_outputs} onCheckedChange={(cache_outputs) => setConfig((c) => ({ ...c, cache_outputs }))} />
+                <span className="text-sm font-medium">{config.cache_outputs ? "On" : "Off"}</span>
+              </div>
+            </div>
           </div>
-          <div className="space-y-2 xl:col-span-2">
-            <Label>Base URL</Label>
-            <Input value={config.base_url} onChange={(e) => setConfig((c) => ({ ...c, base_url: e.target.value }))} />
-          </div>
-          <div className="space-y-2">
-            <Label>Poll seconds</Label>
-            <Input
-              type="number"
-              min={1}
-              value={config.poll_interval_sec}
-              onChange={(e) => setConfig((c) => ({ ...c, poll_interval_sec: Number(e.target.value) || 3 }))}
-            />
-          </div>
-          <div className="space-y-2">
-            <Label>Timeout seconds</Label>
-            <Input
-              type="number"
-              min={10}
-              value={config.timeout_sec}
-              onChange={(e) => setConfig((c) => ({ ...c, timeout_sec: Number(e.target.value) || 600 }))}
-            />
-          </div>
-          <div className="flex items-center gap-3">
-            <Switch checked={config.cache_outputs} onCheckedChange={(cache_outputs) => setConfig((c) => ({ ...c, cache_outputs }))} />
-            <Label>Cache outputs</Label>
-          </div>
-          <div className="md:col-span-2 xl:col-span-5">
-            <Button onClick={saveConfig} disabled={busy}>Save Runway config</Button>
+          <div className="grid gap-3 lg:grid-cols-[minmax(260px,1fr)_140px_160px]">
+            <div className="space-y-2">
+              <Label>Base URL</Label>
+              <Input value={config.base_url} onChange={(event) => setConfig((c) => ({ ...c, base_url: event.target.value }))} />
+            </div>
+            <div className="space-y-2">
+              <Label>Poll seconds</Label>
+              <Input
+                type="number"
+                min={1}
+                value={config.poll_interval_sec}
+                onChange={(event) => setConfig((c) => ({ ...c, poll_interval_sec: Number(event.target.value) || 3 }))}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>Timeout seconds</Label>
+              <Input
+                type="number"
+                min={10}
+                value={config.timeout_sec}
+                onChange={(event) => setConfig((c) => ({ ...c, timeout_sec: Number(event.target.value) || 600 }))}
+              />
+            </div>
           </div>
         </CardContent>
       </Card>
 
       <Card>
-        <CardHeader>
+        <CardHeader className="flex flex-row items-center justify-between gap-3 border-b pb-4">
           <CardTitle>Runway Accounts</CardTitle>
+          <Button onClick={openAddAccount}>
+            <Plus className="mr-2 h-4 w-4" />
+            Add account
+          </Button>
         </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="grid gap-3 lg:grid-cols-[180px_1fr_130px_auto]">
-            <Input placeholder="Label" value={newAccount.label} onChange={(e) => setNewAccount((a) => ({ ...a, label: e.target.value }))} />
-            <Input
-              type="password"
-              placeholder="JWT or cookie string"
-              value={newAccount.raw_credential}
-              onChange={(e) => setNewAccount((a) => ({ ...a, raw_credential: e.target.value }))}
-            />
-            <Input
-              type="number"
-              value={newAccount.concurrency_limit}
-              onChange={(e) => setNewAccount((a) => ({ ...a, concurrency_limit: e.target.value }))}
-            />
-            <Button onClick={addAccount} disabled={busy}>
-              <Plus className="h-4 w-4 mr-2" />
-              Add
-            </Button>
-          </div>
-
-          <div className="rounded-md border overflow-x-auto">
+        <CardContent className="p-0">
+          <div className="overflow-x-auto">
             <Table>
-              <TableHeader>
+              <TableHeader className="sticky top-0 z-10 bg-background">
                 <TableRow>
-                  <TableHead>Label</TableHead>
+                  <TableHead className="min-w-[180px]">Label</TableHead>
                   <TableHead>Status</TableHead>
                   <TableHead>Workspace</TableHead>
                   <TableHead>Team</TableHead>
-                  <TableHead>Limit</TableHead>
-                  <TableHead className="w-[180px]">Actions</TableHead>
+                  <TableHead className="text-center">Limit</TableHead>
+                  <TableHead className="text-center">In flight</TableHead>
+                  <TableHead className="text-right">Actions</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {accounts.map((account) => (
-                  <TableRow key={account.id}>
-                    <TableCell>
-                      <Input
-                        value={account.label}
-                        onChange={(e) => setAccounts((rows) => rows.map((row) => row.id === account.id ? { ...row, label: e.target.value } : row))}
-                        onBlur={(e) => void patchAccount(account, { label: e.currentTarget.value })}
-                      />
-                    </TableCell>
-                    <TableCell>
-                      <div className="flex items-center gap-2">
-                        <Switch checked={account.is_active} onCheckedChange={(is_active) => void patchAccount(account, { is_active })} />
-                        <Badge variant={account.last_status === "failed" ? "destructive" : "secondary"}>{account.last_status || "new"}</Badge>
-                      </div>
-                      {account.last_error ? <div className="text-xs text-destructive mt-1 max-w-[260px] truncate" title={account.last_error}>{account.last_error}</div> : null}
-                    </TableCell>
-                    <TableCell className="font-mono text-xs">{account.workspace_id || "-"}</TableCell>
-                    <TableCell className="font-mono text-xs">{account.team_id || "-"}</TableCell>
-                    <TableCell>
-                      <Input
-                        type="number"
-                        className="w-24"
-                        value={account.concurrency_limit}
-                        onChange={(e) => setAccounts((rows) => rows.map((row) => row.id === account.id ? { ...row, concurrency_limit: Number(e.target.value) || 1 } : row))}
-                        onBlur={(e) => void patchAccount(account, { concurrency_limit: Number(e.currentTarget.value) || 1 })}
-                      />
-                    </TableCell>
-                    <TableCell>
-                      <div className="flex gap-2">
-                        <Button size="sm" variant="outline" onClick={() => void testAccount(account)} disabled={busy}>
-                          <CheckCircle2 className="h-4 w-4" />
-                        </Button>
-                        <Button size="sm" variant="outline" onClick={() => void deleteAccount(account)}>
-                          <Trash2 className="h-4 w-4" />
-                        </Button>
-                      </div>
+                {!accounts.length ? (
+                  <TableRow>
+                    <TableCell colSpan={7} className="py-8 text-center text-sm text-muted-foreground">
+                      No Runway accounts configured.
                     </TableCell>
                   </TableRow>
-                ))}
+                ) : (
+                  accounts.map((account) => (
+                    <TableRow key={account.id}>
+                      <TableCell className="font-medium">{account.label || `Account ${account.id}`}</TableCell>
+                      <TableCell>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <Switch checked={account.is_active} onCheckedChange={(is_active) => void patchAccount(account, { is_active })} />
+                          <Badge variant={account.last_status === "failed" ? "destructive" : "secondary"}>
+                            {account.last_status || "new"}
+                          </Badge>
+                          {account.last_error ? (
+                            <span className="max-w-[240px] truncate text-xs text-destructive" title={account.last_error}>
+                              {account.last_error}
+                            </span>
+                          ) : null}
+                        </div>
+                      </TableCell>
+                      <TableCell className="font-mono text-xs">{account.workspace_id || "-"}</TableCell>
+                      <TableCell className="font-mono text-xs">{account.team_id || "-"}</TableCell>
+                      <TableCell className="text-center tabular-nums">{account.concurrency_limit}</TableCell>
+                      <TableCell className="text-center tabular-nums">{account.in_flight}</TableCell>
+                      <TableCell className="text-right">
+                        <div className="flex justify-end gap-2">
+                          <Button size="sm" variant="outline" onClick={() => void testAccount(account)} disabled={busy} title="Test account">
+                            <CheckCircle2 className="h-4 w-4" />
+                          </Button>
+                          <Button size="sm" variant="outline" onClick={() => openEditAccount(account)} title="Edit account">
+                            <Edit3 className="h-4 w-4" />
+                          </Button>
+                          <Button size="sm" variant="outline" onClick={() => void deleteAccount(account)} title="Delete account">
+                            <Trash2 className="h-4 w-4" />
+                          </Button>
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  ))
+                )}
               </TableBody>
             </Table>
           </div>
@@ -397,102 +688,305 @@ export function RunwaySettings({ active }: { active: boolean }) {
       </Card>
 
       <Card>
-        <CardHeader>
-          <CardTitle>Runway Models</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="flex justify-end">
-            <Button variant="outline" onClick={syncModels}>
-              <RefreshCw className="h-4 w-4 mr-2" />
-              Sync presets
+        <CardHeader className="space-y-4 border-b pb-4">
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+            <CardTitle>Runway Models</CardTitle>
+            <Button onClick={openAddModel}>
+              <Plus className="mr-2 h-4 w-4" />
+              Add model
             </Button>
           </div>
-
-          <div className="grid gap-3 lg:grid-cols-[200px_180px_120px_160px_160px_1fr_auto]">
-            <Input value={newModel.public_model_id} onChange={(e) => setNewModel((m) => ({ ...m, public_model_id: e.target.value }))} />
-            <Input placeholder="Display name" value={newModel.display_name} onChange={(e) => setNewModel((m) => ({ ...m, display_name: e.target.value }))} />
-            <Select value={newModel.kind} onValueChange={(kind) => setNewModel((m) => ({ ...m, kind: kind as RunwayModelKind }))}>
-              <SelectTrigger><SelectValue /></SelectTrigger>
+          <div className="flex flex-col gap-3 xl:flex-row xl:items-center">
+            <div className="relative min-w-[240px] flex-1">
+              <Search className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
+              <Input
+                className="pl-9"
+                placeholder="Search models, task types, builders"
+                value={modelSearch}
+                onChange={(event) => setModelSearch(event.target.value)}
+              />
+            </div>
+            <Tabs value={kindFilter} onValueChange={(value) => setKindFilter(value as KindFilter)}>
+              <TabsList className="flex h-auto flex-wrap justify-start">
+                <TabsTrigger value="all">All</TabsTrigger>
+                <TabsTrigger value="image">Image</TabsTrigger>
+                <TabsTrigger value="video">Video</TabsTrigger>
+                <TabsTrigger value="audio">Audio</TabsTrigger>
+                <TabsTrigger value="upscale">Upscale</TabsTrigger>
+                <TabsTrigger value="blocked">Blocked</TabsTrigger>
+              </TabsList>
+            </Tabs>
+            <Select value={statusFilter} onValueChange={(value) => setStatusFilter(value as StatusFilter)}>
+              <SelectTrigger className="w-full xl:w-[170px]">
+                <SelectValue />
+              </SelectTrigger>
               <SelectContent>
-                <SelectItem value="image">image</SelectItem>
-                <SelectItem value="video">video</SelectItem>
-                <SelectItem value="audio">audio</SelectItem>
-                <SelectItem value="upscale">upscale</SelectItem>
+                <SelectItem value="all">All status</SelectItem>
+                <SelectItem value="enabled">Enabled</SelectItem>
+                <SelectItem value="disabled">Disabled</SelectItem>
+                <SelectItem value="available">Available</SelectItem>
+                <SelectItem value="blocked">Blocked</SelectItem>
               </SelectContent>
             </Select>
-            <Input placeholder="taskType" value={newModel.task_type} onChange={(e) => setNewModel((m) => ({ ...m, task_type: e.target.value }))} />
-            <Input placeholder="builder" value={newModel.builder_key} onChange={(e) => setNewModel((m) => ({ ...m, builder_key: e.target.value }))} />
-            <Textarea className="font-mono text-xs min-h-[80px]" value={newModel.default_options} onChange={(e) => setNewModel((m) => ({ ...m, default_options: e.target.value }))} />
-            <Textarea className="font-mono text-xs min-h-[80px]" value={newModel.request_mapping} onChange={(e) => setNewModel((m) => ({ ...m, request_mapping: e.target.value }))} />
-            <Button onClick={() => void saveModel(newModel, true)}>Add</Button>
           </div>
-
-          <div className="space-y-3">
-            {models.map((model) => (
-              <div key={model.id} className="rounded-md border p-3 space-y-3">
-                <div className="grid gap-3 xl:grid-cols-[200px_180px_120px_160px_160px_1fr_130px]">
-                <Input value={model.public_model_id} onChange={(e) => setModels((rows) => rows.map((row) => row.id === model.id ? { ...row, public_model_id: e.target.value } : row))} />
-                <Input value={model.display_name} onChange={(e) => setModels((rows) => rows.map((row) => row.id === model.id ? { ...row, display_name: e.target.value } : row))} />
-                <Select value={model.kind} onValueChange={(kind) => setModels((rows) => rows.map((row) => row.id === model.id ? { ...row, kind: kind as RunwayModelKind } : row))}>
-                  <SelectTrigger><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="image">image</SelectItem>
-                    <SelectItem value="video">video</SelectItem>
-                    <SelectItem value="audio">audio</SelectItem>
-                    <SelectItem value="upscale">upscale</SelectItem>
-                  </SelectContent>
-                </Select>
-                <Input value={model.task_type} onChange={(e) => setModels((rows) => rows.map((row) => row.id === model.id ? { ...row, task_type: e.target.value } : row))} />
-                <Input value={model.builder_key} onChange={(e) => setModels((rows) => rows.map((row) => row.id === model.id ? { ...row, builder_key: e.target.value } : row))} />
-                <Textarea className="font-mono text-xs min-h-[90px]" value={model.default_options} onChange={(e) => setModels((rows) => rows.map((row) => row.id === model.id ? { ...row, default_options: e.target.value } : row))} />
-                <Textarea className="font-mono text-xs min-h-[90px]" value={model.request_mapping} onChange={(e) => setModels((rows) => rows.map((row) => row.id === model.id ? { ...row, request_mapping: e.target.value } : row))} />
-                <div className="flex flex-col gap-2">
-                  <Badge variant={model.live_available ? "secondary" : "destructive"}>
-                    {model.live_available ? "available" : "blocked"}
-                  </Badge>
-                  <div className="flex items-center gap-2">
-                    <Switch checked={model.is_enabled} onCheckedChange={(is_enabled) => setModels((rows) => rows.map((row) => row.id === model.id ? { ...row, is_enabled } : row))} />
-                    <Label>Enabled</Label>
-                  </div>
-                  <Button size="sm" onClick={() => void saveModel(model)}>Save</Button>
-                  <Button size="sm" variant="outline" onClick={() => void deleteModel(model)}>
-                    <Trash2 className="h-4 w-4" />
-                  </Button>
-                </div>
-                </div>
-                {model.disabled_reason ? <div className="text-xs text-destructive">{model.disabled_reason}</div> : null}
-                <div className="grid gap-3 lg:grid-cols-2 xl:grid-cols-5">
-                  <div className="space-y-1">
-                    <Label>Schema</Label>
-                    <Textarea className="font-mono text-xs min-h-[90px]" value={model.capability_schema} onChange={(e) => setModels((rows) => rows.map((row) => row.id === model.id ? { ...row, capability_schema: e.target.value } : row))} />
-                  </div>
-                  <div className="space-y-1">
-                    <Label>Roles</Label>
-                    <Textarea className="font-mono text-xs min-h-[90px]" value={model.media_roles} onChange={(e) => setModels((rows) => rows.map((row) => row.id === model.id ? { ...row, media_roles: e.target.value } : row))} />
-                  </div>
-                  <div className="space-y-1">
-                    <Label>Modes</Label>
-                    <Textarea className="font-mono text-xs min-h-[90px]" value={model.supported_modes} onChange={(e) => setModels((rows) => rows.map((row) => row.id === model.id ? { ...row, supported_modes: e.target.value } : row))} />
-                  </div>
-                  <div className="space-y-1">
-                    <Label>Limits</Label>
-                    <Textarea className="font-mono text-xs min-h-[90px]" value={model.limits} onChange={(e) => setModels((rows) => rows.map((row) => row.id === model.id ? { ...row, limits: e.target.value } : row))} />
-                  </div>
-                  <div className="space-y-1">
-                    <Label>Feature Flags</Label>
-                    <Textarea className="font-mono text-xs min-h-[90px]" value={model.feature_flags} onChange={(e) => setModels((rows) => rows.map((row) => row.id === model.id ? { ...row, feature_flags: e.target.value } : row))} />
-                  </div>
-                </div>
-                <div className="grid gap-3 md:grid-cols-3">
-                  <Input placeholder="Cost feature" value={model.cost_feature} onChange={(e) => setModels((rows) => rows.map((row) => row.id === model.id ? { ...row, cost_feature: e.target.value } : row))} />
-                  <Input placeholder="Source version" value={model.source_version} onChange={(e) => setModels((rows) => rows.map((row) => row.id === model.id ? { ...row, source_version: e.target.value } : row))} />
-                  <Input placeholder="Disabled reason" value={model.disabled_reason} onChange={(e) => setModels((rows) => rows.map((row) => row.id === model.id ? { ...row, disabled_reason: e.target.value } : row))} />
-                </div>
-              </div>
-            ))}
+        </CardHeader>
+        <CardContent className="p-0">
+          <div className="overflow-x-auto">
+            <Table className="min-w-[980px]">
+              <TableHeader className="sticky top-0 z-10 bg-background">
+                <TableRow>
+                  <TableHead className="w-[260px]">Model</TableHead>
+                  <TableHead className="w-[120px]">Kind</TableHead>
+                  <TableHead>Task type</TableHead>
+                  <TableHead>Builder</TableHead>
+                  <TableHead className="w-[120px]">Availability</TableHead>
+                  <TableHead className="w-[120px]">Enabled</TableHead>
+                  <TableHead className="w-[150px] text-right">Actions</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {!models.length ? (
+                  <TableRow>
+                    <TableCell colSpan={7} className="py-8 text-center text-sm text-muted-foreground">
+                      No Runway models found. Sync presets to load the manifest.
+                    </TableCell>
+                  </TableRow>
+                ) : !filteredModels.length ? (
+                  <TableRow>
+                    <TableCell colSpan={7} className="py-8 text-center text-sm text-muted-foreground">
+                      No models match the current search and filters.
+                    </TableCell>
+                  </TableRow>
+                ) : (
+                  filteredModels.map((model) => (
+                    <TableRow key={model.id}>
+                      <TableCell>
+                        <div className="max-w-[250px]">
+                          <div className="truncate font-medium" title={model.display_name || model.public_model_id}>
+                            {model.display_name || model.public_model_id}
+                          </div>
+                          <div className="truncate font-mono text-xs text-muted-foreground" title={model.public_model_id}>
+                            {model.public_model_id}
+                          </div>
+                        </div>
+                      </TableCell>
+                      <TableCell>
+                        <Badge variant={kindBadgeVariant(model.kind)}>{model.kind}</Badge>
+                      </TableCell>
+                      <TableCell className="max-w-[220px] truncate font-mono text-xs" title={model.task_type}>
+                        {model.task_type || "-"}
+                      </TableCell>
+                      <TableCell className="max-w-[190px] truncate font-mono text-xs" title={model.builder_key}>
+                        {model.builder_key || "-"}
+                      </TableCell>
+                      <TableCell>{availabilityBadge(model)}</TableCell>
+                      <TableCell>
+                        <div className="flex items-center gap-2">
+                          <Switch checked={model.is_enabled} onCheckedChange={(checked) => void toggleModelEnabled(model, checked)} />
+                          {enabledBadge(model)}
+                        </div>
+                      </TableCell>
+                      <TableCell className="text-right">
+                        <div className="flex justify-end gap-2">
+                          <Button size="sm" variant="outline" onClick={() => openEditModel(model)} title="Edit model">
+                            <Edit3 className="h-4 w-4" />
+                          </Button>
+                          <Button size="sm" variant="outline" onClick={() => void deleteModel(model)} title="Delete model">
+                            <Trash2 className="h-4 w-4" />
+                          </Button>
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  ))
+                )}
+              </TableBody>
+            </Table>
           </div>
         </CardContent>
       </Card>
+
+      <Dialog open={accountOpen} onOpenChange={setAccountOpen}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>{accountDraft.id ? "Edit Runway Account" : "Add Runway Account"}</DialogTitle>
+            <DialogDescription>Credentials stay hidden in the account table and are only editable here.</DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-4">
+            <div className="grid gap-3 md:grid-cols-[1fr_140px]">
+              <div className="space-y-2">
+                <Label>Label</Label>
+                <Input value={accountDraft.label} onChange={(event) => setAccountDraft((draft) => ({ ...draft, label: event.target.value }))} />
+              </div>
+              <div className="space-y-2">
+                <Label>Concurrency</Label>
+                <Input
+                  type="number"
+                  min={-1}
+                  value={accountDraft.concurrency_limit}
+                  onChange={(event) => setAccountDraft((draft) => ({ ...draft, concurrency_limit: event.target.value }))}
+                />
+              </div>
+            </div>
+            <div className="flex items-center gap-3">
+              <Switch
+                checked={accountDraft.is_active}
+                onCheckedChange={(is_active) => setAccountDraft((draft) => ({ ...draft, is_active }))}
+              />
+              <Label>Active</Label>
+            </div>
+            <div className="space-y-2">
+              <Label>JWT or cookie string</Label>
+              <Textarea
+                className="min-h-[150px] font-mono text-xs"
+                value={accountDraft.raw_credential}
+                spellCheck={false}
+                onChange={(event) => setAccountDraft((draft) => ({ ...draft, raw_credential: event.target.value }))}
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setAccountOpen(false)}>Cancel</Button>
+            <Button onClick={saveAccount} disabled={busy}>
+              <Save className="mr-2 h-4 w-4" />
+              Save account
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={modelOpen} onOpenChange={setModelOpen}>
+        <DialogContent className="max-h-[92vh] max-w-5xl overflow-hidden p-0">
+          <DialogHeader className="border-b p-6 pr-12">
+            <DialogTitle>{modelDraft.id ? "Edit Runway Model" : "Add Runway Model"}</DialogTitle>
+            <DialogDescription>
+              Keep the table clean; advanced Runway fields live in this editor.
+            </DialogDescription>
+          </DialogHeader>
+          <Tabs defaultValue="general" className="min-h-0">
+            <div className="border-b px-6 pt-4">
+              <TabsList className="flex h-auto flex-wrap justify-start">
+                <TabsTrigger value="general">General</TabsTrigger>
+                <TabsTrigger value="capabilities">Capabilities</TabsTrigger>
+                <TabsTrigger value="defaults">Defaults</TabsTrigger>
+                <TabsTrigger value="schema">Schema</TabsTrigger>
+              </TabsList>
+            </div>
+            <ScrollArea className="h-[62vh] px-6 pb-6">
+              <TabsContent value="general" className="space-y-4 pt-4">
+                <div className="grid gap-4 md:grid-cols-2">
+                  <div className="space-y-2">
+                    <Label>Public model ID</Label>
+                    <Input value={modelDraft.public_model_id} onChange={(event) => updateDraft("public_model_id", event.target.value)} />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Display name</Label>
+                    <Input value={modelDraft.display_name} onChange={(event) => updateDraft("display_name", event.target.value)} />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Kind</Label>
+                    <Select value={modelDraft.kind} onValueChange={(kind) => updateDraft("kind", kind as RunwayModelKind)}>
+                      <SelectTrigger><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="image">image</SelectItem>
+                        <SelectItem value="video">video</SelectItem>
+                        <SelectItem value="audio">audio</SelectItem>
+                        <SelectItem value="upscale">upscale</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Task type</Label>
+                    <Input value={modelDraft.task_type} onChange={(event) => updateDraft("task_type", event.target.value)} />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Builder key</Label>
+                    <Input value={modelDraft.builder_key} onChange={(event) => updateDraft("builder_key", event.target.value)} />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Disabled reason</Label>
+                    <Input value={modelDraft.disabled_reason} onChange={(event) => updateDraft("disabled_reason", event.target.value)} />
+                  </div>
+                </div>
+                <div className="flex flex-wrap gap-6 rounded-md border bg-muted/20 p-4">
+                  <div className="flex items-center gap-3">
+                    <Switch checked={modelDraft.is_enabled} onCheckedChange={(checked) => updateDraft("is_enabled", checked)} />
+                    <Label>Admin enabled</Label>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <Switch checked={modelDraft.live_available} onCheckedChange={(checked) => updateDraft("live_available", checked)} />
+                    <Label>Live available</Label>
+                  </div>
+                </div>
+              </TabsContent>
+
+              <TabsContent value="capabilities" className="space-y-5 pt-4">
+                <div className="grid gap-5 md:grid-cols-2">
+                  <ChipListEditor label="Supported modes" value={modelDraft.supported_modes} onChange={(value) => updateDraft("supported_modes", value)} />
+                  <ChipListEditor label="Media roles" value={modelDraft.media_roles} onChange={(value) => updateDraft("media_roles", value)} />
+                  <ChipListEditor label="Feature flags" value={modelDraft.feature_flags} onChange={(value) => updateDraft("feature_flags", value)} />
+                  <div className="space-y-2">
+                    <Label>Cost feature</Label>
+                    <Input value={modelDraft.cost_feature} onChange={(event) => updateDraft("cost_feature", event.target.value)} />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Source version</Label>
+                    <Input value={modelDraft.source_version} onChange={(event) => updateDraft("source_version", event.target.value)} />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Last synced</Label>
+                    <Input value={modelDraft.last_synced_at || "Not synced"} readOnly />
+                  </div>
+                </div>
+              </TabsContent>
+
+              <TabsContent value="defaults" className="grid gap-5 pt-4 lg:grid-cols-2">
+                <JsonEditor
+                  label="Default options"
+                  value={modelDraft.default_options}
+                  fallback="{}"
+                  onChange={(value) => updateDraft("default_options", value)}
+                  onFormat={() => formatDraftJson("default_options", "{}")}
+                />
+                <JsonEditor
+                  label="Request mapping"
+                  value={modelDraft.request_mapping}
+                  fallback="{}"
+                  onChange={(value) => updateDraft("request_mapping", value)}
+                  onFormat={() => formatDraftJson("request_mapping", "{}")}
+                />
+              </TabsContent>
+
+              <TabsContent value="schema" className="grid gap-5 pt-4 lg:grid-cols-2">
+                <JsonEditor
+                  label="Capability schema"
+                  value={modelDraft.capability_schema}
+                  fallback="{}"
+                  onChange={(value) => updateDraft("capability_schema", value)}
+                  onFormat={() => formatDraftJson("capability_schema", "{}")}
+                />
+                <JsonEditor
+                  label="Limits"
+                  value={modelDraft.limits}
+                  fallback="{}"
+                  onChange={(value) => updateDraft("limits", value)}
+                  onFormat={() => formatDraftJson("limits", "{}")}
+                />
+              </TabsContent>
+            </ScrollArea>
+          </Tabs>
+          <DialogFooter className="border-t p-4">
+            <Button variant="outline" onClick={resetModelDraft}>
+              <RotateCcw className="mr-2 h-4 w-4" />
+              Reset
+            </Button>
+            <Button variant="outline" onClick={() => setModelOpen(false)}>Cancel</Button>
+            <Button onClick={saveModelDialog} disabled={busy}>
+              <Save className="mr-2 h-4 w-4" />
+              Save model
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }
