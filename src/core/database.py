@@ -2510,6 +2510,7 @@ class Database:
 
     async def sync_default_runway_models(self, live_features: Optional[Dict[str, Any]] = None) -> Dict[str, int]:
         count = 0
+        blocked_count = 0
         live_features = live_features if isinstance(live_features, dict) else {}
         disabled_features, disabled_task_type_count = _extract_runway_disabled_features(live_features)
         synced_public_ids: Set[str] = set()
@@ -2522,11 +2523,12 @@ class Database:
             disabled_by_features = bool(matched_disabled_key)
             live_available = bool(builder_available and not disabled_by_features)
             disabled_reason = str(model.get("disabled_reason") or "")
-            if disabled_by_features:
+            if disabled_by_features and builder_available:
                 reason = disabled_features.get(matched_disabled_key) or "runway_disabled"
                 disabled_reason = f"Runway disabled task type: {matched_disabled_key}"
                 if reason and reason not in {"runway_disabled", "permission_disabled"}:
                     disabled_reason = f"{disabled_reason} ({reason})"
+                blocked_count += 1
             elif not builder_available and not disabled_reason:
                 disabled_reason = "Exact task builder is not available"
             await self.upsert_runway_model(
@@ -2563,12 +2565,14 @@ class Database:
             matched_disabled_key = next((key for key in availability_keys if key in disabled_features), "")
             if not matched_disabled_key:
                 continue
+            if str(existing_model.builder_key or "") == "unsupported":
+                continue
             reason = disabled_features.get(matched_disabled_key) or "runway_disabled"
             disabled_reason = f"Runway disabled task type: {matched_disabled_key}"
             if reason and reason not in {"runway_disabled", "permission_disabled"}:
                 disabled_reason = f"{disabled_reason} ({reason})"
             await self.mark_runway_model_unavailable(public_id, disabled_reason)
-        blocked_count = sum(1 for model in await self.list_runway_models(enabled_only=False) if not bool(model.live_available))
+            blocked_count += 1
         return {
             "synced": count,
             "blocked": blocked_count,
