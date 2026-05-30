@@ -368,10 +368,21 @@ class RunwayModel(BaseModel):
     id: Optional[int] = None
     public_model_id: str
     display_name: str = ""
-    kind: Literal["image", "video", "upscale"] = "image"
+    kind: Literal["image", "video", "audio", "upscale"] = "image"
     task_type: str
+    builder_key: str = ""
     default_options: str = "{}"
     request_mapping: str = "{}"
+    capability_schema: str = "{}"
+    media_roles: str = "[]"
+    supported_modes: str = "[]"
+    limits: str = "{}"
+    feature_flags: str = "[]"
+    cost_feature: str = ""
+    source_version: str = ""
+    live_available: bool = True
+    disabled_reason: str = ""
+    last_synced_at: Optional[datetime] = None
     is_enabled: bool = True
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None

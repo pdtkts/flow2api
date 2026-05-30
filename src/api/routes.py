@@ -16,7 +16,7 @@ from urllib.parse import parse_qs, quote, urlparse
 from curl_cffi.requests import AsyncSession
 from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -114,21 +114,40 @@ class NormalizedGenerationRequest:
 
 
 class RunwayMediaInput(BaseModel):
+    role: Optional[str] = None
     url: Optional[str] = None
     data_url: Optional[str] = None
     uri: Optional[str] = None
+    asset_id: Optional[str] = None
+    assetId: Optional[str] = None
+    tag: Optional[str] = None
+    name: Optional[str] = None
+    content_type: Optional[str] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
 class RunwayTaskCreateRequest(BaseModel):
     model: str
     prompt: str = ""
+    mode: Optional[str] = None
     media: List[RunwayMediaInput] = Field(default_factory=list)
     aspect_ratio: Optional[str] = None
+    orientation: Optional[str] = None
     duration: Optional[int] = None
+    resolution: Optional[str] = None
     image_size: Optional[str] = None
     num_outputs: Optional[int] = None
     seed: Optional[int] = None
+    sound: Optional[bool] = None
+    fps: Optional[int] = None
+    voice_id: Optional[str] = None
+    multi_shot: Optional[List[Dict[str, Any]]] = None
+    upscale: Optional[Dict[str, Any]] = None
     options: Dict[str, Any] = Field(default_factory=dict)
+
+
+class RunwayEstimateRequest(RunwayTaskCreateRequest):
+    pass
 
 
 def _strip_optional_project_id(value: Optional[str]) -> Optional[str]:
@@ -786,7 +805,13 @@ def _is_runway_model(model: str) -> bool:
 
 def _request_extra_dict(request: Any) -> Dict[str, Any]:
     extra = getattr(request, "model_extra", None)
-    return dict(extra) if isinstance(extra, dict) else {}
+    data = dict(extra) if isinstance(extra, dict) else {}
+    extra_body = data.get("extra_body")
+    if isinstance(extra_body, dict):
+        merged = dict(extra_body)
+        merged.update({k: v for k, v in data.items() if k != "extra_body"})
+        return merged
+    return data
 
 
 def _runway_media_from_images(images: List[bytes]) -> List[Dict[str, Any]]:
@@ -805,6 +830,18 @@ def _runway_request_params_from_openai(
     request: ChatCompletionRequest,
     normalized: NormalizedGenerationRequest,
 ) -> Dict[str, Any]:
+    def parse_bool(value: Any) -> Optional[bool]:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return value
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "on"}:
+            return True
+        if text in {"0", "false", "no", "off"}:
+            return False
+        return bool(value)
+
     extras = _request_extra_dict(request)
     gen_cfg = request.generationConfig
     image_cfg = getattr(gen_cfg, "imageConfig", None) if gen_cfg is not None else None
@@ -821,16 +858,32 @@ def _runway_request_params_from_openai(
         or getattr(image_cfg, "imageSize", None)
     )
     duration = extras.get("duration")
+    resolution = extras.get("resolution")
     num_outputs = extras.get("num_outputs", extras.get("n"))
     seed = extras.get("seed")
+    sound = extras.get("sound")
+    fps = extras.get("fps")
+    voice_id = extras.get("voice_id") or extras.get("voiceId")
+    mode = extras.get("mode")
+    media_extra = extras.get("media")
     options = extras.get("options") or extras.get("runway_options") or {}
+    media = _runway_media_from_images(normalized.images)
+    if isinstance(media_extra, list):
+        media.extend(item for item in media_extra if isinstance(item, dict))
     return {
-        "media": _runway_media_from_images(normalized.images),
+        "media": media,
+        "mode": str(mode) if mode else None,
         "aspect_ratio": str(aspect_ratio) if aspect_ratio else None,
         "duration": int(duration) if duration is not None and str(duration).strip().isdigit() else None,
+        "resolution": str(resolution) if resolution else None,
         "image_size": str(image_size) if image_size else None,
         "num_outputs": int(num_outputs) if num_outputs is not None and str(num_outputs).strip().isdigit() else None,
         "seed": int(seed) if seed is not None and str(seed).strip().lstrip("-").isdigit() else None,
+        "sound": parse_bool(sound),
+        "fps": int(fps) if fps is not None and str(fps).strip().isdigit() else None,
+        "voice_id": str(voice_id) if voice_id else None,
+        "multi_shot": extras.get("multi_shot") if isinstance(extras.get("multi_shot"), list) else None,
+        "upscale": extras.get("upscale") if isinstance(extras.get("upscale"), dict) else None,
         "options": options if isinstance(options, dict) else {},
     }
 
@@ -873,11 +926,18 @@ async def _start_runway_from_openai_request(
         public_model_id=normalized.model,
         prompt=normalized.prompt,
         media=params["media"],
+        mode=params["mode"],
         aspect_ratio=params["aspect_ratio"],
         duration=params["duration"],
+        resolution=params["resolution"],
         image_size=params["image_size"],
         num_outputs=params["num_outputs"],
         seed=params["seed"],
+        sound=params["sound"],
+        fps=params["fps"],
+        voice_id=params["voice_id"],
+        multi_shot=params["multi_shot"],
+        upscale=params["upscale"],
         options=params["options"],
         api_key_id=api_key_id,
     )
@@ -2212,6 +2272,9 @@ async def list_runway_models(auth_ctx: AuthContext = Depends(verify_api_key_flex
     service = _ensure_runway_service()
     cfg = await service.db.get_runway_config()
     models = await service.db.list_runway_models(enabled_only=False)
+    def load_json(raw: Any, fallback: Any) -> Any:
+        parsed = RunwayService._json_loads(raw, fallback)
+        return parsed if isinstance(parsed, type(fallback)) else fallback
     return {
         "success": True,
         "enabled": bool(cfg.enabled),
@@ -2221,48 +2284,101 @@ async def list_runway_models(auth_ctx: AuthContext = Depends(verify_api_key_flex
                 "display_name": model.display_name,
                 "kind": model.kind,
                 "task_type": model.task_type,
+                "builder_key": model.builder_key,
                 "is_enabled": bool(model.is_enabled),
+                "live_available": bool(model.live_available),
+                "available": bool(cfg.enabled and model.is_enabled and model.live_available),
+                "disabled_reason": model.disabled_reason or "",
+                "modes": load_json(model.supported_modes, []),
+                "media_roles": load_json(model.media_roles, []),
+                "limits": load_json(model.limits, {}),
+                "option_schema": load_json(model.capability_schema, {}),
+                "feature_flags": load_json(model.feature_flags, []),
+                "cost_feature": model.cost_feature or "",
+                "source_version": model.source_version or "",
+                "last_synced_at": model.last_synced_at.isoformat() if model.last_synced_at else None,
             }
             for model in models
         ],
     }
 
 
+@router.get("/v1/runway/voices")
+async def list_runway_voices(auth_ctx: AuthContext = Depends(verify_api_key_flexible)):
+    _require_runway_scope(auth_ctx)
+    service = _ensure_runway_service()
+    try:
+        return {"success": True, "voices": await service.get_voices()}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 @router.post("/v1/runway/uploads")
 async def upload_runway_media(
     raw_request: Request,
     file: UploadFile = File(...),
+    role: str = Form("reference_image"),
+    asset_group_id: Optional[str] = Form(None),
+    metadata_json: str = Form("{}"),
     auth_ctx: AuthContext = Depends(verify_api_key_flexible),
 ):
     _require_runway_scope(auth_ctx)
     content = await file.read()
     if not content:
         raise HTTPException(status_code=400, detail="Uploaded file is empty")
-    handler = _ensure_generation_handler()
-    filename_raw = Path(file.filename or "upload.bin").name
-    suffix = Path(filename_raw).suffix.lower()
-    content_type = file.content_type or mimetypes.guess_type(filename_raw)[0] or "application/octet-stream"
-    if not suffix:
-        suffix = mimetypes.guess_extension(content_type) or ".bin"
-    safe_name = f"runway_upload_{uuid.uuid4().hex}{suffix}"
-    target = (handler.file_cache.cache_dir / safe_name).resolve()
-    cache_dir = handler.file_cache.cache_dir.resolve()
+    metadata: Dict[str, Any] = {}
     try:
-        target.relative_to(cache_dir)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid upload filename")
-    with open(target, "wb") as fh:
-        fh.write(content)
-    base_url = _get_request_base_url(raw_request) or ""
-    url = f"{base_url.rstrip()}/api/cache/blob/{quote(safe_name, safe='')}" if base_url else f"/api/cache/blob/{quote(safe_name, safe='')}"
-    return {
-        "success": True,
-        "filename": safe_name,
-        "url": url,
-        "data_url": f"data:{content_type};base64,{base64.b64encode(content).decode('ascii')}",
-        "content_type": content_type,
-        "size": len(content),
-    }
+        parsed = json.loads(metadata_json or "{}")
+        if isinstance(parsed, dict):
+            metadata = parsed
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="metadata_json must be a JSON object") from exc
+    service = _ensure_runway_service()
+    try:
+        return await service.upload_media(
+            filename=Path(file.filename or "upload.bin").name,
+            content=content,
+            content_type=file.content_type or mimetypes.guess_type(file.filename or "")[0] or "application/octet-stream",
+            api_key_id=auth_ctx.key_id,
+            base_url=_get_request_base_url(raw_request),
+            media_role=role,
+            asset_group_id=asset_group_id,
+            metadata=metadata,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/v1/runway/estimate")
+async def estimate_runway_task(
+    request: RunwayEstimateRequest,
+    auth_ctx: AuthContext = Depends(verify_api_key_flexible),
+):
+    _require_runway_scope(auth_ctx)
+    service = _ensure_runway_service()
+    try:
+        estimate = await service.estimate_task(
+            public_model_id=request.model,
+            prompt=request.prompt,
+            media=[item.model_dump(exclude_none=True) for item in request.media],
+            mode=request.mode,
+            aspect_ratio=request.aspect_ratio,
+            orientation=request.orientation,
+            duration=request.duration,
+            resolution=request.resolution,
+            image_size=request.image_size,
+            num_outputs=request.num_outputs,
+            seed=request.seed,
+            sound=request.sound,
+            fps=request.fps,
+            voice_id=request.voice_id,
+            multi_shot=request.multi_shot,
+            upscale=request.upscale,
+            options=request.options,
+        )
+        return {"success": True, "estimate": estimate}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 @router.post("/v1/runway/tasks")
@@ -2277,11 +2393,19 @@ async def create_runway_task(
             public_model_id=request.model,
             prompt=request.prompt,
             media=[item.model_dump(exclude_none=True) for item in request.media],
+            mode=request.mode,
             aspect_ratio=request.aspect_ratio,
+            orientation=request.orientation,
             duration=request.duration,
+            resolution=request.resolution,
             image_size=request.image_size,
             num_outputs=request.num_outputs,
             seed=request.seed,
+            sound=request.sound,
+            fps=request.fps,
+            voice_id=request.voice_id,
+            multi_shot=request.multi_shot,
+            upscale=request.upscale,
             options=request.options,
             api_key_id=auth_ctx.key_id,
         )
@@ -2305,6 +2429,24 @@ async def get_runway_task(
         raise HTTPException(status_code=404, detail="Runway job not found")
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
+
+
+@router.post("/v1/runway/tasks/{job_id}/cancel")
+async def cancel_runway_task(
+    job_id: str,
+    auth_ctx: AuthContext = Depends(verify_api_key_flexible),
+):
+    _require_runway_scope(auth_ctx)
+    service = _ensure_runway_service()
+    try:
+        task = await service.cancel_task(job_id, api_key_id=auth_ctx.key_id)
+        return service.task_to_public_dict(task)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Runway job not found")
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 @router.post("/v1/chat/completions")

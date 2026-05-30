@@ -1,5 +1,6 @@
 """FastAPI application initialization"""
 import os
+import sys
 from datetime import datetime, timezone
 
 from fastapi import FastAPI
@@ -26,6 +27,19 @@ from .api import routes, admin
 from .core.api_key_manager import ApiKeyManager
 from .core.auth import set_api_key_manager
 from .core.logger import debug_logger
+
+
+def _configure_stdio() -> None:
+    for stream in (getattr(sys, "stdout", None), getattr(sys, "stderr", None)):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+
+
+_configure_stdio()
 
 
 def _normalize_host(host: str) -> str:

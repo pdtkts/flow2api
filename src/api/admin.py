@@ -810,8 +810,18 @@ class RunwayModelRequest(BaseModel):
     display_name: str = ""
     kind: str = "image"
     task_type: str
+    builder_key: str = ""
     default_options: str = "{}"
     request_mapping: str = "{}"
+    capability_schema: str = "{}"
+    media_roles: str = "[]"
+    supported_modes: str = "[]"
+    limits: str = "{}"
+    feature_flags: str = "[]"
+    cost_feature: str = ""
+    source_version: str = ""
+    live_available: bool = True
+    disabled_reason: str = ""
     is_enabled: bool = True
 
 
@@ -820,8 +830,18 @@ class RunwayModelUpdateRequest(BaseModel):
     display_name: Optional[str] = None
     kind: Optional[str] = None
     task_type: Optional[str] = None
+    builder_key: Optional[str] = None
     default_options: Optional[str] = None
     request_mapping: Optional[str] = None
+    capability_schema: Optional[str] = None
+    media_roles: Optional[str] = None
+    supported_modes: Optional[str] = None
+    limits: Optional[str] = None
+    feature_flags: Optional[str] = None
+    cost_feature: Optional[str] = None
+    source_version: Optional[str] = None
+    live_available: Optional[bool] = None
+    disabled_reason: Optional[str] = None
     is_enabled: Optional[bool] = None
 
 
@@ -1806,6 +1826,18 @@ def _validate_json_object_text(raw: str, field_name: str) -> str:
     return json.dumps(parsed, ensure_ascii=False)
 
 
+def _validate_json_text(raw: str, field_name: str, fallback: str, expected_type) -> str:
+    text = (raw or "").strip() or fallback
+    try:
+        parsed = json.loads(text)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"{field_name} must be valid JSON") from exc
+    if not isinstance(parsed, expected_type):
+        label = "array" if expected_type is list else "object"
+        raise HTTPException(status_code=400, detail=f"{field_name} must be a JSON {label}")
+    return json.dumps(parsed, ensure_ascii=False)
+
+
 def _runway_account_payload(account) -> Dict[str, Any]:
     return {
         "id": account.id,
@@ -1831,8 +1863,19 @@ def _runway_model_payload(model) -> Dict[str, Any]:
         "display_name": model.display_name,
         "kind": model.kind,
         "task_type": model.task_type,
+        "builder_key": model.builder_key,
         "default_options": model.default_options,
         "request_mapping": model.request_mapping,
+        "capability_schema": model.capability_schema,
+        "media_roles": model.media_roles,
+        "supported_modes": model.supported_modes,
+        "limits": model.limits,
+        "feature_flags": model.feature_flags,
+        "cost_feature": model.cost_feature,
+        "source_version": model.source_version,
+        "live_available": bool(model.live_available),
+        "disabled_reason": model.disabled_reason or "",
+        "last_synced_at": model.last_synced_at.isoformat() if model.last_synced_at else None,
         "is_enabled": bool(model.is_enabled),
         "created_at": model.created_at.isoformat() if model.created_at else None,
         "updated_at": model.updated_at.isoformat() if model.updated_at else None,
@@ -1965,8 +2008,8 @@ async def upsert_runway_model(
     public_id = request.public_model_id.strip()
     if not public_id.startswith("runway-"):
         raise HTTPException(status_code=400, detail="Runway public model id must start with runway-")
-    if request.kind not in {"image", "video", "upscale"}:
-        raise HTTPException(status_code=400, detail="kind must be image, video, or upscale")
+    if request.kind not in {"image", "video", "audio", "upscale"}:
+        raise HTTPException(status_code=400, detail="kind must be image, video, audio, or upscale")
     if not request.task_type.strip():
         raise HTTPException(status_code=400, detail="task_type is required")
     await db.upsert_runway_model(
@@ -1974,8 +2017,18 @@ async def upsert_runway_model(
         display_name=request.display_name.strip() or public_id,
         kind=request.kind,
         task_type=request.task_type.strip(),
+        builder_key=request.builder_key.strip(),
         default_options=_validate_json_object_text(request.default_options, "default_options"),
         request_mapping=_validate_json_object_text(request.request_mapping, "request_mapping"),
+        capability_schema=_validate_json_object_text(request.capability_schema, "capability_schema"),
+        media_roles=_validate_json_text(request.media_roles, "media_roles", "[]", list),
+        supported_modes=_validate_json_text(request.supported_modes, "supported_modes", "[]", list),
+        limits=_validate_json_object_text(request.limits, "limits"),
+        feature_flags=_validate_json_text(request.feature_flags, "feature_flags", "[]", list),
+        cost_feature=request.cost_feature.strip(),
+        source_version=request.source_version.strip(),
+        live_available=bool(request.live_available),
+        disabled_reason=request.disabled_reason.strip(),
         is_enabled=request.is_enabled,
     )
     model = await db.get_runway_model(public_id)
@@ -1996,13 +2049,14 @@ async def update_runway_model(
     if not public_id.startswith("runway-"):
         raise HTTPException(status_code=400, detail="Runway public model id must start with runway-")
     kind = (request.kind if request.kind is not None else existing.kind).strip()
-    if kind not in {"image", "video", "upscale"}:
-        raise HTTPException(status_code=400, detail="kind must be image, video, or upscale")
+    if kind not in {"image", "video", "audio", "upscale"}:
+        raise HTTPException(status_code=400, detail="kind must be image, video, audio, or upscale")
     await db.upsert_runway_model(
         public_model_id=public_id,
         display_name=(request.display_name if request.display_name is not None else existing.display_name).strip() or public_id,
         kind=kind,
         task_type=(request.task_type if request.task_type is not None else existing.task_type).strip(),
+        builder_key=(request.builder_key if request.builder_key is not None else existing.builder_key).strip(),
         default_options=_validate_json_object_text(
             request.default_options if request.default_options is not None else existing.default_options,
             "default_options",
@@ -2011,6 +2065,36 @@ async def update_runway_model(
             request.request_mapping if request.request_mapping is not None else existing.request_mapping,
             "request_mapping",
         ),
+        capability_schema=_validate_json_object_text(
+            request.capability_schema if request.capability_schema is not None else existing.capability_schema,
+            "capability_schema",
+        ),
+        media_roles=_validate_json_text(
+            request.media_roles if request.media_roles is not None else existing.media_roles,
+            "media_roles",
+            "[]",
+            list,
+        ),
+        supported_modes=_validate_json_text(
+            request.supported_modes if request.supported_modes is not None else existing.supported_modes,
+            "supported_modes",
+            "[]",
+            list,
+        ),
+        limits=_validate_json_object_text(
+            request.limits if request.limits is not None else existing.limits,
+            "limits",
+        ),
+        feature_flags=_validate_json_text(
+            request.feature_flags if request.feature_flags is not None else existing.feature_flags,
+            "feature_flags",
+            "[]",
+            list,
+        ),
+        cost_feature=(request.cost_feature if request.cost_feature is not None else existing.cost_feature).strip(),
+        source_version=(request.source_version if request.source_version is not None else existing.source_version).strip(),
+        live_available=bool(request.live_available if request.live_available is not None else existing.live_available),
+        disabled_reason=(request.disabled_reason if request.disabled_reason is not None else existing.disabled_reason).strip(),
         is_enabled=bool(request.is_enabled if request.is_enabled is not None else existing.is_enabled),
     )
     if public_id != existing.public_model_id:
@@ -2030,7 +2114,8 @@ async def delete_runway_model(
 
 @router.post("/api/admin/runway/models/sync")
 async def sync_runway_models(token: str = Depends(verify_admin_token)):
-    count = await db.sync_default_runway_models()
+    service = _require_runway_service()
+    count = await service.sync_models()
     return {
         "success": True,
         "synced": count,

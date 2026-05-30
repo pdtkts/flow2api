@@ -7,6 +7,7 @@ from datetime import date, datetime
 from typing import Optional, List, Dict, Any, Tuple
 from pathlib import Path
 from .config import DEFAULT_YESCAPTCHA_TASK_TYPE, get_runtime_data_dir, normalize_yescaptcha_task_type
+from .runway_manifest import RUNWAY_MANIFEST_VERSION, RUNWAY_MODEL_MANIFEST
 from .models import (
     Token,
     TokenStats,
@@ -47,67 +48,7 @@ def derive_adobe_ints_from_scopes_csv(scopes_csv: str) -> Tuple[int, int, int]:
     )
 
 
-RUNWAY_DEFAULT_MODELS = [
-    {
-        "public_model_id": "runway-gemini-3-1-flash-image",
-        "display_name": "Runway Gemini 3.1 Flash Image",
-        "kind": "image",
-        "task_type": "gemini_3_1_flash_image",
-        "default_options": {
-            "model": "gemini-3.1-flash-image-preview",
-            "aspect_ratio": "21:9",
-            "num_images": 1,
-            "image_size": "4K",
-            "exploreMode": False,
-            "creationSource": "tool-mode",
-        },
-        "request_mapping": {
-            "prompt": "text_prompt",
-            "aspect_ratio": "aspect_ratio",
-            "image_size": "image_size",
-            "num_outputs": "num_images",
-            "media": "reference_images",
-        },
-    },
-    {
-        "public_model_id": "runway-gen4-image",
-        "display_name": "Runway Gen-4 Image",
-        "kind": "image",
-        "task_type": "gen4_image",
-        "default_options": {
-            "model": "gen4_image",
-            "aspect_ratio": "16:9",
-            "num_images": 1,
-            "exploreMode": False,
-            "creationSource": "tool-mode",
-        },
-        "request_mapping": {
-            "prompt": "text_prompt",
-            "aspect_ratio": "aspect_ratio",
-            "num_outputs": "num_images",
-            "media": "reference_images",
-        },
-    },
-    {
-        "public_model_id": "runway-gen45-video",
-        "display_name": "Runway Gen-4.5 Video",
-        "kind": "video",
-        "task_type": "gen4_5",
-        "default_options": {
-            "model": "gen4.5",
-            "ratio": "1280:720",
-            "duration": 5,
-            "exploreMode": False,
-            "creationSource": "tool-mode",
-        },
-        "request_mapping": {
-            "prompt": "text_prompt",
-            "aspect_ratio": "ratio",
-            "duration": "duration",
-            "media": "prompt_image",
-        },
-    },
-]
+RUNWAY_DEFAULT_MODELS = RUNWAY_MODEL_MANIFEST
 
 
 class Database:
@@ -205,8 +146,19 @@ class Database:
                 display_name TEXT DEFAULT '',
                 kind TEXT NOT NULL DEFAULT 'image',
                 task_type TEXT NOT NULL,
+                builder_key TEXT DEFAULT '',
                 default_options TEXT DEFAULT '{}',
                 request_mapping TEXT DEFAULT '{}',
+                capability_schema TEXT DEFAULT '{}',
+                media_roles TEXT DEFAULT '[]',
+                supported_modes TEXT DEFAULT '[]',
+                limits TEXT DEFAULT '{}',
+                feature_flags TEXT DEFAULT '[]',
+                cost_feature TEXT DEFAULT '',
+                source_version TEXT DEFAULT '',
+                live_available BOOLEAN DEFAULT 1,
+                disabled_reason TEXT DEFAULT '',
+                last_synced_at TIMESTAMP,
                 is_enabled BOOLEAN DEFAULT 1,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -235,22 +187,54 @@ class Database:
                 FOREIGN KEY (api_key_id) REFERENCES api_keys(id)
             )
         """)
+        runway_model_columns = [
+            ("builder_key", "TEXT DEFAULT ''"),
+            ("capability_schema", "TEXT DEFAULT '{}'"),
+            ("media_roles", "TEXT DEFAULT '[]'"),
+            ("supported_modes", "TEXT DEFAULT '[]'"),
+            ("limits", "TEXT DEFAULT '{}'"),
+            ("feature_flags", "TEXT DEFAULT '[]'"),
+            ("cost_feature", "TEXT DEFAULT ''"),
+            ("source_version", "TEXT DEFAULT ''"),
+            ("live_available", "BOOLEAN DEFAULT 1"),
+            ("disabled_reason", "TEXT DEFAULT ''"),
+            ("last_synced_at", "TIMESTAMP"),
+        ]
+        for column_name, column_type in runway_model_columns:
+            if not await self._column_exists(db, "runway_models", column_name):
+                await db.execute(f"ALTER TABLE runway_models ADD COLUMN {column_name} {column_type}")
         await db.execute("INSERT OR IGNORE INTO runway_config (id) VALUES (1)")
         for model in RUNWAY_DEFAULT_MODELS:
+            live_available = model.get("builder_key") != "unsupported"
+            disabled_reason = model.get("disabled_reason") or ("" if live_available else "Exact task builder is not available")
             await db.execute(
                 """
                 INSERT OR IGNORE INTO runway_models (
-                    public_model_id, display_name, kind, task_type, default_options, request_mapping, is_enabled
+                    public_model_id, display_name, kind, task_type, builder_key,
+                    default_options, request_mapping, capability_schema, media_roles,
+                    supported_modes, limits, feature_flags, cost_feature, source_version,
+                    live_available, disabled_reason, last_synced_at, is_enabled
                 )
-                VALUES (?, ?, ?, ?, ?, ?, 1)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)
                 """,
                 (
                     model["public_model_id"],
                     model["display_name"],
                     model["kind"],
                     model["task_type"],
+                    model.get("builder_key", ""),
                     json.dumps(model["default_options"], ensure_ascii=False),
-                    json.dumps(model["request_mapping"], ensure_ascii=False),
+                    json.dumps(model.get("request_mapping", {}), ensure_ascii=False),
+                    json.dumps(model.get("option_schema", {}), ensure_ascii=False),
+                    json.dumps(model.get("media_roles", []), ensure_ascii=False),
+                    json.dumps(model.get("supported_modes", []), ensure_ascii=False),
+                    json.dumps(model.get("limits", {}), ensure_ascii=False),
+                    json.dumps(model.get("feature_flags", []), ensure_ascii=False),
+                    model.get("cost_feature", ""),
+                    RUNWAY_MANIFEST_VERSION,
+                    int(bool(live_available)),
+                    disabled_reason,
+                    int(bool(model.get("default_enabled", True) and live_available)),
                 ),
             )
 
@@ -2314,7 +2298,7 @@ class Database:
         query = "SELECT * FROM runway_models"
         params: tuple[Any, ...] = ()
         if enabled_only:
-            query += " WHERE is_enabled = 1"
+            query += " WHERE is_enabled = 1 AND live_available = 1"
         query += " ORDER BY is_enabled DESC, public_model_id ASC"
         async with self._connect() as db:
             db.row_factory = aiosqlite.Row
@@ -2339,8 +2323,18 @@ class Database:
         display_name: str,
         kind: str,
         task_type: str,
-        default_options: str,
+        builder_key: str = "",
+        default_options: str = "{}",
         request_mapping: str = "{}",
+        capability_schema: str = "{}",
+        media_roles: str = "[]",
+        supported_modes: str = "[]",
+        limits: str = "{}",
+        feature_flags: str = "[]",
+        cost_feature: str = "",
+        source_version: str = "",
+        live_available: bool = True,
+        disabled_reason: str = "",
         is_enabled: bool = True,
     ) -> int:
         public_id = (public_model_id or "").strip()
@@ -2348,16 +2342,29 @@ class Database:
             cursor = await db.execute(
                 """
                 INSERT INTO runway_models (
-                    public_model_id, display_name, kind, task_type,
-                    default_options, request_mapping, is_enabled
+                    public_model_id, display_name, kind, task_type, builder_key,
+                    default_options, request_mapping, capability_schema, media_roles,
+                    supported_modes, limits, feature_flags, cost_feature, source_version,
+                    live_available, disabled_reason, last_synced_at, is_enabled
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)
                 ON CONFLICT(public_model_id) DO UPDATE SET
                     display_name = excluded.display_name,
                     kind = excluded.kind,
                     task_type = excluded.task_type,
+                    builder_key = excluded.builder_key,
                     default_options = excluded.default_options,
                     request_mapping = excluded.request_mapping,
+                    capability_schema = excluded.capability_schema,
+                    media_roles = excluded.media_roles,
+                    supported_modes = excluded.supported_modes,
+                    limits = excluded.limits,
+                    feature_flags = excluded.feature_flags,
+                    cost_feature = excluded.cost_feature,
+                    source_version = excluded.source_version,
+                    live_available = excluded.live_available,
+                    disabled_reason = excluded.disabled_reason,
+                    last_synced_at = CURRENT_TIMESTAMP,
                     is_enabled = excluded.is_enabled,
                     updated_at = CURRENT_TIMESTAMP
                 """,
@@ -2366,8 +2373,18 @@ class Database:
                     (display_name or "").strip(),
                     (kind or "image").strip(),
                     (task_type or "").strip(),
+                    (builder_key or "").strip(),
                     default_options or "{}",
                     request_mapping or "{}",
+                    capability_schema or "{}",
+                    media_roles or "[]",
+                    supported_modes or "[]",
+                    limits or "{}",
+                    feature_flags or "[]",
+                    (cost_feature or "").strip(),
+                    (source_version or "").strip(),
+                    int(bool(live_available)),
+                    disabled_reason or "",
                     int(bool(is_enabled)),
                 ),
             )
@@ -2382,17 +2399,48 @@ class Database:
             await db.execute("DELETE FROM runway_models WHERE id = ?", (model_id,))
             await db.commit()
 
-    async def sync_default_runway_models(self) -> int:
+    async def sync_default_runway_models(self, live_features: Optional[Dict[str, Any]] = None) -> int:
         count = 0
+        live_features = live_features if isinstance(live_features, dict) else {}
+        disabled_task_types = set()
+        for key in ("disabledTaskTypes", "disabled_task_types", "disabledTasks", "disabled_tasks"):
+            value = live_features.get(key)
+            if isinstance(value, list):
+                disabled_task_types.update(str(item) for item in value)
+        permitted = live_features.get("permitted")
+        if isinstance(permitted, dict):
+            for key, value in permitted.items():
+                if value is False:
+                    disabled_task_types.add(str(key))
         for model in RUNWAY_DEFAULT_MODELS:
+            existing = await self.get_runway_model(model["public_model_id"])
+            builder_available = model.get("builder_key") != "unsupported"
+            feature_flags = [str(item) for item in model.get("feature_flags", [])]
+            disabled_by_features = bool(disabled_task_types.intersection(feature_flags + [str(model.get("task_type", ""))]))
+            live_available = bool(builder_available and not disabled_by_features)
+            disabled_reason = str(model.get("disabled_reason") or "")
+            if disabled_by_features:
+                disabled_reason = "Disabled by the active Runway account feature set"
+            elif not builder_available and not disabled_reason:
+                disabled_reason = "Exact task builder is not available"
             await self.upsert_runway_model(
                 public_model_id=model["public_model_id"],
                 display_name=model["display_name"],
                 kind=model["kind"],
                 task_type=model["task_type"],
+                builder_key=model.get("builder_key", ""),
                 default_options=json.dumps(model["default_options"], ensure_ascii=False),
-                request_mapping=json.dumps(model["request_mapping"], ensure_ascii=False),
-                is_enabled=True,
+                request_mapping=json.dumps(model.get("request_mapping", {}), ensure_ascii=False),
+                capability_schema=json.dumps(model.get("option_schema", {}), ensure_ascii=False),
+                media_roles=json.dumps(model.get("media_roles", []), ensure_ascii=False),
+                supported_modes=json.dumps(model.get("supported_modes", []), ensure_ascii=False),
+                limits=json.dumps(model.get("limits", {}), ensure_ascii=False),
+                feature_flags=json.dumps(model.get("feature_flags", []), ensure_ascii=False),
+                cost_feature=model.get("cost_feature", ""),
+                source_version=RUNWAY_MANIFEST_VERSION,
+                live_available=live_available,
+                disabled_reason=disabled_reason,
+                is_enabled=bool(existing.is_enabled) if existing else bool(model.get("default_enabled", True) and live_available),
             )
             count += 1
         return count
