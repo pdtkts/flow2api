@@ -795,6 +795,8 @@ class RunwayAccountRequest(BaseModel):
     label: str = ""
     raw_credential: str = ""
     is_active: bool = True
+    workspace_id: Optional[str] = None
+    team_id: Optional[str] = None
     concurrency_limit: int = 1
 
 
@@ -802,7 +804,13 @@ class RunwayAccountUpdateRequest(BaseModel):
     label: Optional[str] = None
     raw_credential: Optional[str] = None
     is_active: Optional[bool] = None
+    workspace_id: Optional[str] = None
+    team_id: Optional[str] = None
     concurrency_limit: Optional[int] = None
+
+
+class RunwayTeamsRequest(BaseModel):
+    raw_credential: str = ""
 
 
 class RunwayModelRequest(BaseModel):
@@ -1856,6 +1864,13 @@ def _runway_account_payload(account) -> Dict[str, Any]:
     }
 
 
+def _clean_optional_text(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
 def _runway_model_payload(model) -> Dict[str, Any]:
     return {
         "id": model.id,
@@ -1901,6 +1916,21 @@ async def get_runway_admin_config(token: str = Depends(verify_admin_token)):
     }
 
 
+@router.post("/api/admin/runway/accounts/teams")
+async def get_runway_teams_for_credential(
+    request: RunwayTeamsRequest,
+    token: str = Depends(verify_admin_token),
+):
+    if not request.raw_credential.strip():
+        raise HTTPException(status_code=400, detail="Runway credential is required")
+    service = _require_runway_service()
+    try:
+        result = await service.get_teams_for_credential(request.raw_credential.strip())
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"success": True, **result}
+
+
 @router.post("/api/admin/runway/config")
 async def update_runway_admin_config(
     request: RunwayConfigUpdateRequest,
@@ -1933,12 +1963,16 @@ async def create_runway_account(
     if not request.raw_credential.strip():
         raise HTTPException(status_code=400, detail="Runway credential is required")
     meta = RunwayService.describe_credential(request.raw_credential)
+    selected_workspace_id = _clean_optional_text(request.workspace_id)
+    selected_team_id = _clean_optional_text(request.team_id)
+    workspace_id = selected_workspace_id or _clean_optional_text(str(meta.get("workspace_id") or ""))
+    team_id = selected_team_id or selected_workspace_id or _clean_optional_text(str(meta.get("team_id") or ""))
     account_id = await db.create_runway_account(
         label=request.label.strip() or "Runway account",
         raw_credential=request.raw_credential.strip(),
         is_active=request.is_active,
-        workspace_id=str(meta.get("workspace_id") or "") or None,
-        team_id=str(meta.get("team_id") or "") or None,
+        workspace_id=workspace_id,
+        team_id=team_id,
         concurrency_limit=max(-1, int(request.concurrency_limit or 1)),
         last_status=str(meta.get("status") or ""),
         last_error=str(meta.get("error") or ""),
@@ -1962,17 +1996,38 @@ async def update_runway_account(
     if request.raw_credential is not None:
         updates["raw_credential"] = request.raw_credential.strip()
         meta = RunwayService.describe_credential(request.raw_credential)
-        updates["workspace_id"] = str(meta.get("workspace_id") or "") or None
-        updates["team_id"] = str(meta.get("team_id") or "") or None
+        if request.workspace_id is None:
+            updates["workspace_id"] = _clean_optional_text(str(meta.get("workspace_id") or ""))
+        if request.team_id is None:
+            updates["team_id"] = _clean_optional_text(str(meta.get("team_id") or ""))
         updates["last_status"] = str(meta.get("status") or "")
         updates["last_error"] = str(meta.get("error") or "")
     if request.is_active is not None:
         updates["is_active"] = request.is_active
+    if request.workspace_id is not None:
+        updates["workspace_id"] = _clean_optional_text(request.workspace_id)
+    if request.team_id is not None:
+        updates["team_id"] = _clean_optional_text(request.team_id)
     if request.concurrency_limit is not None:
         updates["concurrency_limit"] = max(-1, int(request.concurrency_limit))
     await db.update_runway_account(account_id, **updates)
     account = await db.get_runway_account(account_id)
     return {"success": True, "account": _runway_account_payload(account)}
+
+
+@router.get("/api/admin/runway/accounts/{account_id}/teams")
+async def get_runway_account_teams(
+    account_id: int,
+    token: str = Depends(verify_admin_token),
+):
+    service = _require_runway_service()
+    try:
+        result = await service.get_account_teams(account_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"success": True, **result}
 
 
 @router.delete("/api/admin/runway/accounts/{account_id}")

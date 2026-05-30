@@ -110,7 +110,7 @@ class RunwayService:
             raise ValueError("Could not find a Runway JWT in the credential")
 
         payload = cls._decode_jwt_payload(token)
-        workspace_id = payload.get("workspaceId") or payload.get("workspace_id") or payload.get("id")
+        workspace_id = payload.get("workspaceId") or payload.get("workspace_id") or payload.get("id") or payload.get("sub")
         team_id = payload.get("teamId") or payload.get("team_id") or workspace_id
         return RunwayCredential(
             bearer_token=token,
@@ -137,18 +137,25 @@ class RunwayService:
             }
 
     @staticmethod
-    def build_headers(credential: RunwayCredential, workspace_id: Optional[str] = None) -> Dict[str, str]:
+    def build_headers(
+        credential: RunwayCredential,
+        workspace_id: Optional[str] = None,
+        *,
+        require_workspace: bool = True,
+    ) -> Dict[str, str]:
         wid = (workspace_id or credential.workspace_id or "").strip()
-        if not wid:
+        if not wid and require_workspace:
             raise ValueError("Runway workspace id is required")
-        return {
+        headers = {
             "Authorization": f"Bearer {credential.bearer_token}",
             "Accept": "application/json",
             "Content-Type": "application/json",
             "Origin": "https://app.runwayml.com",
             "Referer": "https://app.runwayml.com/",
-            "x-runway-workspace": wid,
         }
+        if wid:
+            headers["x-runway-workspace"] = wid
+        return headers
 
     async def _request_proxy(self) -> Optional[str]:
         if not self.proxy_manager:
@@ -215,6 +222,80 @@ class RunwayService:
             if account.is_active:
                 return account
         return None
+
+    @staticmethod
+    def _normalize_teams_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+        roles = {
+            str(item.get("teamId")): str(item.get("role") or "")
+            for item in payload.get("roles", [])
+            if isinstance(item, dict) and item.get("teamId") is not None
+        }
+        organizations = {
+            str(item.get("id")): item
+            for item in payload.get("organizations", [])
+            if isinstance(item, dict) and item.get("id") is not None
+        }
+
+        teams: List[Dict[str, Any]] = []
+        for item in payload.get("teams", []):
+            if not isinstance(item, dict) or item.get("id") is None:
+                continue
+            team_id = str(item.get("id"))
+            organization_id = str(item.get("organizationId") or "")
+            organization = organizations.get(organization_id, {})
+            teams.append(
+                {
+                    "id": team_id,
+                    "username": str(item.get("username") or ""),
+                    "team_name": str(item.get("teamName") or item.get("username") or f"Team {team_id}"),
+                    "first_name": str(item.get("firstName") or ""),
+                    "last_name": str(item.get("lastName") or ""),
+                    "email": str(item.get("email") or ""),
+                    "role": roles.get(team_id, ""),
+                    "current_plan": str(item.get("currentPlan") or ""),
+                    "plan_expiration": item.get("planExpiration"),
+                    "gpu_credits": item.get("gpuCredits") or 0,
+                    "organization_id": organization_id,
+                    "organization_name": str(organization.get("name") or ""),
+                }
+            )
+
+        return {
+            "teams": teams,
+            "organizations": [
+                {"id": str(item.get("id")), "name": str(item.get("name") or "")}
+                for item in payload.get("organizations", [])
+                if isinstance(item, dict) and item.get("id") is not None
+            ],
+        }
+
+    async def get_teams_for_credential(self, raw_credential: str, *, base_url: Optional[str] = None) -> Dict[str, Any]:
+        credential = self.normalize_credential(raw_credential)
+        config = await self.db.get_runway_config()
+        headers = self.build_headers(credential, workspace_id=credential.workspace_id, require_workspace=False)
+        proxy = await self._request_proxy()
+        url = f"{(base_url or config.base_url).rstrip('/')}/teams"
+        async with AsyncSession() as session:
+            response = await session.request(
+                "GET",
+                url,
+                headers=headers,
+                timeout=30,
+                proxy=proxy,
+            )
+        if response.status_code >= 400:
+            raise RuntimeError(f"Runway GET /teams failed HTTP {response.status_code}: {response.text[:500]}")
+        payload = response.json() if response.text else {}
+        normalized = self._normalize_teams_payload(payload if isinstance(payload, dict) else {})
+        normalized["workspace_id"] = credential.workspace_id or ""
+        normalized["team_id"] = credential.team_id or ""
+        return normalized
+
+    async def get_account_teams(self, account_id: int) -> Dict[str, Any]:
+        account = await self.db.get_runway_account(account_id)
+        if not account:
+            raise ValueError("Runway account not found")
+        return await self.get_teams_for_credential(account.raw_credential)
 
     @staticmethod
     def _extract_upstream_task_id(payload: Dict[str, Any]) -> str:

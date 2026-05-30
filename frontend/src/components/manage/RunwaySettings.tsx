@@ -54,6 +54,21 @@ type RunwayAccount = {
   last_error: string
 }
 
+type RunwayTeam = {
+  id: string
+  username: string
+  team_name: string
+  first_name: string
+  last_name: string
+  email: string
+  role: string
+  current_plan: string
+  plan_expiration?: string | null
+  gpu_credits: number
+  organization_id: string
+  organization_name: string
+}
+
 type RunwayModelKind = "image" | "video" | "audio" | "upscale"
 type KindFilter = "all" | RunwayModelKind | "blocked"
 type StatusFilter = "all" | "enabled" | "disabled" | "available" | "blocked"
@@ -85,6 +100,8 @@ type RunwayAccountDraft = {
   label: string
   raw_credential: string
   is_active: boolean
+  workspace_id: string
+  team_id: string
   concurrency_limit: string
 }
 
@@ -110,6 +127,8 @@ const EMPTY_ACCOUNT: RunwayAccountDraft = {
   label: "",
   raw_credential: "",
   is_active: true,
+  workspace_id: "",
+  team_id: "",
   concurrency_limit: "1",
 }
 
@@ -212,6 +231,17 @@ function StatBox({ label, value }: { label: string; value: string | number }) {
   )
 }
 
+function teamOptionLabel(team: RunwayTeam) {
+  const pieces = [
+    team.team_name || team.username || `Team ${team.id}`,
+    team.username ? `@${team.username}` : "",
+    team.role,
+    team.current_plan,
+    `${Number(team.gpu_credits || 0).toLocaleString()} credits`,
+  ].filter(Boolean)
+  return `${pieces.join(" - ")} (${team.id})`
+}
+
 function JsonEditor({
   label,
   value,
@@ -285,6 +315,8 @@ export function RunwaySettings({ active }: { active: boolean }) {
   const [models, setModels] = useState<RunwayModel[]>([])
   const [accountOpen, setAccountOpen] = useState(false)
   const [accountDraft, setAccountDraft] = useState<RunwayAccountDraft>(EMPTY_ACCOUNT)
+  const [accountTeams, setAccountTeams] = useState<RunwayTeam[]>([])
+  const [teamsLoading, setTeamsLoading] = useState(false)
   const [modelOpen, setModelOpen] = useState(false)
   const [modelDraft, setModelDraft] = useState<RunwayModelDraft>(EMPTY_MODEL)
   const [modelSearch, setModelSearch] = useState("")
@@ -338,6 +370,11 @@ export function RunwaySettings({ active }: { active: boolean }) {
     })
   }, [kindFilter, modelSearch, models, statusFilter])
 
+  const selectedAccountTeam = useMemo(() => {
+    const selectedId = accountDraft.team_id || accountDraft.workspace_id
+    return accountTeams.find((team) => team.id === selectedId)
+  }, [accountDraft.team_id, accountDraft.workspace_id, accountTeams])
+
   const saveConfig = async () => {
     if (!token) return
     setBusy(true)
@@ -365,6 +402,7 @@ export function RunwaySettings({ active }: { active: boolean }) {
 
   const openAddAccount = () => {
     setAccountDraft({ ...EMPTY_ACCOUNT })
+    setAccountTeams([])
     setAccountOpen(true)
   }
 
@@ -374,9 +412,51 @@ export function RunwaySettings({ active }: { active: boolean }) {
       label: account.label,
       raw_credential: account.raw_credential,
       is_active: account.is_active,
+      workspace_id: account.workspace_id || "",
+      team_id: account.team_id || "",
       concurrency_limit: String(account.concurrency_limit || 1),
     })
+    setAccountTeams([])
     setAccountOpen(true)
+  }
+
+  const loadAccountTeams = async () => {
+    if (!token) return
+    const credential = accountDraft.raw_credential.trim()
+    if (!credential) return toast.error("Credential required before loading teams")
+    setTeamsLoading(true)
+    try {
+      const r = await adminFetch("/api/admin/runway/accounts/teams", token, {
+        method: "POST",
+        body: JSON.stringify({ raw_credential: credential }),
+      })
+      if (!r) return
+      const d = await r.json()
+      if (!d.success) {
+        toast.error(d.detail || "Could not load Runway teams")
+        return
+      }
+      const teams = (Array.isArray(d.teams) ? d.teams : []) as RunwayTeam[]
+      setAccountTeams(teams)
+      if (!teams.length) {
+        toast.info("No teams were returned for this credential")
+        return
+      }
+      const currentId = accountDraft.team_id || accountDraft.workspace_id
+      const fallbackId = String(d.team_id || d.workspace_id || "")
+      const selected =
+        teams.find((team) => team.id === currentId) ||
+        teams.find((team) => team.id === fallbackId) ||
+        teams[0]
+      if (selected?.id) {
+        setAccountDraft((draft) => ({ ...draft, workspace_id: selected.id, team_id: selected.id }))
+      }
+      toast.success(`Loaded ${teams.length} Runway team${teams.length === 1 ? "" : "s"}`)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not load Runway teams")
+    } finally {
+      setTeamsLoading(false)
+    }
   }
 
   const saveAccount = async () => {
@@ -388,6 +468,8 @@ export function RunwaySettings({ active }: { active: boolean }) {
         label: accountDraft.label.trim() || "Runway account",
         raw_credential: accountDraft.raw_credential.trim(),
         is_active: accountDraft.is_active,
+        workspace_id: accountDraft.workspace_id.trim(),
+        team_id: accountDraft.team_id.trim(),
         concurrency_limit: Number(accountDraft.concurrency_limit) || 1,
       }
       const r = await adminFetch(
@@ -806,7 +888,7 @@ export function RunwaySettings({ active }: { active: boolean }) {
       </Card>
 
       <Dialog open={accountOpen} onOpenChange={setAccountOpen}>
-        <DialogContent className="max-w-2xl">
+        <DialogContent className="max-h-[92vh] max-w-2xl overflow-y-auto">
           <DialogHeader>
             <DialogTitle>{accountDraft.id ? "Edit Runway Account" : "Add Runway Account"}</DialogTitle>
             <DialogDescription>Credentials stay hidden in the account table and are only editable here.</DialogDescription>
@@ -842,6 +924,78 @@ export function RunwaySettings({ active }: { active: boolean }) {
                 spellCheck={false}
                 onChange={(event) => setAccountDraft((draft) => ({ ...draft, raw_credential: event.target.value }))}
               />
+            </div>
+            <div className="space-y-3 rounded-md border bg-muted/20 p-3">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <Label>Team / workspace</Label>
+                  <div className="mt-1 text-xs text-muted-foreground">
+                    Load the teams available to this Runway account, then choose which one Flow2API should use.
+                  </div>
+                </div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => void loadAccountTeams()}
+                  disabled={teamsLoading || !accountDraft.raw_credential.trim()}
+                >
+                  <RefreshCw className={`mr-2 h-4 w-4 ${teamsLoading ? "animate-spin" : ""}`} />
+                  {teamsLoading ? "Loading" : "Load teams"}
+                </Button>
+              </div>
+              {accountTeams.length ? (
+                <div className="space-y-3">
+                  <Select
+                    value={accountDraft.team_id || accountDraft.workspace_id}
+                    onValueChange={(id) => setAccountDraft((draft) => ({ ...draft, workspace_id: id, team_id: id }))}
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="Select Runway team" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {accountTeams.map((team) => (
+                        <SelectItem key={team.id} value={team.id}>
+                          {teamOptionLabel(team)}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  {selectedAccountTeam ? (
+                    <div className="flex flex-wrap gap-2 text-xs">
+                      <Badge variant="secondary">{selectedAccountTeam.role || "role unknown"}</Badge>
+                      {selectedAccountTeam.current_plan ? <Badge variant="outline">{selectedAccountTeam.current_plan}</Badge> : null}
+                      <Badge variant="outline">{Number(selectedAccountTeam.gpu_credits || 0).toLocaleString()} credits</Badge>
+                      {selectedAccountTeam.organization_name ? (
+                        <Badge variant="outline">{selectedAccountTeam.organization_name}</Badge>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </div>
+              ) : (
+                <div className="text-xs text-muted-foreground">
+                  No teams loaded yet. If you do not load teams, Flow2API will fall back to the ID decoded from the JWT.
+                </div>
+              )}
+              <div className="grid gap-3 md:grid-cols-2">
+                <div className="space-y-2">
+                  <Label>Workspace header ID</Label>
+                  <Input
+                    className="font-mono text-xs"
+                    value={accountDraft.workspace_id}
+                    placeholder="x-runway-workspace"
+                    onChange={(event) => setAccountDraft((draft) => ({ ...draft, workspace_id: event.target.value }))}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label>Team ID / asTeamId</Label>
+                  <Input
+                    className="font-mono text-xs"
+                    value={accountDraft.team_id}
+                    placeholder="asTeamId"
+                    onChange={(event) => setAccountDraft((draft) => ({ ...draft, team_id: event.target.value }))}
+                  />
+                </div>
+              </div>
             </div>
           </div>
           <DialogFooter>
