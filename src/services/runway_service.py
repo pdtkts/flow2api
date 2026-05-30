@@ -457,7 +457,7 @@ class RunwayService:
             timeout=30,
         )
 
-    async def sync_models(self) -> int:
+    async def sync_models(self) -> Dict[str, int]:
         account = await self._first_active_account()
         features: Dict[str, Any] = {}
         if account:
@@ -466,6 +466,11 @@ class RunwayService:
             except Exception as exc:
                 debug_logger.log_warning(f"Runway feature sync failed; using manifest only: {exc}")
         return await self.db.sync_default_runway_models(features)
+
+    @staticmethod
+    def _is_task_type_disabled_error(error: Exception) -> bool:
+        text = str(error or "").lower()
+        return "task type is disabled for this user" in text
 
     async def test_account(self, account_id: int) -> Dict[str, Any]:
         account = await self.db.get_runway_account(account_id)
@@ -1085,7 +1090,13 @@ class RunwayService:
             return task
         except Exception as exc:
             release_now = True
-            await self.db.update_runway_account(account.id or 0, last_status="failed", last_error=str(exc))
+            error_text = str(exc)
+            if self._is_task_type_disabled_error(exc):
+                error_text = "Runway task type is disabled for this user"
+                await self.db.mark_runway_model_unavailable(public_model_id, error_text)
+                await self.db.update_runway_account(account.id or 0, last_status="failed", last_error=error_text)
+                raise RuntimeError(error_text) from exc
+            await self.db.update_runway_account(account.id or 0, last_status="failed", last_error=error_text)
             raise
         finally:
             if release_now:

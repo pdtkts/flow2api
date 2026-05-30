@@ -2170,10 +2170,20 @@ async def delete_runway_model(
 @router.post("/api/admin/runway/models/sync")
 async def sync_runway_models(token: str = Depends(verify_admin_token)):
     service = _require_runway_service()
-    count = await service.sync_models()
+    sync_result = await service.sync_models()
+    if isinstance(sync_result, dict):
+        synced = int(sync_result.get("synced") or 0)
+        blocked = int(sync_result.get("blocked") or 0)
+        disabled_task_types = int(sync_result.get("disabled_task_types") or 0)
+    else:
+        synced = int(sync_result or 0)
+        blocked = 0
+        disabled_task_types = 0
     return {
         "success": True,
-        "synced": count,
+        "synced": synced,
+        "blocked": blocked,
+        "disabled_task_types": disabled_task_types,
         "models": [_runway_model_payload(m) for m in await db.list_runway_models()],
     }
 

@@ -612,7 +612,12 @@ export function RunwaySettings({ active }: { active: boolean }) {
       if (!r) return
       const d = await r.json()
       if (d.success) {
-        toast.success(`Synced ${d.synced || 0} model presets`)
+        const blocked = Number(d.blocked || 0)
+        const disabledTaskTypes = Number(d.disabled_task_types || 0)
+        const suffix = blocked
+          ? `, ${blocked} blocked by Runway features${disabledTaskTypes ? ` (${disabledTaskTypes} disabled task types)` : ""}`
+          : ""
+        toast.success(`Synced ${d.synced || 0} models${suffix}`)
         await load()
       } else toast.error(d.detail || "Sync failed")
     } finally {

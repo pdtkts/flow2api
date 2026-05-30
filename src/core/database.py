@@ -4,7 +4,7 @@ import aiosqlite
 import json
 from contextlib import asynccontextmanager
 from datetime import date, datetime
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Optional, List, Dict, Any, Tuple, Set
 from pathlib import Path
 from .config import DEFAULT_YESCAPTCHA_TASK_TYPE, get_runtime_data_dir, normalize_yescaptcha_task_type
 from .runway_manifest import RUNWAY_MANIFEST_VERSION, RUNWAY_MODEL_MANIFEST
@@ -49,6 +49,97 @@ def derive_adobe_ints_from_scopes_csv(scopes_csv: str) -> Tuple[int, int, int]:
 
 
 RUNWAY_DEFAULT_MODELS = RUNWAY_MODEL_MANIFEST
+
+RUNWAY_AVAILABILITY_ALIASES_BY_TASK_TYPE = {
+    "gemini_3_1_flash_image": ["workflow_gemini_3_1_flash_image"],
+    "kling_3_0_pro": ["workflow_kling_3_0_pro_direct", "workflow_kling_3_0_pro_generic"],
+    "seedance_2": ["workflow_seedance_2", "seedance_2_fast"],
+    "magnific_precision_upscaler_v2": ["workflow_magnific_precision_upscaler_v2"],
+    "media_upscale": ["magnific_video_upscaler_creative", "workflow_bytedance_upscaler_1"],
+    "sora": ["workflow_sora2", "workflow_sora2_pro"],
+    "wan": ["workflow_wan_2_6", "workflow_wan_2_2_animate", "workflow_wan_2_6_flash"],
+    "grok_video": ["workflow_xai_image_generation", "workflow_xai_image_edit"],
+}
+
+
+def _runway_feature_sections(live_features: Dict[str, Any]) -> List[Dict[str, Any]]:
+    sections: List[Dict[str, Any]] = []
+    if isinstance(live_features, dict):
+        sections.append(live_features)
+        nested = live_features.get("features")
+        if isinstance(nested, dict):
+            sections.append(nested)
+    return sections
+
+
+def _runway_disabled_value(value: Any) -> bool:
+    if value is False:
+        return True
+    if isinstance(value, str) and value.strip().lower() in {"false", "disabled"}:
+        return True
+    if isinstance(value, dict):
+        enabled = value.get("enabled")
+        if enabled is False:
+            return True
+        if isinstance(enabled, str) and enabled.strip().lower() in {"false", "disabled"}:
+            return True
+    return False
+
+
+def _extract_runway_disabled_features(live_features: Dict[str, Any]) -> Tuple[Dict[str, str], int]:
+    disabled: Dict[str, str] = {}
+    disabled_task_types: Set[str] = set()
+    for section in _runway_feature_sections(live_features):
+        for key in ("disabledTaskTypes", "disabled_task_types", "disabledTasks", "disabled_tasks"):
+            value = section.get(key)
+            if not isinstance(value, list):
+                continue
+            for item in value:
+                reason = "runway_disabled"
+                task_type: Optional[str] = None
+                if isinstance(item, dict):
+                    task_type = str(item.get("taskType") or item.get("task_type") or item.get("id") or "").strip()
+                    reason = str(item.get("reason") or reason)
+                elif item is not None:
+                    task_type = str(item).strip()
+                if task_type and task_type not in disabled:
+                    disabled[task_type] = reason
+                if task_type:
+                    disabled_task_types.add(task_type)
+
+        permitted = section.get("permitted")
+        if isinstance(permitted, dict):
+            for key, value in permitted.items():
+                feature_key = str(key).strip()
+                if feature_key and _runway_disabled_value(value) and feature_key not in disabled:
+                    disabled[feature_key] = "permission_disabled"
+    return disabled, len(disabled_task_types)
+
+
+def _runway_model_availability_keys(model: Dict[str, Any]) -> Set[str]:
+    keys: Set[str] = set()
+    for value in (model.get("task_type"), model.get("cost_feature")):
+        if value:
+            text = str(value)
+            keys.add(text)
+            keys.update(RUNWAY_AVAILABILITY_ALIASES_BY_TASK_TYPE.get(text, []))
+    for field in ("feature_flags", "availability_task_types"):
+        values = model.get(field)
+        if isinstance(values, list):
+            keys.update(str(item) for item in values if str(item or "").strip())
+    return keys
+
+
+def _runway_json_list(raw: Any) -> List[str]:
+    if isinstance(raw, list):
+        return [str(item) for item in raw if str(item or "").strip()]
+    try:
+        parsed = json.loads(str(raw or "[]"))
+    except Exception:
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [str(item) for item in parsed if str(item or "").strip()]
 
 
 class Database:
@@ -2417,28 +2508,25 @@ class Database:
             await db.execute("DELETE FROM runway_models WHERE id = ?", (model_id,))
             await db.commit()
 
-    async def sync_default_runway_models(self, live_features: Optional[Dict[str, Any]] = None) -> int:
+    async def sync_default_runway_models(self, live_features: Optional[Dict[str, Any]] = None) -> Dict[str, int]:
         count = 0
         live_features = live_features if isinstance(live_features, dict) else {}
-        disabled_task_types = set()
-        for key in ("disabledTaskTypes", "disabled_task_types", "disabledTasks", "disabled_tasks"):
-            value = live_features.get(key)
-            if isinstance(value, list):
-                disabled_task_types.update(str(item) for item in value)
-        permitted = live_features.get("permitted")
-        if isinstance(permitted, dict):
-            for key, value in permitted.items():
-                if value is False:
-                    disabled_task_types.add(str(key))
+        disabled_features, disabled_task_type_count = _extract_runway_disabled_features(live_features)
+        synced_public_ids: Set[str] = set()
         for model in RUNWAY_DEFAULT_MODELS:
             existing = await self.get_runway_model(model["public_model_id"])
+            synced_public_ids.add(str(model["public_model_id"]))
             builder_available = model.get("builder_key") != "unsupported"
-            feature_flags = [str(item) for item in model.get("feature_flags", [])]
-            disabled_by_features = bool(disabled_task_types.intersection(feature_flags + [str(model.get("task_type", ""))]))
+            availability_keys = _runway_model_availability_keys(model)
+            matched_disabled_key = next((key for key in availability_keys if key in disabled_features), "")
+            disabled_by_features = bool(matched_disabled_key)
             live_available = bool(builder_available and not disabled_by_features)
             disabled_reason = str(model.get("disabled_reason") or "")
             if disabled_by_features:
-                disabled_reason = "Disabled by the active Runway account feature set"
+                reason = disabled_features.get(matched_disabled_key) or "runway_disabled"
+                disabled_reason = f"Runway disabled task type: {matched_disabled_key}"
+                if reason and reason not in {"runway_disabled", "permission_disabled"}:
+                    disabled_reason = f"{disabled_reason} ({reason})"
             elif not builder_available and not disabled_reason:
                 disabled_reason = "Exact task builder is not available"
             await self.upsert_runway_model(
@@ -2461,7 +2549,43 @@ class Database:
                 is_enabled=bool(existing.is_enabled) if existing else bool(model.get("default_enabled", True) and live_available),
             )
             count += 1
-        return count
+        for existing_model in await self.list_runway_models(enabled_only=False):
+            public_id = str(existing_model.public_model_id or "")
+            if public_id in synced_public_ids:
+                continue
+            availability_keys = _runway_model_availability_keys(
+                {
+                    "task_type": existing_model.task_type,
+                    "cost_feature": existing_model.cost_feature,
+                    "feature_flags": _runway_json_list(existing_model.feature_flags),
+                }
+            )
+            matched_disabled_key = next((key for key in availability_keys if key in disabled_features), "")
+            if not matched_disabled_key:
+                continue
+            reason = disabled_features.get(matched_disabled_key) or "runway_disabled"
+            disabled_reason = f"Runway disabled task type: {matched_disabled_key}"
+            if reason and reason not in {"runway_disabled", "permission_disabled"}:
+                disabled_reason = f"{disabled_reason} ({reason})"
+            await self.mark_runway_model_unavailable(public_id, disabled_reason)
+        blocked_count = sum(1 for model in await self.list_runway_models(enabled_only=False) if not bool(model.live_available))
+        return {
+            "synced": count,
+            "blocked": blocked_count,
+            "disabled_task_types": disabled_task_type_count,
+        }
+
+    async def mark_runway_model_unavailable(self, public_model_id: str, disabled_reason: str) -> None:
+        async with self._connect(write=True) as db:
+            await db.execute(
+                """
+                UPDATE runway_models
+                SET live_available = 0, disabled_reason = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE public_model_id = ?
+                """,
+                (disabled_reason or "", (public_model_id or "").strip()),
+            )
+            await db.commit()
 
     async def create_runway_task(self, task: RunwayTask) -> int:
         async with self._connect(write=True) as db:
