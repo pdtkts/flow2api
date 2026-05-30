@@ -34,16 +34,26 @@ type RunwayAccount = {
   last_error: string
 }
 
+type RunwayModelKind = "image" | "video" | "upscale"
+
 type RunwayModel = {
   id: number
   public_model_id: string
   display_name: string
-  kind: "image" | "video" | "upscale"
+  kind: RunwayModelKind
   task_type: string
   default_options: string
   request_mapping: string
   is_enabled: boolean
 }
+
+type RunwayAccountForm = {
+  label: string
+  raw_credential: string
+  concurrency_limit: string
+}
+
+type RunwayModelForm = Omit<RunwayModel, "id">
 
 const DEFAULT_CONFIG: RunwayConfig = {
   enabled: false,
@@ -53,16 +63,16 @@ const DEFAULT_CONFIG: RunwayConfig = {
   cache_outputs: true,
 }
 
-const EMPTY_ACCOUNT = {
+const EMPTY_ACCOUNT: RunwayAccountForm = {
   label: "",
   raw_credential: "",
   concurrency_limit: "1",
 }
 
-const EMPTY_MODEL = {
+const EMPTY_MODEL: RunwayModelForm = {
   public_model_id: "runway-",
   display_name: "",
-  kind: "image" as const,
+  kind: "image",
   task_type: "",
   default_options: "{}",
   request_mapping: "{}",
@@ -75,8 +85,8 @@ export function RunwaySettings({ active }: { active: boolean }) {
   const [config, setConfig] = useState<RunwayConfig>(DEFAULT_CONFIG)
   const [accounts, setAccounts] = useState<RunwayAccount[]>([])
   const [models, setModels] = useState<RunwayModel[]>([])
-  const [newAccount, setNewAccount] = useState(EMPTY_ACCOUNT)
-  const [newModel, setNewModel] = useState(EMPTY_MODEL)
+  const [newAccount, setNewAccount] = useState<RunwayAccountForm>(EMPTY_ACCOUNT)
+  const [newModel, setNewModel] = useState<RunwayModelForm>(EMPTY_MODEL)
 
   const load = useCallback(async () => {
     if (!token || !active) return
@@ -186,7 +196,7 @@ export function RunwaySettings({ active }: { active: boolean }) {
     }
   }
 
-  const saveModel = async (model: RunwayModel | typeof newModel, isNew = false) => {
+  const saveModel = async (model: RunwayModel | RunwayModelForm, isNew = false) => {
     if (!token) return
     if (!model.public_model_id.trim().startsWith("runway-")) return toast.error("Model id must start with runway-")
     if (!model.task_type.trim()) return toast.error("Task type required")
@@ -375,7 +385,7 @@ export function RunwaySettings({ active }: { active: boolean }) {
           <div className="grid gap-3 lg:grid-cols-[200px_180px_120px_180px_1fr_1fr_auto]">
             <Input value={newModel.public_model_id} onChange={(e) => setNewModel((m) => ({ ...m, public_model_id: e.target.value }))} />
             <Input placeholder="Display name" value={newModel.display_name} onChange={(e) => setNewModel((m) => ({ ...m, display_name: e.target.value }))} />
-            <Select value={newModel.kind} onValueChange={(kind) => setNewModel((m) => ({ ...m, kind: kind as RunwayModel["kind"] }))}>
+            <Select value={newModel.kind} onValueChange={(kind) => setNewModel((m) => ({ ...m, kind: kind as RunwayModelKind }))}>
               <SelectTrigger><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="image">image</SelectItem>
@@ -394,7 +404,7 @@ export function RunwaySettings({ active }: { active: boolean }) {
               <div key={model.id} className="rounded-md border p-3 grid gap-3 xl:grid-cols-[200px_180px_120px_180px_1fr_1fr_120px]">
                 <Input value={model.public_model_id} onChange={(e) => setModels((rows) => rows.map((row) => row.id === model.id ? { ...row, public_model_id: e.target.value } : row))} />
                 <Input value={model.display_name} onChange={(e) => setModels((rows) => rows.map((row) => row.id === model.id ? { ...row, display_name: e.target.value } : row))} />
-                <Select value={model.kind} onValueChange={(kind) => setModels((rows) => rows.map((row) => row.id === model.id ? { ...row, kind: kind as RunwayModel["kind"] } : row))}>
+                <Select value={model.kind} onValueChange={(kind) => setModels((rows) => rows.map((row) => row.id === model.id ? { ...row, kind: kind as RunwayModelKind } : row))}>
                   <SelectTrigger><SelectValue /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="image">image</SelectItem>

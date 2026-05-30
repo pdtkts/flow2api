@@ -68,7 +68,7 @@ export default function Manage() {
     <Layout>
       <Tabs value={tab} onValueChange={setTab} className="w-full">
         <div className="border-b border-border mb-6 flex flex-wrap items-end gap-6">
-          <TabsList className="h-auto w-full min-w-0 flex-1 justify-start rounded-none bg-transparent p-0 gap-6">
+          <TabsList className="flex h-auto w-full min-w-0 flex-1 flex-wrap justify-start rounded-none bg-transparent p-0 gap-x-6 gap-y-0">
             <TabsTrigger
               value="tokens"
               className={cn(
