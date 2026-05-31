@@ -17,7 +17,7 @@ import {
   SelectValue,
 } from "../ui/select"
 import { toast } from "sonner"
-import { Loader2, Upload } from "lucide-react"
+import { Download, Loader2, Upload } from "lucide-react"
 
 type CaptchaForm = {
   captcha_method: string
@@ -136,6 +136,7 @@ export function SystemSettings({ active }: { active: boolean }) {
   const [newPwd, setNewPwd] = useState("")
   const [newApiKeyInput, setNewApiKeyInput] = useState("")
   const [dbRestoreFile, setDbRestoreFile] = useState<File | null>(null)
+  const [dbDownloadBusy, setDbDownloadBusy] = useState(false)
   const [dbRestoreBusy, setDbRestoreBusy] = useState(false)
   const [dbRestoreResult, setDbRestoreResult] = useState("")
   const [dbRestoreInputKey, setDbRestoreInputKey] = useState(0)
@@ -393,6 +394,37 @@ export function SystemSettings({ active }: { active: boolean }) {
       } else toast.error(d.detail || "Failed")
     } finally {
       setBusy(false)
+    }
+  }
+
+  const downloadDatabase = async () => {
+    if (!token) return
+    setDbDownloadBusy(true)
+    try {
+      const r = await adminFetch("/api/admin/database/download", token)
+      if (!r) return
+      if (!r.ok) {
+        const d = await r.json().catch(() => null)
+        toast.error(d?.detail || "Database download failed")
+        return
+      }
+
+      const blob = await r.blob()
+      const disposition = r.headers.get("Content-Disposition") || ""
+      const quotedName = disposition.match(/filename="([^"]+)"/i)?.[1]
+      const rawName = quotedName || disposition.match(/filename=([^;]+)/i)?.[1]
+      const filename = rawName?.trim() || `flow-${new Date().toISOString().slice(0, 10)}.db`
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement("a")
+      a.href = url
+      a.download = filename
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      URL.revokeObjectURL(url)
+      toast.success("Database download started")
+    } finally {
+      setDbDownloadBusy(false)
     }
   }
 
@@ -774,30 +806,43 @@ export function SystemSettings({ active }: { active: boolean }) {
 
       <Card className="lg:col-span-2">
         <CardHeader>
-          <CardTitle>Database restore</CardTitle>
-          <CardDescription>Upload a local flow.db to replace the server SQLite database</CardDescription>
+          <CardTitle>Database migration</CardTitle>
+          <CardDescription>Download or restore the server SQLite database</CardDescription>
         </CardHeader>
-        <CardContent className="space-y-4">
-          <div>
-            <Label htmlFor="db-restore-file">SQLite database file</Label>
-            <Input
-              key={dbRestoreInputKey}
-              id="db-restore-file"
-              className="mt-1"
-              type="file"
-              accept=".db,.sqlite,.sqlite3,application/octet-stream"
-              onChange={(e) => setDbRestoreFile(e.target.files?.[0] || null)}
-              disabled={dbRestoreBusy}
-            />
-            <p className="text-xs text-muted-foreground mt-1">
-              The current database is backed up first. Active sessions may need to log in again after restore.
+        <CardContent className="space-y-6">
+          <div className="space-y-2">
+            <Label>Current database</Label>
+            <p className="text-xs text-muted-foreground">
+              Download a fresh flow.db snapshot for backup or migration to another server.
             </p>
+            <Button variant="secondary" onClick={downloadDatabase} disabled={dbDownloadBusy || dbRestoreBusy}>
+              {dbDownloadBusy ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <Download className="h-4 w-4 mr-2" />}
+              Download database
+            </Button>
           </div>
-          <Button onClick={restoreDatabase} disabled={dbRestoreBusy || !dbRestoreFile}>
-            {dbRestoreBusy ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <Upload className="h-4 w-4 mr-2" />}
-            Restore database
-          </Button>
-          {dbRestoreResult ? <p className="text-xs text-muted-foreground">{dbRestoreResult}</p> : null}
+
+          <div className="space-y-4 border-t border-border pt-4">
+            <div>
+              <Label htmlFor="db-restore-file">SQLite database file</Label>
+              <Input
+                key={dbRestoreInputKey}
+                id="db-restore-file"
+                className="mt-1"
+                type="file"
+                accept=".db,.sqlite,.sqlite3,application/octet-stream"
+                onChange={(e) => setDbRestoreFile(e.target.files?.[0] || null)}
+                disabled={dbDownloadBusy || dbRestoreBusy}
+              />
+              <p className="text-xs text-muted-foreground mt-1">
+                The current database is backed up first. Active sessions may need to log in again after restore.
+              </p>
+            </div>
+            <Button onClick={restoreDatabase} disabled={dbDownloadBusy || dbRestoreBusy || !dbRestoreFile}>
+              {dbRestoreBusy ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <Upload className="h-4 w-4 mr-2" />}
+              Restore database
+            </Button>
+            {dbRestoreResult ? <p className="text-xs text-muted-foreground">{dbRestoreResult}</p> : null}
+          </div>
         </CardContent>
       </Card>
 

@@ -12,6 +12,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, File, HTTPException, Header, Query, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
+from starlette.background import BackgroundTask
 from typing import Optional, List, Dict, Any
 import secrets
 import time
@@ -118,6 +119,24 @@ def _validate_uploaded_sqlite_database(path: Path) -> Dict[str, Any]:
         )
 
     return {"size": path.stat().st_size, "table_count": len(tables)}
+
+
+def _create_sqlite_database_snapshot(source_path: Path, snapshot_path: Path) -> None:
+    """Create a consistent SQLite backup snapshot without copying a live DB file."""
+    source_uri = f"file:{source_path}?mode=ro"
+    try:
+        with sqlite3.connect(source_uri, uri=True) as source:
+            with sqlite3.connect(snapshot_path) as target:
+                source.backup(target)
+    except sqlite3.DatabaseError as exc:
+        raise HTTPException(status_code=500, detail=f"Database snapshot failed: {exc}") from exc
+
+
+def _unlink_path(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except Exception:
+        pass
 
 
 def _extract_error_summary(payload: Any) -> str:
@@ -2538,6 +2557,43 @@ async def restore_sqlite_database(
                 upload_path.unlink()
         except Exception:
             pass
+
+
+@router.get("/api/admin/database/download")
+async def download_sqlite_database(token: str = Depends(verify_admin_token)):
+    """Download a consistent snapshot of the current flow.db SQLite database."""
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database service is not initialized")
+
+    db_path = Path(db.db_path)
+    if not db_path.is_file():
+        raise HTTPException(status_code=404, detail="Database file not found")
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+    snapshot_path = db_path.with_name(
+        f"{db_path.stem}.download-{timestamp}-{secrets.token_hex(4)}{db_path.suffix or '.db'}"
+    )
+    download_filename = f"{db_path.stem}-{timestamp}.db"
+
+    try:
+        async with _database_restore_lock:
+            await asyncio.to_thread(_create_sqlite_database_snapshot, db_path, snapshot_path)
+
+        if not snapshot_path.is_file() or snapshot_path.stat().st_size <= 0:
+            raise HTTPException(status_code=500, detail="Database snapshot is empty")
+
+        return FileResponse(
+            path=snapshot_path,
+            media_type="application/vnd.sqlite3",
+            filename=download_filename,
+            background=BackgroundTask(_unlink_path, snapshot_path),
+        )
+    except HTTPException:
+        _unlink_path(snapshot_path)
+        raise
+    except Exception as exc:
+        _unlink_path(snapshot_path)
+        raise HTTPException(status_code=500, detail=f"Database download failed: {exc}") from exc
 
 
 @router.get("/api/admin/managed-apikeys")
