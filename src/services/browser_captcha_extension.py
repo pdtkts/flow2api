@@ -827,6 +827,27 @@ class ExtensionCaptchaService:
             payload = json.loads(data)
             message_type = payload.get("type")
 
+            if message_type == "client_shutdown":
+                conn = self._find_connection(websocket)
+                requested_session_id = str(payload.get("worker_session_id") or "").strip()
+                if conn and (not requested_session_id or requested_session_id == conn.worker_session_id):
+                    debug_logger.log_info(
+                        f"[Extension Captcha] Client shutdown requested. "
+                        f"worker_session_id={conn.worker_session_id}, instance_id={conn.instance_id or '-'}"
+                    )
+                    self.disconnect(websocket)
+                    try:
+                        await websocket.close(code=1000, reason="Client shutdown")
+                    except Exception:
+                        pass
+                elif requested_session_id:
+                    killed = await self.kill_worker(requested_session_id)
+                    debug_logger.log_info(
+                        f"[Extension Captcha] Client shutdown for detached session "
+                        f"worker_session_id={requested_session_id}, killed={killed}"
+                    )
+                return
+
             if message_type == "register":
                 conn = self._find_connection(websocket)
                 if conn:

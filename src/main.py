@@ -1,5 +1,6 @@
 """FastAPI application initialization"""
 import os
+import sys
 from datetime import datetime, timezone
 
 from fastapi import FastAPI
@@ -20,11 +21,25 @@ from .services.token_manager import TokenManager
 from .services.load_balancer import LoadBalancer
 from .services.concurrency_manager import ConcurrencyManager
 from .services.generation_handler import GenerationHandler
+from .services.runway_service import RunwayService
 from .services.st_refresh_reasons import describe_st_refresh_reason
 from .api import routes, admin
 from .core.api_key_manager import ApiKeyManager
 from .core.auth import set_api_key_manager
 from .core.logger import debug_logger
+
+
+def _configure_stdio() -> None:
+    for stream in (getattr(sys, "stdout", None), getattr(sys, "stderr", None)):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+
+
+_configure_stdio()
 
 
 def _normalize_host(host: str) -> str:
@@ -68,9 +83,11 @@ def _path_allowed_on_api_only_host(path: str) -> bool:
     - OpenAI / Chat Completions style: /v1/chat/completions, /v1/models, /v1/models/aliases, /v1/projects, …
     - Gemini (Google) style: /v1beta/models/…:generateContent, :streamGenerateContent, list models, …
     - Same body on alternate paths: /models, /models/{m}:generateContent, …
-    - Cached media (authenticated): /api/cache/file, /api/cache/file/{project_id}, /api/cache/blob/..., discovery, liveness: /openapi.json, /health, /metrics
+    - Cached media (authenticated): /api/cache/file, /api/cache/file/{project_id}, /api/cache/blob/...
+    - Extension workers: /captcha_ws
+    - Discovery/liveness: /openapi.json, /health, /metrics
     """
-    if path in ("/openapi.json", "/health", "/metrics"):
+    if path in ("/openapi.json", "/health", "/metrics", "/captcha_ws"):
         return True
     if path.startswith(("/v1/", "/v1beta/")) or path in ("/v1", "/v1beta"):
         return True
@@ -137,13 +154,13 @@ async def lifespan(app: FastAPI):
 
     # Handle database initialization based on startup type
     if is_first_startup:
-        print("🎉 First startup detected. Initializing database and configuration from setting.toml...")
+        print("First startup detected. Initializing database and configuration from setting.toml...")
         await db.init_config_from_toml(config_dict, is_first_startup=True)
-        print("✓ Database and configuration initialized successfully.")
+        print("OK Database and configuration initialized successfully.")
     else:
-        print("🔄 Existing database detected. Checking for missing tables and columns...")
+        print("Existing database detected. Checking for missing tables and columns...")
         await db.check_and_migrate_db(config_dict)
-        print("✓ Database migration check completed.")
+        print("OK Database migration check completed.")
 
     # 启动时统一把数据库配置同步到内存，避免 personal/brower 相关运行时配置遗漏。
     await db.reload_config_to_memory()
@@ -159,7 +176,7 @@ async def lifespan(app: FastAPI):
     if captcha_config.captcha_method == "personal":
         from .services.browser_captcha_personal import BrowserCaptchaService
         browser_service = await BrowserCaptchaService.get_instance(db)
-        print("✓ Browser captcha service initialized (nodriver mode)")
+        print("OK Browser captcha service initialized (nodriver mode)")
 
         warmup_limit = max(1, int(config.personal_max_resident_tabs or 1))
         warmup_project_ids = await token_manager.get_personal_warmup_project_ids(
@@ -177,22 +194,22 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             warmup_error = e
             print(
-                "⚠ Browser captcha resident warmup failed: "
+                "WARN Browser captcha resident warmup failed: "
                 f"{type(e).__name__}: {e}"
             )
         if warmed_slots:
             print(
-                f"✓ Browser captcha shared resident tabs warmed "
+                f"OK Browser captcha shared resident tabs warmed "
                 f"({len(warmed_slots)} slot(s), limit={warmup_limit})"
             )
         elif warmup_error is not None:
-            print("⚠ Browser captcha resident warmup skipped for this startup")
+            print("WARN Browser captcha resident warmup skipped for this startup")
         elif tokens:
-            print("⚠ Browser captcha resident warmup skipped: no tab warmed successfully")
+            print("WARN Browser captcha resident warmup skipped: no tab warmed successfully")
         else:
             # 没有任何可用 token 时，打开登录窗口供用户手动操作
             await browser_service.open_login_window()
-            print("⚠ No active token found, opened login window for manual setup")
+            print("WARN No active token found, opened login window for manual setup")
     elif captcha_config.captcha_method == "browser":
         from .services.browser_captcha import BrowserCaptchaService
         browser_service = await BrowserCaptchaService.get_instance(db)
@@ -205,9 +222,9 @@ async def lifespan(app: FastAPI):
     if config.captcha_method == "remote_browser":
         try:
             warmed_projects = await flow_client.prefill_remote_browser_for_tokens(tokens, action="IMAGE_GENERATION")
-            print(f"✓ Remote browser pool prefill started for {warmed_projects} project(s)")
+            print(f"OK Remote browser pool prefill started for {warmed_projects} project(s)")
         except Exception as e:
-            print(f"⚠ Remote browser pool prefill failed: {e}")
+            print(f"WARN Remote browser pool prefill failed: {e}")
 
     # Start 429 auto-unban task
     import asyncio
@@ -218,7 +235,7 @@ async def lifespan(app: FastAPI):
                 await asyncio.sleep(3600)  # 每小时执行一次
                 await token_manager.auto_unban_429_tokens()
             except Exception as e:
-                print(f"❌ Auto-unban task error: {e}")
+                print(f"ERR Auto-unban task error: {e}")
 
     auto_unban_task_handle = asyncio.create_task(auto_unban_task())
 
@@ -260,9 +277,9 @@ async def lifespan(app: FastAPI):
                     try:
                         await token_manager._refresh_at(token.id)
                     except Exception as refresh_err:
-                        print(f"⚠ Scheduled refresh failed for token {token.id}: {refresh_err}")
+                        print(f"WARN Scheduled refresh failed for token {token.id}: {refresh_err}")
             except Exception as e:
-                print(f"❌ Scheduled token refresh task error: {e}")
+                print(f"ERR Scheduled token refresh task error: {e}")
 
     scheduled_token_refresh_handle = asyncio.create_task(scheduled_token_refresh_task())
 
@@ -340,19 +357,19 @@ async def lifespan(app: FastAPI):
 
     scheduled_st_only_refresh_handle = asyncio.create_task(scheduled_st_only_refresh_task())
 
-    print(f"✓ Database initialized")
-    print(f"✓ Total tokens: {len(tokens)}")
+    print("OK Database initialized")
+    print(f"OK Total tokens: {len(tokens)}")
     ct = config.cache_timeout
     d = f", ~{ct / 86400.0:.3g}d" if ct and ct > 0 else " (no auto-expiry)"
-    print(f"✓ Cache: {'Enabled' if config.cache_enabled else 'Disabled'} (timeout: {ct}s{d})")
+    print(f"OK Cache: {'Enabled' if config.cache_enabled else 'Disabled'} (timeout: {ct}s{d})")
     if cache_cleanup_enabled:
-        print("✓ File cache cleanup task started")
+        print("OK File cache cleanup task started")
     else:
-        print("✓ File cache cleanup task disabled (timeout <= 0)")
-    print(f"✓ 429 auto-unban task started (runs every hour)")
-    print("✓ Scheduled token refresh task started")
-    print("✓ Scheduled ST-only refresh task started")
-    print(f"✓ Server running on http://{config.server_host}:{config.server_port}")
+        print("OK File cache cleanup task disabled (timeout <= 0)")
+    print("OK 429 auto-unban task started (runs every hour)")
+    print("OK Scheduled token refresh task started")
+    print("OK Scheduled ST-only refresh task started")
+    print(f"OK Server running on http://{config.server_host}:{config.server_port}")
     print("=" * 60)
 
     yield
@@ -382,11 +399,11 @@ async def lifespan(app: FastAPI):
     # Close browser if initialized
     if browser_service:
         await browser_service.close()
-        print("✓ Browser captcha service closed")
-    print("✓ File cache cleanup task stopped")
-    print("✓ 429 auto-unban task stopped")
-    print("✓ Scheduled token refresh task stopped")
-    print("✓ Scheduled ST-only refresh task stopped")
+        print("OK Browser captcha service closed")
+    print("OK File cache cleanup task stopped")
+    print("OK 429 auto-unban task stopped")
+    print("OK Scheduled token refresh task stopped")
+    print("OK Scheduled ST-only refresh task stopped")
 
 
 # Initialize components
@@ -404,11 +421,13 @@ generation_handler = GenerationHandler(
     concurrency_manager,
     proxy_manager  # 添加 proxy_manager 参数
 )
+runway_service = RunwayService(db, generation_handler.file_cache, proxy_manager)
 managed_api_key_manager = ApiKeyManager(db, legacy_api_key_provider=lambda: config.api_key)
 
 # Set dependencies
 routes.set_generation_handler(generation_handler)
-admin.set_dependencies(token_manager, proxy_manager, db, concurrency_manager, managed_api_key_manager)
+routes.set_runway_service(runway_service)
+admin.set_dependencies(token_manager, proxy_manager, db, concurrency_manager, managed_api_key_manager, runway_service)
 set_api_key_manager(managed_api_key_manager)
 
 # Create FastAPI app

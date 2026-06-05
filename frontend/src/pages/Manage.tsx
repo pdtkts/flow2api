@@ -9,11 +9,12 @@ import { CacheManagement } from "../components/manage/CacheManagement"
 import { AgentGateway } from "../components/manage/AgentGateway"
 import { ApiKeyManagement } from "../components/manage/ApiKeyManagement"
 import { AdobeSettings } from "../components/manage/AdobeSettings"
+import { RunwaySettings } from "../components/manage/RunwaySettings"
 import { cn } from "@/lib/utils"
 import { useAuth } from "../contexts/AuthContext"
 import { adminJson } from "../lib/adminApi"
 
-const MANAGE_TABS = ["tokens", "apikeys", "settings", "logs", "adobe", "cache", "agent"] as const
+const MANAGE_TABS = ["tokens", "apikeys", "settings", "logs", "adobe", "runway", "cache", "agent"] as const
 type ManageTab = (typeof MANAGE_TABS)[number]
 
 function parseManageTab(raw: string | null): ManageTab {
@@ -67,7 +68,7 @@ export default function Manage() {
     <Layout>
       <Tabs value={tab} onValueChange={setTab} className="w-full">
         <div className="border-b border-border mb-6 flex flex-wrap items-end gap-6">
-          <TabsList className="h-auto w-full min-w-0 flex-1 justify-start rounded-none bg-transparent p-0 gap-6">
+          <TabsList className="flex h-auto w-full min-w-0 flex-1 flex-wrap justify-start rounded-none bg-transparent p-0 gap-x-6 gap-y-0">
             <TabsTrigger
               value="tokens"
               className={cn(
@@ -107,6 +108,14 @@ export default function Manage() {
               )}
             >
               Adobe
+            </TabsTrigger>
+            <TabsTrigger
+              value="runway"
+              className={cn(
+                "rounded-none border-b-2 border-transparent px-1 py-3 data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:shadow-none"
+              )}
+            >
+              Runway
             </TabsTrigger>
             <TabsTrigger
               value="cache"
@@ -160,6 +169,11 @@ export default function Manage() {
         <TabsContent value="adobe" className="mt-0 outline-none focus-visible:ring-0">
           <div className="animate-in fade-in duration-300">
             <AdobeSettings active={tab === "adobe"} />
+          </div>
+        </TabsContent>
+        <TabsContent value="runway" className="mt-0 outline-none focus-visible:ring-0">
+          <div className="animate-in fade-in duration-300">
+            <RunwaySettings active={tab === "runway"} />
           </div>
         </TabsContent>
         <TabsContent value="cache" className="mt-0 outline-none focus-visible:ring-0">

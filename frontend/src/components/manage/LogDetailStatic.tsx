@@ -1,4 +1,6 @@
-import { useMemo, useState, type ReactNode } from "react"
+import { useEffect, useMemo, useState, type ReactNode } from "react"
+import { useAuth } from "../../contexts/AuthContext"
+import { adminFetch } from "../../lib/adminApi"
 import type { LogDetail } from "../../types/admin"
 import {
   extractLogErrorSummary,
@@ -21,6 +23,30 @@ const cardBox = "rounded-lg border border-border bg-muted/40 p-3.5"
 const kLabel = "text-muted-foreground"
 
 type PayloadVariant = "default" | "fullResponse"
+
+function cacheAdminPreviewPathFromMediaUrl(url: string): string | null {
+  const text = String(url || "").trim()
+  if (!text || /^data:/i.test(text)) return null
+
+  const extractFilename = (path: string) => {
+    const match = path.match(/\/api\/cache\/(?:blob|file)\/([^/?#]+)(?:[?#]|$)?/)
+    if (!match?.[1]) return null
+    try {
+      return decodeURIComponent(match[1])
+    } catch {
+      return match[1]
+    }
+  }
+
+  try {
+    const parsed = new URL(text, typeof window !== "undefined" ? window.location.origin : undefined)
+    const filename = extractFilename(parsed.pathname)
+    return filename ? `/api/cache/admin/file/${encodeURIComponent(filename)}` : null
+  } catch {
+    const filename = extractFilename(text)
+    return filename ? `/api/cache/admin/file/${encodeURIComponent(filename)}` : null
+  }
+}
 
 function LogPayloadPre({
   children,
@@ -45,12 +71,68 @@ function LogPayloadPre({
 }
 
 function LogMediaPreview({ label, url, withUrl = true }: { label: string; url: string; withUrl?: boolean }) {
+  const { token } = useAuth()
   const previewUrl = normalizeLogMediaUrl(url)
   const mediaType = isVideoUrl(previewUrl) ? "video" : isImageUrl(previewUrl) ? "image" : ""
-  const [loaded, setLoaded] = useState(false)
-  const [failed, setFailed] = useState(false)
+  const [requestedUrl, setRequestedUrl] = useState<string | null>(null)
+  const [loadingUrl, setLoadingUrl] = useState<string | null>(null)
+  const [objectPreview, setObjectPreview] = useState<{ sourceUrl: string; objectUrl: string } | null>(null)
+  const [failedUrl, setFailedUrl] = useState<string | null>(null)
 
   const isDataUrl = /^data:/i.test(String(previewUrl))
+  const adminPreviewPath = cacheAdminPreviewPathFromMediaUrl(previewUrl)
+  const requested = requestedUrl === previewUrl
+  const loadingPreview = loadingUrl === previewUrl
+  const objectUrl = objectPreview?.sourceUrl === previewUrl ? objectPreview.objectUrl : null
+  const failed = failedUrl === previewUrl
+  const previewSrc = objectUrl || previewUrl
+
+  useEffect(() => {
+    return () => {
+      if (objectPreview?.objectUrl) URL.revokeObjectURL(objectPreview.objectUrl)
+    }
+  }, [objectPreview?.objectUrl])
+
+  useEffect(() => {
+    if (!requested || !mediaType || !adminPreviewPath || isDataUrl || !token || objectUrl || loadingUrl !== previewUrl) return
+
+    let cancelled = false
+    void adminFetch(adminPreviewPath, token)
+      .then((res) => {
+        if (cancelled || !res || !res.ok) throw new Error("preview failed")
+        return res.blob()
+      })
+      .then((blob) => {
+        if (cancelled) return
+        const nextObjectUrl = URL.createObjectURL(blob)
+        setObjectPreview({ sourceUrl: previewUrl, objectUrl: nextObjectUrl })
+      })
+      .catch(() => {
+        if (!cancelled) setFailedUrl(previewUrl)
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingUrl((current) => (current === previewUrl ? null : current))
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [adminPreviewPath, isDataUrl, loadingUrl, mediaType, objectUrl, previewUrl, requested, token])
+
+  const requestPreview = () => {
+    setRequestedUrl(previewUrl)
+    setFailedUrl(null)
+    setObjectPreview(null)
+    if (adminPreviewPath && !isDataUrl) {
+      if (!token) {
+        setFailedUrl(previewUrl)
+        return
+      }
+      setLoadingUrl(previewUrl)
+    } else {
+      setLoadingUrl(null)
+    }
+  }
 
   return (
     <div className="flex flex-col gap-3">
@@ -69,33 +151,38 @@ function LogMediaPreview({ label, url, withUrl = true }: { label: string; url: s
           <span className="text-muted-foreground">data URL (length {String(previewUrl).length})</span>
         </p>
       ) : null}
-      {mediaType && !loaded && !failed ? (
+      {mediaType && !requested && !failed ? (
         <button
           type="button"
-          onClick={() => setLoaded(true)}
+          onClick={requestPreview}
           className="inline-flex items-center justify-center rounded-lg border border-border bg-secondary px-3.5 py-1.5 text-xs font-medium text-secondary-foreground shadow-sm transition-colors hover:bg-secondary/80"
         >
           Click to load preview
         </button>
       ) : null}
-      {mediaType && loaded && !failed ? (
+      {mediaType && requested && loadingPreview ? (
+        <div className="flex min-h-24 items-center justify-center rounded-lg border border-border bg-muted/40 text-xs text-muted-foreground">
+          Loading preview...
+        </div>
+      ) : null}
+      {mediaType && requested && !loadingPreview && !failed && (!adminPreviewPath || objectUrl || isDataUrl) ? (
         <div className="space-y-2">
           {mediaType === "video" ? (
             <video
-              src={previewUrl}
+              src={previewSrc}
               controls
               preload="metadata"
               className="w-full max-h-80 rounded-lg border border-border bg-black"
-              onError={() => setFailed(true)}
+              onError={() => setFailedUrl(previewUrl)}
             />
           ) : (
             <img
-              src={previewUrl}
+              src={previewSrc}
               alt={label}
               loading="lazy"
               decoding="async"
               className="max-h-80 rounded-lg border border-border object-contain bg-muted"
-              onError={() => setFailed(true)}
+              onError={() => setFailedUrl(previewUrl)}
             />
           )}
         </div>

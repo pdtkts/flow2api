@@ -4,11 +4,11 @@ import base64
 import json
 import time
 import re
-from pathlib import Path
+from datetime import datetime
 from urllib.parse import quote
 from typing import Optional, AsyncGenerator, List, Dict, Any
 from ..core.logger import debug_logger
-from ..core.config import config
+from ..core.config import config, get_runtime_tmp_dir
 from ..core.monitoring import record_generation_result
 from ..core.models import Task, RequestLog
 from ..core.account_tiers import (
@@ -936,7 +936,7 @@ class GenerationHandler:
     """统一生成处理器"""
 
     def __init__(self, flow_client, token_manager, load_balancer, db, concurrency_manager, proxy_manager):
-        cache_dir = Path(__file__).resolve().parents[2] / "tmp"
+        cache_dir = get_runtime_tmp_dir()
         self.flow_client = flow_client
         self.token_manager = token_manager
         self.load_balancer = load_balancer
@@ -953,7 +953,13 @@ class GenerationHandler:
 
     def _create_generation_result(self) -> Dict[str, Any]:
         """????????????????"""
-        return dict(success=False, error_message=None, error_emitted=False)
+        return dict(
+            success=False,
+            error_message=None,
+            error_emitted=False,
+            error_status_code=500,
+            error_extra={},
+        )
 
     def _create_response_state(self) -> Dict[str, Any]:
         """为单次请求创建独立的响应状态，避免并发请求互相污染。"""
@@ -963,12 +969,21 @@ class GenerationHandler:
             "base_url": None,
         }
 
-    def _mark_generation_failed(self, generation_result: Optional[Dict[str, Any]], error_message: str):
+    def _mark_generation_failed(
+        self,
+        generation_result: Optional[Dict[str, Any]],
+        error_message: str,
+        *,
+        status_code: int = 500,
+        error_extra: Optional[Dict[str, Any]] = None,
+    ):
         """????????????????????"""
         if isinstance(generation_result, dict):
             generation_result["success"] = False
             generation_result["error_message"] = error_message
             generation_result["error_emitted"] = True
+            generation_result["error_status_code"] = int(status_code)
+            generation_result["error_extra"] = dict(error_extra or {})
 
     def _mark_generation_succeeded(self, generation_result: Optional[Dict[str, Any]]):
         """???????"""
@@ -976,6 +991,8 @@ class GenerationHandler:
             generation_result["success"] = True
             generation_result["error_message"] = None
             generation_result["error_emitted"] = False
+            generation_result["error_status_code"] = 200
+            generation_result["error_extra"] = {}
 
     def _normalize_error_message(self, error_message: Any, max_length: int = 1000) -> str:
         """归一化错误文本，避免写入超长内容。"""
@@ -983,6 +1000,50 @@ class GenerationHandler:
         if len(text) <= max_length:
             return text
         return f"{text[:max_length - 3]}..."
+
+    def _infer_failed_upscale_captcha_status(self, error_message: str) -> str:
+        text = str(error_message or "")
+        lowered = text.lower()
+        if "failed to obtain recaptcha token" in lowered:
+            return "token_failed"
+        if classify_recaptcha_upstream_failure(400, text) == "upstream_rejected":
+            return "upstream_rejected"
+        if "recaptcha" in lowered or "captcha" in lowered or "public_error" in lowered:
+            return "unknown"
+        return "idle"
+
+    async def _fail_image_upscale_generation(
+        self,
+        *,
+        generation_result: Optional[Dict[str, Any]],
+        poll_task_id: Optional[str],
+        error_message: str,
+    ) -> str:
+        clean_error = self._normalize_error_message(error_message)
+        error_extra = {
+            "upscale_status": "failed",
+            "upscale_error_message": clean_error,
+        }
+        self._mark_generation_failed(
+            generation_result,
+            clean_error,
+            status_code=502,
+            error_extra=error_extra,
+        )
+        await self._maybe_update_poll_task(
+            poll_task_id,
+            status="failed",
+            result_urls=[],
+            base_result_urls=[],
+            delivery_urls=[],
+            upscale_status="failed",
+            upscale_error_message=clean_error,
+            error_message=clean_error,
+            completed_at=datetime.utcnow(),
+            job_phase="failed",
+            captcha_status=self._infer_failed_upscale_captcha_status(clean_error),
+        )
+        return clean_error
 
     def _is_extension_generation_enabled(self) -> bool:
         return bool(config.extension_generation_enabled)
@@ -1404,6 +1465,10 @@ class GenerationHandler:
 
             # 6. 记录使用
             if not generation_result.get("success"):
+                error_status_code = int(generation_result.get("error_status_code") or 500)
+                error_extra = generation_result.get("error_extra")
+                if not isinstance(error_extra, dict):
+                    error_extra = {}
                 error_msg = generation_result.get("error_message") or "生成未成功完成"
                 debug_logger.log_warning(f"[GENERATION] 生成未成功，不扣次数: {error_msg}")
                 if token:
@@ -1414,13 +1479,15 @@ class GenerationHandler:
                 perf_trace["total_ms"] = int(duration * 1000)
                 perf_trace["error"] = error_msg
                 prompt_for_log = prompt if len(prompt) <= 2000 else f"{prompt[:2000]}...(truncated)"
+                response_data = {"error": error_msg, "performance": perf_trace}
+                response_data.update(error_extra)
                 await self._log_request(
                     token.id if token else None,
                     api_key_id,
                     request_operation,
                     request_payload,
-                    {"error": error_msg, "performance": perf_trace},
-                    500,
+                    response_data,
+                    error_status_code,
                     duration,
                     log_id=request_log_state.get("id"),
                     status_text="failed",
@@ -1429,7 +1496,11 @@ class GenerationHandler:
                 if not generation_result.get("error_emitted"):
                     if stream:
                         yield self._create_stream_chunk(f"❌ {error_msg}\n")
-                    yield self._create_error_response(error_msg, status_code=500)
+                    yield self._create_error_response(
+                        error_msg,
+                        status_code=error_status_code,
+                        extra_fields=error_extra,
+                    )
                 return
 
             is_video = (generation_type == "video")
@@ -1674,7 +1745,7 @@ class GenerationHandler:
             # 提取URL和mediaId
             media = result.get("media", [])
             if not media:
-                self._mark_generation_failed(generation_result, "\u751f\u6210\u7ed3\u679c\u4e3a\u7a7a")
+                self._mark_generation_failed(generation_result, "\u751f\u6210\u7ed3\u679c\u4e3a\u7a7a", status_code=502)
                 yield self._create_error_response("生成结果为空", status_code=502)
                 return
 
@@ -1684,8 +1755,9 @@ class GenerationHandler:
                 "type": "image",
                 "origin_image_url": image_url
             }
+            upsample_resolution = model_config.get("upsample")
 
-            if poll_task_id and not (model_config.get("upsample") and media_id):
+            if poll_task_id and not upsample_resolution:
                 await self._maybe_update_poll_task(
                     poll_task_id,
                     job_phase="finalizing",
@@ -1693,7 +1765,24 @@ class GenerationHandler:
                 )
 
             # 检查是否需要 upsample
-            upsample_resolution = model_config.get("upsample")
+            if upsample_resolution and not media_id:
+                error_msg = await self._fail_image_upscale_generation(
+                    generation_result=generation_result,
+                    poll_task_id=poll_task_id,
+                    error_message="Requested image upscale failed: missing media id from generation response",
+                )
+                if stream:
+                    yield self._create_stream_chunk(f"⚠️ {error_msg}\n")
+                yield self._create_error_response(
+                    error_msg,
+                    status_code=502,
+                    extra_fields={
+                        "upscale_status": "failed",
+                        "upscale_error_message": error_msg,
+                    },
+                )
+                return
+
             if upsample_resolution and media_id:
                 await self._maybe_update_poll_task(
                     poll_task_id,
@@ -1708,6 +1797,7 @@ class GenerationHandler:
 
                 # 4K/2K 图片重试逻辑 - 使用配置的最大重试次数
                 max_retries = config.flow_max_retries
+                upscale_failure_message = None
                 for retry_attempt in range(max_retries):
                     try:
                         # 调用 upsample API
@@ -1794,37 +1884,32 @@ class GenerationHandler:
                                 return
                             except Exception as e:
                                 debug_logger.log_error(f"Failed to cache {resolution_name} image: {str(e)}")
-                                response_state["url"] = image_url
-                                response_state["generated_assets"]["upscaled_image"]["local_url"] = None
-                                response_state["generated_assets"]["upscaled_image"]["url"] = image_url
-                                response_state["generated_assets"]["upscaled_image"]["delivery_mode"] = "inline_base64_fallback"
-                                self._mark_generation_succeeded(generation_result)
-                                base64_url = f"data:image/jpeg;base64,{encoded_image}"
+                                error_msg = await self._fail_image_upscale_generation(
+                                    generation_result=generation_result,
+                                    poll_task_id=poll_task_id,
+                                    error_message=(
+                                        f"Requested {resolution_name} image upscale failed: "
+                                        f"could not cache high-resolution image ({self._normalize_error_message(e, max_length=160)})"
+                                    ),
+                                )
                                 if stream:
-                                    cache_error = self._normalize_error_message(e, max_length=120)
-                                    yield self._create_stream_chunk(f"⚠️ 缓存失败: {cache_error}，返回内联图片...\n")
-                                    yield self._create_stream_chunk(
-                                        f"![Generated Image]({base64_url})",
-                                        finish_reason="stop",
-                                        extra_fields={
-                                            "generated_assets": response_state.get("generated_assets")
-                                        },
-                                    )
-                                else:
-                                    yield self._create_completion_response(
-                                        base64_url,
-                                        media_type="image",
-                                        extra_fields={
-                                            "generated_assets": response_state.get("generated_assets")
-                                        },
-                                    )
+                                    yield self._create_stream_chunk(f"⚠️ {error_msg}\n")
                                 if image_trace is not None:
                                     image_trace["upsample_ms"] = int((time.time() - upsample_started_at) * 1000)
+                                yield self._create_error_response(
+                                    error_msg,
+                                    status_code=502,
+                                    extra_fields={
+                                        "upscale_status": "failed",
+                                        "upscale_error_message": error_msg,
+                                    },
+                                )
                                 return
                         else:
                             debug_logger.log_warning("[UPSAMPLE] 返回结果为空")
+                            upscale_failure_message = f"Requested {resolution_name} image upscale failed: upstream returned an empty image"
                             if stream:
-                                yield self._create_stream_chunk(f"⚠️ 放大失败，返回原图...\n")
+                                yield self._create_stream_chunk(f"⚠️ {upscale_failure_message}\n")
                             break  # 空结果不重试
 
                     except Exception as e:
@@ -1840,11 +1925,30 @@ class GenerationHandler:
                             await asyncio.sleep(1)
                             continue
                         else:
+                            upscale_failure_message = (
+                                f"Requested {resolution_name} image upscale failed: "
+                                f"{self._normalize_error_message(error_str, max_length=220)}"
+                            )
                             if stream:
-                                yield self._create_stream_chunk(f"⚠️ 放大失败: {error_str}，返回原图...\n")
+                                yield self._create_stream_chunk(f"⚠️ {upscale_failure_message}\n")
                             break
                 if image_trace is not None:
                     image_trace["upsample_ms"] = int((time.time() - upsample_started_at) * 1000)
+                error_msg = await self._fail_image_upscale_generation(
+                    generation_result=generation_result,
+                    poll_task_id=poll_task_id,
+                    error_message=upscale_failure_message
+                    or f"Requested {resolution_name} image upscale failed",
+                )
+                yield self._create_error_response(
+                    error_msg,
+                    status_code=502,
+                    extra_fields={
+                        "upscale_status": "failed",
+                        "upscale_error_message": error_msg,
+                    },
+                )
+                return
 
             local_url = image_url
             cache_started_at = time.time()
@@ -1881,7 +1985,7 @@ class GenerationHandler:
                         if stream:
                             cache_error = self._normalize_error_message(e, max_length=120)
                             yield self._create_stream_chunk(f"{error_msg}: {cache_error}\n")
-                        self._mark_generation_failed(generation_result, error_msg)
+                        self._mark_generation_failed(generation_result, error_msg, status_code=502)
                         yield self._create_error_response(error_msg, status_code=502)
                         return
                     local_url = image_url
@@ -1895,7 +1999,7 @@ class GenerationHandler:
                 )
                 if stream:
                     yield self._create_stream_chunk(f"{error_msg}\n")
-                self._mark_generation_failed(generation_result, error_msg)
+                self._mark_generation_failed(generation_result, error_msg, status_code=502)
                 yield self._create_error_response(error_msg, status_code=502)
                 return
             elif stream:
@@ -2660,7 +2764,12 @@ class GenerationHandler:
 
         return json.dumps(response, ensure_ascii=False)
 
-    def _create_error_response(self, error_message: str, status_code: int = 500) -> str:
+    def _create_error_response(
+        self,
+        error_message: str,
+        status_code: int = 500,
+        extra_fields: Optional[Dict[str, Any]] = None,
+    ) -> str:
         """创建错误响应"""
         import json
 
@@ -2672,6 +2781,10 @@ class GenerationHandler:
                 "status_code": status_code,
             }
         }
+        if isinstance(extra_fields, dict):
+            for key, value in extra_fields.items():
+                if value is not None and key not in error:
+                    error[key] = value
 
         return json.dumps(error, ensure_ascii=False)
 

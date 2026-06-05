@@ -16,8 +16,9 @@ from urllib.parse import parse_qs, quote, urlparse
 from curl_cffi.requests import AsyncSession
 from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from pydantic import BaseModel, Field
 
 from ..core import auth as auth_core
 from ..core.auth import verify_api_key_flexible
@@ -36,6 +37,7 @@ from ..core.models import (
     GeminiContent,
     GeminiGenerateContentRequest,
     Project,
+    RunwayTask,
     Task,
     TaskTrackerContributorFetchRequest,
     TaskTrackerKeywordSearchRequest,
@@ -45,6 +47,7 @@ from ..services.browser_captcha_extension import ExtensionCaptchaService
 from ..services.cloning_metadata_service import CloningMetadataService
 from ..services.generation_handler import MODEL_CONFIG, GenerationHandler
 from ..services.llm_provider_chain import LlmProviderChain
+from ..services.runway_service import RunwayService
 from ..services.tas_tracker_service import TaskTrackerService
 
 router = APIRouter()
@@ -92,6 +95,7 @@ GEMINI_STATUS_MAP = {
 
 # Dependency injection will be set up in main.py
 generation_handler: GenerationHandler = None
+runway_service: RunwayService = None
 _llm_chain = LlmProviderChain()
 cloning_metadata_service = CloningMetadataService(_llm_chain)
 task_tracker_service = TaskTrackerService()
@@ -109,6 +113,43 @@ class NormalizedGenerationRequest:
     project_id: Optional[str] = None
 
 
+class RunwayMediaInput(BaseModel):
+    role: Optional[str] = None
+    url: Optional[str] = None
+    data_url: Optional[str] = None
+    uri: Optional[str] = None
+    asset_id: Optional[str] = None
+    assetId: Optional[str] = None
+    tag: Optional[str] = None
+    name: Optional[str] = None
+    content_type: Optional[str] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class RunwayTaskCreateRequest(BaseModel):
+    model: str
+    prompt: str = ""
+    mode: Optional[str] = None
+    media: List[RunwayMediaInput] = Field(default_factory=list)
+    aspect_ratio: Optional[str] = None
+    orientation: Optional[str] = None
+    duration: Optional[int] = None
+    resolution: Optional[str] = None
+    image_size: Optional[str] = None
+    num_outputs: Optional[int] = None
+    seed: Optional[int] = None
+    sound: Optional[bool] = None
+    fps: Optional[int] = None
+    voice_id: Optional[str] = None
+    multi_shot: Optional[List[Dict[str, Any]]] = None
+    upscale: Optional[Dict[str, Any]] = None
+    options: Dict[str, Any] = Field(default_factory=dict)
+
+
+class RunwayEstimateRequest(RunwayTaskCreateRequest):
+    pass
+
+
 def _strip_optional_project_id(value: Optional[str]) -> Optional[str]:
     if not value or not isinstance(value, str):
         return None
@@ -122,10 +163,22 @@ def set_generation_handler(handler: GenerationHandler):
     generation_handler = handler
 
 
+def set_runway_service(service: RunwayService):
+    """Set Runway service instance."""
+    global runway_service
+    runway_service = service
+
+
 def _ensure_generation_handler() -> GenerationHandler:
     if generation_handler is None:
         raise HTTPException(status_code=500, detail="Generation handler not initialized")
     return generation_handler
+
+
+def _ensure_runway_service() -> RunwayService:
+    if runway_service is None:
+        raise HTTPException(status_code=500, detail="Runway service not initialized")
+    return runway_service
 
 
 LOG_OP_ADOBE_CLONING_PROMPTS = "adobe:cloning_prompts"
@@ -145,6 +198,12 @@ def _require_managed_scope(auth_ctx: AuthContext, scope_id: str) -> None:
         status_code=403,
         detail=f"Missing scope: {scope_id}",
     )
+
+
+def _require_runway_scope(auth_ctx: AuthContext) -> None:
+    if auth_ctx.key_id is None:
+        raise HTTPException(status_code=403, detail="Managed API key required for Runway")
+    _require_managed_scope(auth_ctx, "runway:generate")
 
 
 async def _logged_managed_adobe_call(
@@ -206,6 +265,22 @@ def _get_openai_model_catalog() -> List[Dict[str, str]]:
             "description": _build_model_description(model_config),
         }
         for model_id, model_config in MODEL_CONFIG.items()
+    ]
+
+
+async def _get_runway_openai_model_catalog() -> List[Dict[str, str]]:
+    if runway_service is None:
+        return []
+    cfg = await runway_service.db.get_runway_config()
+    if not cfg.enabled:
+        return []
+    models = await runway_service.db.list_runway_models(enabled_only=True)
+    return [
+        {
+            "id": model.public_model_id,
+            "description": f"Runway {model.kind} generation - {model.task_type}",
+        }
+        for model in models
     ]
 
 
@@ -724,6 +799,193 @@ async def _collect_non_stream_result(
     return result
 
 
+def _is_runway_model(model: str) -> bool:
+    return RunwayService.is_runway_model(model)
+
+
+def _request_extra_dict(request: Any) -> Dict[str, Any]:
+    extra = getattr(request, "model_extra", None)
+    data = dict(extra) if isinstance(extra, dict) else {}
+    extra_body = data.get("extra_body")
+    if isinstance(extra_body, dict):
+        merged = dict(extra_body)
+        merged.update({k: v for k, v in data.items() if k != "extra_body"})
+        return merged
+    return data
+
+
+def _runway_media_from_images(images: List[bytes]) -> List[Dict[str, Any]]:
+    media: List[Dict[str, Any]] = []
+    for image in images or []:
+        mime_type = _detect_image_mime_type(image)
+        media.append(
+            {
+                "data_url": f"data:{mime_type};base64,{base64.b64encode(image).decode('ascii')}",
+            }
+        )
+    return media
+
+
+def _runway_request_params_from_openai(
+    request: ChatCompletionRequest,
+    normalized: NormalizedGenerationRequest,
+) -> Dict[str, Any]:
+    def parse_bool(value: Any) -> Optional[bool]:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return value
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "on"}:
+            return True
+        if text in {"0", "false", "no", "off"}:
+            return False
+        return bool(value)
+
+    extras = _request_extra_dict(request)
+    gen_cfg = request.generationConfig
+    image_cfg = getattr(gen_cfg, "imageConfig", None) if gen_cfg is not None else None
+    aspect_ratio = (
+        extras.get("aspect_ratio")
+        or extras.get("aspectRatio")
+        or getattr(gen_cfg, "aspectRatio", None)
+        or getattr(image_cfg, "aspectRatio", None)
+    )
+    image_size = (
+        extras.get("image_size")
+        or extras.get("imageSize")
+        or getattr(gen_cfg, "imageSize", None)
+        or getattr(image_cfg, "imageSize", None)
+    )
+    duration = extras.get("duration")
+    resolution = extras.get("resolution")
+    num_outputs = extras.get("num_outputs", extras.get("n"))
+    seed = extras.get("seed")
+    sound = extras.get("sound")
+    fps = extras.get("fps")
+    voice_id = extras.get("voice_id") or extras.get("voiceId")
+    mode = extras.get("mode")
+    media_extra = extras.get("media")
+    options = extras.get("options") or extras.get("runway_options") or {}
+    media = _runway_media_from_images(normalized.images)
+    if isinstance(media_extra, list):
+        media.extend(item for item in media_extra if isinstance(item, dict))
+    return {
+        "media": media,
+        "mode": str(mode) if mode else None,
+        "aspect_ratio": str(aspect_ratio) if aspect_ratio else None,
+        "duration": int(duration) if duration is not None and str(duration).strip().isdigit() else None,
+        "resolution": str(resolution) if resolution else None,
+        "image_size": str(image_size) if image_size else None,
+        "num_outputs": int(num_outputs) if num_outputs is not None and str(num_outputs).strip().isdigit() else None,
+        "seed": int(seed) if seed is not None and str(seed).strip().lstrip("-").isdigit() else None,
+        "sound": parse_bool(sound),
+        "fps": int(fps) if fps is not None and str(fps).strip().isdigit() else None,
+        "voice_id": str(voice_id) if voice_id else None,
+        "multi_shot": extras.get("multi_shot") if isinstance(extras.get("multi_shot"), list) else None,
+        "upscale": extras.get("upscale") if isinstance(extras.get("upscale"), dict) else None,
+        "options": options if isinstance(options, dict) else {},
+    }
+
+
+def _runway_openai_chunk(content: str, *, role: Optional[str] = None) -> str:
+    delta: Dict[str, Any] = {}
+    if role:
+        delta["role"] = role
+    if content:
+        delta["content"] = content
+    payload = {
+        "id": f"chatcmpl-runway-{int(time.time())}",
+        "object": "chat.completion.chunk",
+        "created": int(time.time()),
+        "model": "runway",
+        "choices": [{"index": 0, "delta": delta, "finish_reason": None}],
+    }
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+def _runway_openai_done_chunk() -> str:
+    payload = {
+        "id": f"chatcmpl-runway-{int(time.time())}",
+        "object": "chat.completion.chunk",
+        "created": int(time.time()),
+        "model": "runway",
+        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+    }
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+async def _start_runway_from_openai_request(
+    request: ChatCompletionRequest,
+    normalized: NormalizedGenerationRequest,
+    api_key_id: Optional[int],
+) -> RunwayTask:
+    service = _ensure_runway_service()
+    params = _runway_request_params_from_openai(request, normalized)
+    return await service.start_task(
+        public_model_id=normalized.model,
+        prompt=normalized.prompt,
+        media=params["media"],
+        mode=params["mode"],
+        aspect_ratio=params["aspect_ratio"],
+        duration=params["duration"],
+        resolution=params["resolution"],
+        image_size=params["image_size"],
+        num_outputs=params["num_outputs"],
+        seed=params["seed"],
+        sound=params["sound"],
+        fps=params["fps"],
+        voice_id=params["voice_id"],
+        multi_shot=params["multi_shot"],
+        upscale=params["upscale"],
+        options=params["options"],
+        api_key_id=api_key_id,
+    )
+
+
+async def _runway_openai_non_stream(
+    request: ChatCompletionRequest,
+    normalized: NormalizedGenerationRequest,
+    *,
+    api_key_id: Optional[int],
+    base_url: Optional[str],
+) -> Dict[str, Any]:
+    service = _ensure_runway_service()
+    task = await _start_runway_from_openai_request(request, normalized, api_key_id)
+    final = await service.wait_for_task(task.job_id, api_key_id=api_key_id, base_url=base_url)
+    return service.task_to_openai_payload(final)
+
+
+async def _iterate_runway_openai_stream(
+    request: ChatCompletionRequest,
+    normalized: NormalizedGenerationRequest,
+    *,
+    api_key_id: Optional[int],
+    base_url: Optional[str],
+):
+    service = _ensure_runway_service()
+    yield _runway_openai_chunk("Runway task submitted.\n", role="assistant")
+    task = await _start_runway_from_openai_request(request, normalized, api_key_id)
+    last_progress = -1
+    while True:
+        current = await service.poll_task(task.job_id, api_key_id=api_key_id, base_url=base_url)
+        if current.progress != last_progress and current.status == "processing":
+            last_progress = current.progress
+            yield _runway_openai_chunk(f"Runway progress: {current.progress}%\n")
+        if current.status in {"completed", "failed"}:
+            payload = service.task_to_openai_payload(current)
+            if "error" in payload:
+                yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+            else:
+                content = _extract_openai_message_content(payload)
+                yield _runway_openai_chunk(content)
+                yield _runway_openai_done_chunk()
+            yield "data: [DONE]\n\n"
+            return
+        cfg = await service.db.get_runway_config()
+        await asyncio.sleep(float(cfg.poll_interval_sec))
+
+
 def _parse_handler_result(result: str) -> Dict[str, Any]:
     try:
         return json.loads(result)
@@ -892,6 +1154,7 @@ def _extract_async_delivery_fields(
     base_result_urls = list(direct_urls)
     result_urls = list(direct_urls)
     delivery_urls = list(direct_urls)
+    suppress_delivery_urls = False
 
     if isinstance(generated_assets, dict):
         asset_type = generated_assets.get("type")
@@ -909,6 +1172,7 @@ def _extract_async_delivery_fields(
             upscaled_image = generated_assets.get("upscaled_image")
             if isinstance(upscaled_image, dict):
                 upscale_url = upscaled_image.get("url") or upscaled_image.get("local_url")
+                has_upscale_url = isinstance(upscale_url, str) and bool(upscale_url.strip())
                 if isinstance(upscale_url, str) and upscale_url.strip():
                     result_urls = [upscale_url.strip()]
                     delivery_urls = [upscale_url.strip()]
@@ -919,12 +1183,20 @@ def _extract_async_delivery_fields(
                 if delivery_mode == "inline_base64_fallback":
                     upscale_status = "failed"
                     upscale_error_message = "Upscale cache delivery failed; returned base64 fallback"
-                else:
+                elif has_upscale_url:
                     upscale_status = "completed"
+                else:
+                    upscale_status = "failed"
+                    upscale_error_message = "Upscale completed without a deliverable URL"
             elif requested_resolution is not None:
                 upscale_status = "failed"
                 if delivery_urls:
                     output_resolution = "1k"
+            if requested_resolution is not None and upscale_status != "completed":
+                suppress_delivery_urls = True
+                result_urls = []
+                delivery_urls = []
+                upscale_error_message = upscale_error_message or "Requested image upscale did not complete"
         elif asset_type == "video":
             final_video_url = generated_assets.get("final_video_url")
             if isinstance(final_video_url, str) and final_video_url.strip():
@@ -939,7 +1211,7 @@ def _extract_async_delivery_fields(
     elif requested_resolution is None:
         upscale_status = "not_requested"
 
-    if not delivery_urls and base_result_urls:
+    if not suppress_delivery_urls and not delivery_urls and base_result_urls:
         delivery_urls = list(base_result_urls)
     if not output_resolution and delivery_urls:
         output_resolution = requested_resolution
@@ -986,6 +1258,13 @@ async def _run_async_generation_task(
                 payload.get("error", {}).get("message", "Upstream generation error"),
                 selection_context=selection_context,
             )
+            requested_resolution = _infer_requested_resolution(normalized.model)
+            upscale_error_message = payload.get("upscale_error_message")
+            if not isinstance(upscale_error_message, str) or not upscale_error_message.strip():
+                upscale_error_message = error_msg if requested_resolution else None
+            captcha_status = _infer_async_failed_captcha_status(error_msg)
+            if payload.get("upscale_status") == "failed" and captcha_status == "unknown":
+                captcha_status = "idle"
             debug_logger.log_error(
                 "[ASYNC JOB] upstream error payload: "
                 f"task_id={task_id}, error={error_msg}, raw_error={payload.get('error')}"
@@ -993,15 +1272,45 @@ async def _run_async_generation_task(
             await handler.db.update_task(
                 task_id,
                 status="failed",
+                result_urls=[],
+                base_result_urls=[],
+                delivery_urls=[],
                 error_message=error_msg,
-                upscale_status="failed" if _infer_requested_resolution(normalized.model) else "not_requested",
+                upscale_status="failed" if requested_resolution else "not_requested",
+                upscale_error_message=upscale_error_message,
                 completed_at=datetime.utcnow(),
                 job_phase="failed",
-                captcha_status=_infer_async_failed_captcha_status(error_msg),
+                captcha_status=captcha_status,
             )
             return
 
         fields = _extract_async_delivery_fields(payload, normalized.model)
+        model_config = MODEL_CONFIG.get(normalized.model) or {}
+        if (
+            model_config.get("type") == "image"
+            and fields["requested_resolution"] is not None
+            and fields["upscale_status"] != "completed"
+        ):
+            error_msg = fields["upscale_error_message"] or "Requested image upscale did not complete"
+            await handler.db.update_task(
+                task_id,
+                status="failed",
+                result_urls=[],
+                base_result_urls=[],
+                delivery_urls=[],
+                requested_resolution=fields["requested_resolution"],
+                output_resolution=fields["output_resolution"],
+                upscale_status="failed",
+                upscale_error_message=error_msg,
+                error_message=error_msg,
+                completed_at=datetime.utcnow(),
+                job_phase="failed",
+                captcha_status="idle",
+            )
+            debug_logger.log_error(
+                f"[ASYNC JOB] failed requested image upscale: task_id={task_id}, error={error_msg}"
+            )
+            return
         await handler.db.update_task(
             task_id,
             status="completed",
@@ -1026,6 +1335,9 @@ async def _run_async_generation_task(
         await handler.db.update_task(
             task_id,
             status="failed",
+            result_urls=[],
+            base_result_urls=[],
+            delivery_urls=[],
             error_message=err_final,
             upscale_status="failed" if _infer_requested_resolution(normalized.model) else "not_requested",
             completed_at=datetime.utcnow(),
@@ -1895,6 +2207,15 @@ async def list_models(auth_ctx: AuthContext = Depends(verify_api_key_flexible)):
         }
         for model in _get_openai_model_catalog()
     ]
+    models.extend(
+        {
+            "id": model["id"],
+            "object": "model",
+            "owned_by": "runway",
+            "description": model["description"],
+        }
+        for model in await _get_runway_openai_model_catalog()
+    )
 
     return {"object": "list", "data": models}
 
@@ -1945,6 +2266,189 @@ async def get_gemini_model(model: str, auth_ctx: AuthContext = Depends(verify_ap
     return _build_gemini_model_resource(model, description)
 
 
+@router.get("/v1/runway/models")
+async def list_runway_models(auth_ctx: AuthContext = Depends(verify_api_key_flexible)):
+    _require_runway_scope(auth_ctx)
+    service = _ensure_runway_service()
+    cfg = await service.db.get_runway_config()
+    models = await service.db.list_runway_models(enabled_only=False)
+    def load_json(raw: Any, fallback: Any) -> Any:
+        parsed = RunwayService._json_loads(raw, fallback)
+        return parsed if isinstance(parsed, type(fallback)) else fallback
+    return {
+        "success": True,
+        "enabled": bool(cfg.enabled),
+        "models": [
+            {
+                "id": model.public_model_id,
+                "display_name": model.display_name,
+                "kind": model.kind,
+                "task_type": model.task_type,
+                "builder_key": model.builder_key,
+                "is_enabled": bool(model.is_enabled),
+                "live_available": bool(model.live_available),
+                "available": bool(cfg.enabled and model.is_enabled and model.live_available),
+                "disabled_reason": model.disabled_reason or "",
+                "modes": load_json(model.supported_modes, []),
+                "media_roles": load_json(model.media_roles, []),
+                "limits": load_json(model.limits, {}),
+                "option_schema": load_json(model.capability_schema, {}),
+                "feature_flags": load_json(model.feature_flags, []),
+                "cost_feature": model.cost_feature or "",
+                "source_version": model.source_version or "",
+                "last_synced_at": model.last_synced_at.isoformat() if model.last_synced_at else None,
+            }
+            for model in models
+        ],
+    }
+
+
+@router.get("/v1/runway/voices")
+async def list_runway_voices(auth_ctx: AuthContext = Depends(verify_api_key_flexible)):
+    _require_runway_scope(auth_ctx)
+    service = _ensure_runway_service()
+    try:
+        return {"success": True, "voices": await service.get_voices()}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/v1/runway/uploads")
+async def upload_runway_media(
+    raw_request: Request,
+    file: UploadFile = File(...),
+    role: str = Form("reference_image"),
+    asset_group_id: Optional[str] = Form(None),
+    metadata_json: str = Form("{}"),
+    auth_ctx: AuthContext = Depends(verify_api_key_flexible),
+):
+    _require_runway_scope(auth_ctx)
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+    metadata: Dict[str, Any] = {}
+    try:
+        parsed = json.loads(metadata_json or "{}")
+        if isinstance(parsed, dict):
+            metadata = parsed
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="metadata_json must be a JSON object") from exc
+    service = _ensure_runway_service()
+    try:
+        return await service.upload_media(
+            filename=Path(file.filename or "upload.bin").name,
+            content=content,
+            content_type=file.content_type or mimetypes.guess_type(file.filename or "")[0] or "application/octet-stream",
+            api_key_id=auth_ctx.key_id,
+            base_url=_get_request_base_url(raw_request),
+            media_role=role,
+            asset_group_id=asset_group_id,
+            metadata=metadata,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/v1/runway/estimate")
+async def estimate_runway_task(
+    request: RunwayEstimateRequest,
+    auth_ctx: AuthContext = Depends(verify_api_key_flexible),
+):
+    _require_runway_scope(auth_ctx)
+    service = _ensure_runway_service()
+    try:
+        estimate = await service.estimate_task(
+            public_model_id=request.model,
+            prompt=request.prompt,
+            media=[item.model_dump(exclude_none=True) for item in request.media],
+            mode=request.mode,
+            aspect_ratio=request.aspect_ratio,
+            orientation=request.orientation,
+            duration=request.duration,
+            resolution=request.resolution,
+            image_size=request.image_size,
+            num_outputs=request.num_outputs,
+            seed=request.seed,
+            sound=request.sound,
+            fps=request.fps,
+            voice_id=request.voice_id,
+            multi_shot=request.multi_shot,
+            upscale=request.upscale,
+            options=request.options,
+        )
+        return {"success": True, "estimate": estimate}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/v1/runway/tasks")
+async def create_runway_task(
+    request: RunwayTaskCreateRequest,
+    auth_ctx: AuthContext = Depends(verify_api_key_flexible),
+):
+    _require_runway_scope(auth_ctx)
+    service = _ensure_runway_service()
+    try:
+        task = await service.start_task(
+            public_model_id=request.model,
+            prompt=request.prompt,
+            media=[item.model_dump(exclude_none=True) for item in request.media],
+            mode=request.mode,
+            aspect_ratio=request.aspect_ratio,
+            orientation=request.orientation,
+            duration=request.duration,
+            resolution=request.resolution,
+            image_size=request.image_size,
+            num_outputs=request.num_outputs,
+            seed=request.seed,
+            sound=request.sound,
+            fps=request.fps,
+            voice_id=request.voice_id,
+            multi_shot=request.multi_shot,
+            upscale=request.upscale,
+            options=request.options,
+            api_key_id=auth_ctx.key_id,
+        )
+        return JSONResponse(status_code=202, content=service.task_to_public_dict(task))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.get("/v1/runway/tasks/{job_id}")
+async def get_runway_task(
+    job_id: str,
+    raw_request: Request,
+    auth_ctx: AuthContext = Depends(verify_api_key_flexible),
+):
+    _require_runway_scope(auth_ctx)
+    service = _ensure_runway_service()
+    try:
+        task = await service.poll_task(job_id, api_key_id=auth_ctx.key_id, base_url=_get_request_base_url(raw_request))
+        return service.task_to_public_dict(task)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Runway job not found")
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+
+
+@router.post("/v1/runway/tasks/{job_id}/cancel")
+async def cancel_runway_task(
+    job_id: str,
+    auth_ctx: AuthContext = Depends(verify_api_key_flexible),
+):
+    _require_runway_scope(auth_ctx)
+    service = _ensure_runway_service()
+    try:
+        task = await service.cancel_task(job_id, api_key_id=auth_ctx.key_id)
+        return service.task_to_public_dict(task)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Runway job not found")
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 @router.post("/v1/chat/completions")
 async def create_chat_completion(
     request: ChatCompletionRequest,
@@ -1966,6 +2470,32 @@ async def create_chat_completion(
             raise HTTPException(status_code=400, detail="Prompt cannot be empty")
 
         request_base_url = _get_request_base_url(raw_request)
+        if _is_runway_model(normalized.model):
+            _require_runway_scope(auth_ctx)
+            if request.stream:
+                return StreamingResponse(
+                    _iterate_runway_openai_stream(
+                        request,
+                        normalized,
+                        api_key_id=auth_ctx.key_id,
+                        base_url=request_base_url,
+                    ),
+                    media_type="text/event-stream",
+                    headers={
+                        "Cache-Control": "no-cache",
+                        "Connection": "keep-alive",
+                        "X-Accel-Buffering": "no",
+                    },
+                )
+            return _build_openai_json_response(
+                await _runway_openai_non_stream(
+                    request,
+                    normalized,
+                    api_key_id=auth_ctx.key_id,
+                    base_url=request_base_url,
+                )
+            )
+
         allowed_token_ids, selected_project_id = await _select_random_active_project_for_api_key(
             auth_ctx,
             normalized.model,
@@ -2033,6 +2563,23 @@ async def create_chat_completion_async(
             raise HTTPException(status_code=400, detail="Prompt cannot be empty")
 
         request_base_url = _get_request_base_url(raw_request)
+        if _is_runway_model(normalized.model):
+            _require_runway_scope(auth_ctx)
+            task = await _start_runway_from_openai_request(
+                request,
+                normalized,
+                api_key_id=auth_ctx.key_id,
+            )
+            return JSONResponse(
+                status_code=202,
+                content={
+                    "job_id": task.job_id,
+                    "status": task.status,
+                    "model": task.public_model_id,
+                    "upstream_task_id": task.upstream_task_id,
+                },
+            )
+
         allowed_token_ids, selected_project_id = await _select_random_active_project_for_api_key(
             auth_ctx,
             normalized.model,
@@ -2086,12 +2633,24 @@ async def create_chat_completion_async(
 @router.get("/v1/jobs/{job_id}")
 async def get_job_status(
     job_id: str,
+    raw_request: Request,
     auth_ctx: AuthContext = Depends(verify_api_key_flexible),
 ):
     """Poll async generation job status."""
     handler = _ensure_generation_handler()
     task = await handler.db.get_task(job_id)
     if not task:
+        if runway_service is not None:
+            runway_task = await runway_service.db.get_runway_task(job_id)
+            if runway_task:
+                if auth_ctx.key_id is None or runway_task.api_key_id != auth_ctx.key_id:
+                    raise HTTPException(status_code=403, detail="Not authorized to view this job")
+                runway_task = await runway_service.poll_task(
+                    job_id,
+                    api_key_id=auth_ctx.key_id,
+                    base_url=_get_request_base_url(raw_request),
+                )
+                return runway_service.task_to_public_dict(runway_task)
         raise HTTPException(status_code=404, detail="Job not found")
 
     if auth_ctx.key_id is None or task.api_key_id != auth_ctx.key_id:

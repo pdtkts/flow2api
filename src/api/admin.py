@@ -5,11 +5,14 @@ import inspect
 import json
 import mimetypes
 import hashlib
+import shutil
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from fastapi import APIRouter, Depends, HTTPException, Header, Query, Request
+from fastapi import APIRouter, Depends, File, HTTPException, Header, Query, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
+from starlette.background import BackgroundTask
 from typing import Optional, List, Dict, Any
 import secrets
 import time
@@ -27,6 +30,7 @@ from ..core.monitoring import build_public_health_snapshot
 from ..services.token_manager import TokenManager
 from ..services.proxy_manager import ProxyManager
 from ..services.concurrency_manager import ConcurrencyManager
+from ..services.runway_service import RunwayService
 
 try:
     import httpx
@@ -41,12 +45,16 @@ proxy_manager: ProxyManager = None
 db: Database = None
 concurrency_manager: Optional[ConcurrencyManager] = None
 api_key_manager: Optional[ApiKeyManager] = None
+runway_service: Optional[RunwayService] = None
 
 # Admin session TTLs (seconds)
 _ADMIN_SESSION_TTL_REMEMBER = 30 * 24 * 3600  # 30 days when "remember me" is on
 _ADMIN_SESSION_TTL_BROWSER = 24 * 3600  # 24 hours when off
 
 SUPPORTED_API_CAPTCHA_METHODS = {"yescaptcha", "capmonster", "ezcaptcha", "capsolver"}
+MAX_SQLITE_RESTORE_BYTES = 512 * 1024 * 1024
+REQUIRED_SQLITE_RESTORE_TABLES = {"admin_config", "tokens"}
+_database_restore_lock = asyncio.Lock()
 
 
 def _generate_captcha_worker_key() -> str:
@@ -77,6 +85,58 @@ def _truncate_text(text: Any, limit: int = 240) -> str:
     if len(value) <= limit:
         return value
     return f"{value[:limit - 3]}..."
+
+
+def _validate_uploaded_sqlite_database(path: Path) -> Dict[str, Any]:
+    """Validate a candidate Flow2API SQLite DB before swapping it into place."""
+    if not path.exists() or path.stat().st_size <= 0:
+        raise HTTPException(status_code=400, detail="Uploaded database is empty")
+
+    try:
+        with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as conn:
+            row = conn.execute("PRAGMA integrity_check").fetchone()
+            integrity = row[0] if row else ""
+            if integrity != "ok":
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"SQLite integrity check failed: {integrity or 'unknown'}",
+                )
+
+            table_rows = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+            tables = {str(r[0]) for r in table_rows}
+    except HTTPException:
+        raise
+    except sqlite3.DatabaseError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid SQLite database: {exc}") from exc
+
+    missing = REQUIRED_SQLITE_RESTORE_TABLES - tables
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Uploaded database is missing required table(s): {', '.join(sorted(missing))}",
+        )
+
+    return {"size": path.stat().st_size, "table_count": len(tables)}
+
+
+def _create_sqlite_database_snapshot(source_path: Path, snapshot_path: Path) -> None:
+    """Create a consistent SQLite backup snapshot without copying a live DB file."""
+    source_uri = f"file:{source_path}?mode=ro"
+    try:
+        with sqlite3.connect(source_uri, uri=True) as source:
+            with sqlite3.connect(snapshot_path) as target:
+                source.backup(target)
+    except sqlite3.DatabaseError as exc:
+        raise HTTPException(status_code=500, detail=f"Database snapshot failed: {exc}") from exc
+
+
+def _unlink_path(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except Exception:
+        pass
 
 
 def _extract_error_summary(payload: Any) -> str:
@@ -564,14 +624,16 @@ def set_dependencies(
     database: Database,
     cm: Optional[ConcurrencyManager] = None,
     akm: Optional[ApiKeyManager] = None,
+    rs: Optional[RunwayService] = None,
 ):
     """Set service instances"""
-    global token_manager, proxy_manager, db, concurrency_manager, api_key_manager
+    global token_manager, proxy_manager, db, concurrency_manager, api_key_manager, runway_service
     token_manager = tm
     proxy_manager = pm
     db = database
     concurrency_manager = cm
     api_key_manager = akm
+    runway_service = rs
 
 
 # ========== Request Models ==========
@@ -740,6 +802,76 @@ class UpdateAdminConfigRequest(BaseModel):
     error_ban_enabled: Optional[bool] = None
 
 
+class RunwayConfigUpdateRequest(BaseModel):
+    enabled: Optional[bool] = None
+    base_url: Optional[str] = None
+    poll_interval_sec: Optional[float] = None
+    timeout_sec: Optional[float] = None
+    cache_outputs: Optional[bool] = None
+
+
+class RunwayAccountRequest(BaseModel):
+    label: str = ""
+    raw_credential: str = ""
+    is_active: bool = True
+    workspace_id: Optional[str] = None
+    team_id: Optional[str] = None
+    concurrency_limit: int = 1
+
+
+class RunwayAccountUpdateRequest(BaseModel):
+    label: Optional[str] = None
+    raw_credential: Optional[str] = None
+    is_active: Optional[bool] = None
+    workspace_id: Optional[str] = None
+    team_id: Optional[str] = None
+    concurrency_limit: Optional[int] = None
+
+
+class RunwayTeamsRequest(BaseModel):
+    raw_credential: str = ""
+
+
+class RunwayModelRequest(BaseModel):
+    public_model_id: str
+    display_name: str = ""
+    kind: str = "image"
+    task_type: str
+    builder_key: str = ""
+    default_options: str = "{}"
+    request_mapping: str = "{}"
+    capability_schema: str = "{}"
+    media_roles: str = "[]"
+    supported_modes: str = "[]"
+    limits: str = "{}"
+    feature_flags: str = "[]"
+    cost_feature: str = ""
+    source_version: str = ""
+    live_available: bool = True
+    disabled_reason: str = ""
+    is_enabled: bool = True
+
+
+class RunwayModelUpdateRequest(BaseModel):
+    public_model_id: Optional[str] = None
+    display_name: Optional[str] = None
+    kind: Optional[str] = None
+    task_type: Optional[str] = None
+    builder_key: Optional[str] = None
+    default_options: Optional[str] = None
+    request_mapping: Optional[str] = None
+    capability_schema: Optional[str] = None
+    media_roles: Optional[str] = None
+    supported_modes: Optional[str] = None
+    limits: Optional[str] = None
+    feature_flags: Optional[str] = None
+    cost_feature: Optional[str] = None
+    source_version: Optional[str] = None
+    live_available: Optional[bool] = None
+    disabled_reason: Optional[str] = None
+    is_enabled: Optional[bool] = None
+
+
 class ST2ATRequest(BaseModel):
     """ST转AT请求"""
     st: str
@@ -794,8 +926,6 @@ async def verify_admin_token(authorization: str = Header(None)):
 @router.post("/api/admin/login")
 async def admin_login(request: LoginRequest):
     """Admin login - returns session token (NOT API key)"""
-    admin_config = await db.get_admin_config()
-
     if not AuthManager.verify_admin(request.username, request.password):
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
@@ -809,7 +939,7 @@ async def admin_login(request: LoginRequest):
     return {
         "success": True,
         "token": session_token,  # Session token (NOT API key)
-        "username": admin_config.username
+        "username": config.admin_username
     }
 
 
@@ -826,10 +956,8 @@ async def change_password(
     token: str = Depends(verify_admin_token)
 ):
     """Change admin password"""
-    admin_config = await db.get_admin_config()
-
     # Verify old password
-    if not AuthManager.verify_admin(admin_config.username, request.old_password):
+    if not AuthManager.verify_admin(config.admin_username, request.old_password):
         raise HTTPException(status_code=400, detail="旧密码错误")
 
     # Update password and username in database
@@ -1708,6 +1836,377 @@ async def update_generation_config(
     return {"success": True, "message": "生成配置更新成功"}
 
 
+def _require_runway_service() -> RunwayService:
+    if runway_service is None:
+        raise HTTPException(status_code=500, detail="Runway service not initialized")
+    return runway_service
+
+
+def _validate_json_object_text(raw: str, field_name: str) -> str:
+    text = (raw or "").strip() or "{}"
+    try:
+        parsed = json.loads(text)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"{field_name} must be valid JSON") from exc
+    if not isinstance(parsed, dict):
+        raise HTTPException(status_code=400, detail=f"{field_name} must be a JSON object")
+    return json.dumps(parsed, ensure_ascii=False)
+
+
+def _validate_json_text(raw: str, field_name: str, fallback: str, expected_type) -> str:
+    text = (raw or "").strip() or fallback
+    try:
+        parsed = json.loads(text)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"{field_name} must be valid JSON") from exc
+    if not isinstance(parsed, expected_type):
+        label = "array" if expected_type is list else "object"
+        raise HTTPException(status_code=400, detail=f"{field_name} must be a JSON {label}")
+    return json.dumps(parsed, ensure_ascii=False)
+
+
+def _runway_account_payload(account) -> Dict[str, Any]:
+    return {
+        "id": account.id,
+        "label": account.label,
+        "raw_credential": account.raw_credential,
+        "is_active": bool(account.is_active),
+        "workspace_id": account.workspace_id or "",
+        "team_id": account.team_id or "",
+        "concurrency_limit": account.concurrency_limit,
+        "in_flight": account.in_flight,
+        "last_status": account.last_status or "",
+        "last_error": account.last_error or "",
+        "last_used_at": account.last_used_at.isoformat() if account.last_used_at else None,
+        "created_at": account.created_at.isoformat() if account.created_at else None,
+        "updated_at": account.updated_at.isoformat() if account.updated_at else None,
+    }
+
+
+def _clean_optional_text(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _runway_model_payload(model) -> Dict[str, Any]:
+    return {
+        "id": model.id,
+        "public_model_id": model.public_model_id,
+        "display_name": model.display_name,
+        "kind": model.kind,
+        "task_type": model.task_type,
+        "builder_key": model.builder_key,
+        "default_options": model.default_options,
+        "request_mapping": model.request_mapping,
+        "capability_schema": model.capability_schema,
+        "media_roles": model.media_roles,
+        "supported_modes": model.supported_modes,
+        "limits": model.limits,
+        "feature_flags": model.feature_flags,
+        "cost_feature": model.cost_feature,
+        "source_version": model.source_version,
+        "live_available": bool(model.live_available),
+        "disabled_reason": model.disabled_reason or "",
+        "last_synced_at": model.last_synced_at.isoformat() if model.last_synced_at else None,
+        "is_enabled": bool(model.is_enabled),
+        "created_at": model.created_at.isoformat() if model.created_at else None,
+        "updated_at": model.updated_at.isoformat() if model.updated_at else None,
+    }
+
+
+@router.get("/api/admin/runway/config")
+async def get_runway_admin_config(token: str = Depends(verify_admin_token)):
+    cfg = await db.get_runway_config()
+    accounts = await db.list_runway_accounts()
+    models = await db.list_runway_models()
+    return {
+        "success": True,
+        "config": {
+            "enabled": bool(cfg.enabled),
+            "base_url": cfg.base_url,
+            "poll_interval_sec": cfg.poll_interval_sec,
+            "timeout_sec": cfg.timeout_sec,
+            "cache_outputs": bool(cfg.cache_outputs),
+        },
+        "accounts": [_runway_account_payload(account) for account in accounts],
+        "models": [_runway_model_payload(model) for model in models],
+    }
+
+
+@router.post("/api/admin/runway/accounts/teams")
+async def get_runway_teams_for_credential(
+    request: RunwayTeamsRequest,
+    token: str = Depends(verify_admin_token),
+):
+    if not request.raw_credential.strip():
+        raise HTTPException(status_code=400, detail="Runway credential is required")
+    service = _require_runway_service()
+    try:
+        result = await service.get_teams_for_credential(request.raw_credential.strip())
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"success": True, **result}
+
+
+@router.post("/api/admin/runway/config")
+async def update_runway_admin_config(
+    request: RunwayConfigUpdateRequest,
+    token: str = Depends(verify_admin_token),
+):
+    cfg = await db.update_runway_config(
+        enabled=request.enabled,
+        base_url=request.base_url,
+        poll_interval_sec=request.poll_interval_sec,
+        timeout_sec=request.timeout_sec,
+        cache_outputs=request.cache_outputs,
+    )
+    return {
+        "success": True,
+        "config": {
+            "enabled": bool(cfg.enabled),
+            "base_url": cfg.base_url,
+            "poll_interval_sec": cfg.poll_interval_sec,
+            "timeout_sec": cfg.timeout_sec,
+            "cache_outputs": bool(cfg.cache_outputs),
+        },
+    }
+
+
+@router.post("/api/admin/runway/accounts")
+async def create_runway_account(
+    request: RunwayAccountRequest,
+    token: str = Depends(verify_admin_token),
+):
+    if not request.raw_credential.strip():
+        raise HTTPException(status_code=400, detail="Runway credential is required")
+    meta = RunwayService.describe_credential(request.raw_credential)
+    selected_workspace_id = _clean_optional_text(request.workspace_id)
+    selected_team_id = _clean_optional_text(request.team_id)
+    workspace_id = selected_workspace_id or _clean_optional_text(str(meta.get("workspace_id") or ""))
+    team_id = selected_team_id or selected_workspace_id or _clean_optional_text(str(meta.get("team_id") or ""))
+    account_id = await db.create_runway_account(
+        label=request.label.strip() or "Runway account",
+        raw_credential=request.raw_credential.strip(),
+        is_active=request.is_active,
+        workspace_id=workspace_id,
+        team_id=team_id,
+        concurrency_limit=max(-1, int(request.concurrency_limit or 1)),
+        last_status=str(meta.get("status") or ""),
+        last_error=str(meta.get("error") or ""),
+    )
+    account = await db.get_runway_account(account_id)
+    return {"success": True, "account": _runway_account_payload(account)}
+
+
+@router.patch("/api/admin/runway/accounts/{account_id}")
+async def update_runway_account(
+    account_id: int,
+    request: RunwayAccountUpdateRequest,
+    token: str = Depends(verify_admin_token),
+):
+    account = await db.get_runway_account(account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="Runway account not found")
+    updates: Dict[str, Any] = {}
+    if request.label is not None:
+        updates["label"] = request.label.strip()
+    if request.raw_credential is not None:
+        updates["raw_credential"] = request.raw_credential.strip()
+        meta = RunwayService.describe_credential(request.raw_credential)
+        if request.workspace_id is None:
+            updates["workspace_id"] = _clean_optional_text(str(meta.get("workspace_id") or ""))
+        if request.team_id is None:
+            updates["team_id"] = _clean_optional_text(str(meta.get("team_id") or ""))
+        updates["last_status"] = str(meta.get("status") or "")
+        updates["last_error"] = str(meta.get("error") or "")
+    if request.is_active is not None:
+        updates["is_active"] = request.is_active
+    if request.workspace_id is not None:
+        updates["workspace_id"] = _clean_optional_text(request.workspace_id)
+    if request.team_id is not None:
+        updates["team_id"] = _clean_optional_text(request.team_id)
+    if request.concurrency_limit is not None:
+        updates["concurrency_limit"] = max(-1, int(request.concurrency_limit))
+    await db.update_runway_account(account_id, **updates)
+    account = await db.get_runway_account(account_id)
+    return {"success": True, "account": _runway_account_payload(account)}
+
+
+@router.get("/api/admin/runway/accounts/{account_id}/teams")
+async def get_runway_account_teams(
+    account_id: int,
+    token: str = Depends(verify_admin_token),
+):
+    service = _require_runway_service()
+    try:
+        result = await service.get_account_teams(account_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"success": True, **result}
+
+
+@router.delete("/api/admin/runway/accounts/{account_id}")
+async def delete_runway_account(
+    account_id: int,
+    token: str = Depends(verify_admin_token),
+):
+    await db.delete_runway_account(account_id)
+    return {"success": True, "account_id": account_id}
+
+
+@router.post("/api/admin/runway/accounts/{account_id}/test")
+async def test_runway_account(
+    account_id: int,
+    token: str = Depends(verify_admin_token),
+):
+    service = _require_runway_service()
+    result = await service.test_account(account_id)
+    account = await db.get_runway_account(account_id)
+    return {
+        "success": bool(result.get("success")),
+        "status": result.get("status"),
+        "error": result.get("error"),
+        "account": _runway_account_payload(account) if account else None,
+    }
+
+
+@router.post("/api/admin/runway/models")
+async def upsert_runway_model(
+    request: RunwayModelRequest,
+    token: str = Depends(verify_admin_token),
+):
+    public_id = request.public_model_id.strip()
+    if not public_id.startswith("runway-"):
+        raise HTTPException(status_code=400, detail="Runway public model id must start with runway-")
+    if request.kind not in {"image", "video", "audio", "upscale"}:
+        raise HTTPException(status_code=400, detail="kind must be image, video, audio, or upscale")
+    if not request.task_type.strip():
+        raise HTTPException(status_code=400, detail="task_type is required")
+    await db.upsert_runway_model(
+        public_model_id=public_id,
+        display_name=request.display_name.strip() or public_id,
+        kind=request.kind,
+        task_type=request.task_type.strip(),
+        builder_key=request.builder_key.strip(),
+        default_options=_validate_json_object_text(request.default_options, "default_options"),
+        request_mapping=_validate_json_object_text(request.request_mapping, "request_mapping"),
+        capability_schema=_validate_json_object_text(request.capability_schema, "capability_schema"),
+        media_roles=_validate_json_text(request.media_roles, "media_roles", "[]", list),
+        supported_modes=_validate_json_text(request.supported_modes, "supported_modes", "[]", list),
+        limits=_validate_json_object_text(request.limits, "limits"),
+        feature_flags=_validate_json_text(request.feature_flags, "feature_flags", "[]", list),
+        cost_feature=request.cost_feature.strip(),
+        source_version=request.source_version.strip(),
+        live_available=bool(request.live_available),
+        disabled_reason=request.disabled_reason.strip(),
+        is_enabled=request.is_enabled,
+    )
+    model = await db.get_runway_model(public_id)
+    return {"success": True, "model": _runway_model_payload(model)}
+
+
+@router.patch("/api/admin/runway/models/{model_id}")
+async def update_runway_model(
+    model_id: int,
+    request: RunwayModelUpdateRequest,
+    token: str = Depends(verify_admin_token),
+):
+    models = await db.list_runway_models()
+    existing = next((m for m in models if m.id == model_id), None)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Runway model not found")
+    public_id = (request.public_model_id if request.public_model_id is not None else existing.public_model_id).strip()
+    if not public_id.startswith("runway-"):
+        raise HTTPException(status_code=400, detail="Runway public model id must start with runway-")
+    kind = (request.kind if request.kind is not None else existing.kind).strip()
+    if kind not in {"image", "video", "audio", "upscale"}:
+        raise HTTPException(status_code=400, detail="kind must be image, video, audio, or upscale")
+    await db.upsert_runway_model(
+        public_model_id=public_id,
+        display_name=(request.display_name if request.display_name is not None else existing.display_name).strip() or public_id,
+        kind=kind,
+        task_type=(request.task_type if request.task_type is not None else existing.task_type).strip(),
+        builder_key=(request.builder_key if request.builder_key is not None else existing.builder_key).strip(),
+        default_options=_validate_json_object_text(
+            request.default_options if request.default_options is not None else existing.default_options,
+            "default_options",
+        ),
+        request_mapping=_validate_json_object_text(
+            request.request_mapping if request.request_mapping is not None else existing.request_mapping,
+            "request_mapping",
+        ),
+        capability_schema=_validate_json_object_text(
+            request.capability_schema if request.capability_schema is not None else existing.capability_schema,
+            "capability_schema",
+        ),
+        media_roles=_validate_json_text(
+            request.media_roles if request.media_roles is not None else existing.media_roles,
+            "media_roles",
+            "[]",
+            list,
+        ),
+        supported_modes=_validate_json_text(
+            request.supported_modes if request.supported_modes is not None else existing.supported_modes,
+            "supported_modes",
+            "[]",
+            list,
+        ),
+        limits=_validate_json_object_text(
+            request.limits if request.limits is not None else existing.limits,
+            "limits",
+        ),
+        feature_flags=_validate_json_text(
+            request.feature_flags if request.feature_flags is not None else existing.feature_flags,
+            "feature_flags",
+            "[]",
+            list,
+        ),
+        cost_feature=(request.cost_feature if request.cost_feature is not None else existing.cost_feature).strip(),
+        source_version=(request.source_version if request.source_version is not None else existing.source_version).strip(),
+        live_available=bool(request.live_available if request.live_available is not None else existing.live_available),
+        disabled_reason=(request.disabled_reason if request.disabled_reason is not None else existing.disabled_reason).strip(),
+        is_enabled=bool(request.is_enabled if request.is_enabled is not None else existing.is_enabled),
+    )
+    if public_id != existing.public_model_id:
+        await db.delete_runway_model(model_id)
+    model = await db.get_runway_model(public_id)
+    return {"success": True, "model": _runway_model_payload(model)}
+
+
+@router.delete("/api/admin/runway/models/{model_id}")
+async def delete_runway_model(
+    model_id: int,
+    token: str = Depends(verify_admin_token),
+):
+    await db.delete_runway_model(model_id)
+    return {"success": True, "model_id": model_id}
+
+
+@router.post("/api/admin/runway/models/sync")
+async def sync_runway_models(token: str = Depends(verify_admin_token)):
+    service = _require_runway_service()
+    sync_result = await service.sync_models()
+    if isinstance(sync_result, dict):
+        synced = int(sync_result.get("synced") or 0)
+        blocked = int(sync_result.get("blocked") or 0)
+        disabled_task_types = int(sync_result.get("disabled_task_types") or 0)
+    else:
+        synced = int(sync_result or 0)
+        blocked = 0
+        disabled_task_types = 0
+    return {
+        "success": True,
+        "synced": synced,
+        "blocked": blocked,
+        "disabled_task_types": disabled_task_types,
+        "models": [_runway_model_payload(m) for m in await db.list_runway_models()],
+    }
+
+
 def _event_calendar_path() -> Path:
     return Path(__file__).resolve().parent.parent / "services" / "event_calendar_2026.csv"
 
@@ -1953,8 +2452,8 @@ async def get_admin_config(token: str = Depends(verify_admin_token)):
     admin_config = await db.get_admin_config()
 
     return {
-        "admin_username": admin_config.username,
-        "api_key": admin_config.api_key,
+        "admin_username": config.admin_username,
+        "api_key": config.api_key,
         "error_ban_threshold": admin_config.error_ban_threshold,
         "error_ban_enabled": admin_config.error_ban_enabled,
         "debug_enabled": config.debug_enabled  # Return actual debug status
@@ -2001,6 +2500,100 @@ async def update_api_key(
     await db.reload_config_to_memory()
 
     return {"success": True, "message": "API Key更新成功"}
+
+
+@router.post("/api/admin/database/restore")
+async def restore_sqlite_database(
+    database: UploadFile = File(...),
+    token: str = Depends(verify_admin_token),
+):
+    """Restore flow.db from an uploaded SQLite file."""
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database service is not initialized")
+
+    db_path = Path(db.db_path)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    upload_path = db_path.with_name(f"{db_path.name}.upload-{int(time.time())}-{secrets.token_hex(4)}")
+    backup_path = db_path.with_name(
+        f"{db_path.name}.backup-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
+    )
+
+    written = 0
+    try:
+        async with _database_restore_lock:
+            with open(upload_path, "wb") as out:
+                while True:
+                    chunk = await database.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    written += len(chunk)
+                    if written > MAX_SQLITE_RESTORE_BYTES:
+                        raise HTTPException(status_code=413, detail="Uploaded database is too large")
+                    out.write(chunk)
+
+            validation = _validate_uploaded_sqlite_database(upload_path)
+
+            if db_path.exists():
+                shutil.copy2(db_path, backup_path)
+
+            upload_path.replace(db_path)
+
+            await db.init_db()
+            await db.check_and_migrate_db(config.get_raw_config())
+            await db.reload_config_to_memory()
+
+        return {
+            "success": True,
+            "message": "Database restored. Log in again if your session is replaced by the uploaded DB.",
+            "database_path": str(db_path),
+            "backup_path": str(backup_path) if backup_path.exists() else None,
+            "size": validation["size"],
+            "table_count": validation["table_count"],
+        }
+    finally:
+        await database.close()
+        try:
+            if upload_path.exists():
+                upload_path.unlink()
+        except Exception:
+            pass
+
+
+@router.get("/api/admin/database/download")
+async def download_sqlite_database(token: str = Depends(verify_admin_token)):
+    """Download a consistent snapshot of the current flow.db SQLite database."""
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database service is not initialized")
+
+    db_path = Path(db.db_path)
+    if not db_path.is_file():
+        raise HTTPException(status_code=404, detail="Database file not found")
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+    snapshot_path = db_path.with_name(
+        f"{db_path.stem}.download-{timestamp}-{secrets.token_hex(4)}{db_path.suffix or '.db'}"
+    )
+    download_filename = f"{db_path.stem}-{timestamp}.db"
+
+    try:
+        async with _database_restore_lock:
+            await asyncio.to_thread(_create_sqlite_database_snapshot, db_path, snapshot_path)
+
+        if not snapshot_path.is_file() or snapshot_path.stat().st_size <= 0:
+            raise HTTPException(status_code=500, detail="Database snapshot is empty")
+
+        return FileResponse(
+            path=snapshot_path,
+            media_type="application/vnd.sqlite3",
+            filename=download_filename,
+            background=BackgroundTask(_unlink_path, snapshot_path),
+        )
+    except HTTPException:
+        _unlink_path(snapshot_path)
+        raise
+    except Exception as exc:
+        _unlink_path(snapshot_path)
+        raise HTTPException(status_code=500, detail=f"Database download failed: {exc}") from exc
 
 
 @router.get("/api/admin/managed-apikeys")
@@ -2455,8 +3048,18 @@ async def update_debug_config(
         # Hot reload updated value into runtime config.
         await db.reload_config_to_memory()
 
-        status = "enabled" if request.enabled else "disabled"
-        return {"success": True, "message": f"Debug mode {status}", "enabled": request.enabled}
+        actual_enabled = config.debug_enabled
+        status = "enabled" if actual_enabled else "disabled"
+        env_override_active = bool(actual_enabled != request.enabled)
+        message = f"Debug mode {status}"
+        if env_override_active:
+            message += " (environment override active)"
+        return {
+            "success": True,
+            "message": message,
+            "enabled": actual_enabled,
+            "env_override_active": env_override_active,
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to update debug config: {str(e)}")
 
@@ -2575,9 +3178,10 @@ async def _sync_runtime_cache_config():
 async def get_cache_config(token: str = Depends(verify_admin_token)):
     """Get cache configuration"""
     cache_config = await db.get_cache_config()
+    cache_base_url = config.cache_base_url
 
     # Calculate effective base URL
-    effective_base_url = cache_config.cache_base_url if cache_config.cache_base_url else f"http://127.0.0.1:8000"
+    effective_base_url = cache_base_url if cache_base_url else f"http://127.0.0.1:8000"
 
     ct = cache_config.cache_timeout or 0
     timeout_days = 0.0 if ct <= 0 else round(ct / 86400.0, 4)
@@ -2588,7 +3192,7 @@ async def get_cache_config(token: str = Depends(verify_admin_token)):
             "enabled": cache_config.cache_enabled,
             "timeout": cache_config.cache_timeout,
             "timeout_days": timeout_days,
-            "base_url": cache_config.cache_base_url or "",
+            "base_url": cache_base_url or "",
             "effective_base_url": effective_base_url
         }
     }

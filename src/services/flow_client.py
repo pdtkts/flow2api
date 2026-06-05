@@ -14,7 +14,7 @@ import urllib.error
 import urllib.request
 from curl_cffi.requests import AsyncSession
 from ..core.logger import debug_logger
-from ..core.config import config, get_yescaptcha_min_score
+from ..core.config import config, get_runtime_tmp_dir, get_yescaptcha_min_score
 from .extension_generation_service import ExtensionGenerationService
 from .browser_captcha_extension import NoExtensionGenerationWorkerError
 
@@ -545,9 +545,18 @@ class FlowClient:
                 debug_logger.log_error(f"[API FAILED] Request Body: {json_data}")
                 debug_logger.log_error(f"[API FAILED] Exception: {error_msg}")
 
+            http2_transport_error = self._is_http2_transport_error(error_msg)
+            if http2_transport_error:
+                debug_logger.log_warning(
+                    "🚨 [HTTP2 TRANSPORT] curl_cffi/libcurl HTTP/2 failure detected: "
+                    f"method={method.upper()}, url={url}, proxy={_proxy_endpoint_for_log(proxy_url)}, "
+                    f"timeout={request_timeout}s, allow_urllib_fallback={allow_urllib_fallback}, "
+                    f"error={error_msg[:240]}"
+                )
+
             if allow_urllib_fallback and self._should_fallback_to_urllib(error_msg):
                 debug_logger.log_warning(
-                    f"[HTTP FALLBACK] curl_cffi 请求失败，回退 urllib: {method.upper()} {url}"
+                    f"⚠️ [HTTP FALLBACK] curl_cffi request failed, falling back to urllib: {method.upper()} {url}"
                 )
                 try:
                     urllib_result = await asyncio.to_thread(
@@ -695,6 +704,8 @@ class FlowClient:
 
     def _should_fallback_to_urllib(self, error_message: str) -> bool:
         """判断是否应从 curl_cffi 回退到 urllib。"""
+        if self._is_http2_transport_error(error_message):
+            return True
         error_lower = (error_message or "").lower()
         return any(
             keyword in error_lower
@@ -796,8 +807,22 @@ class FlowClient:
             "curl: (7)",
         ])
 
+    def _is_http2_transport_error(self, error_message: str) -> bool:
+        """Recognize curl/libcurl HTTP/2 transport failures for targeted fallback logs."""
+        error_lower = (error_message or "").lower()
+        return any(keyword in error_lower for keyword in [
+            "curl: (16)",
+            "curle_http2",
+            "http/2 framing",
+            "http2 framing",
+            "http/2 stream",
+            "http2 stream",
+        ])
+
     def _is_retryable_network_error(self, error_str: str) -> bool:
         """识别可重试的 TLS/连接类网络错误。"""
+        if self._is_http2_transport_error(error_str):
+            return True
         error_lower = (error_str or "").lower()
         return any(keyword in error_lower for keyword in [
             "curl: (35)",
@@ -1586,6 +1611,16 @@ class FlowClient:
                 )
                 if should_retry:
                     continue
+                await _emit_poll_task_progress(
+                    poll_task_progress,
+                    {
+                        "status": "failed",
+                        "job_phase": "failed",
+                        "upscale_status": "failed",
+                        "captcha_status": "token_failed",
+                        "captcha_detail": "Failed to obtain reCAPTCHA token",
+                    },
+                )
                 raise last_error
             upsample_session_id = session_id or self._generate_session_id()
 
@@ -1629,11 +1664,24 @@ class FlowClient:
                 )
 
                 # 返回 base64 编码的图片
+                encoded_image = result.get("encodedImage", "")
+                if not encoded_image:
+                    await _emit_poll_task_progress(
+                        poll_task_progress,
+                        {
+                            "status": "failed",
+                            "job_phase": "failed",
+                            "upscale_status": "failed",
+                            "captcha_status": "idle",
+                            "captcha_detail": "Upscale response missing encodedImage",
+                        },
+                    )
+                    return ""
                 await _emit_poll_task_progress(
                     poll_task_progress,
                     {"captcha_status": "idle"},
                 )
-                return result.get("encodedImage", "")
+                return encoded_image
             except Exception as e:
                 last_error = e
                 err_text = str(e)
@@ -1658,10 +1706,33 @@ class FlowClient:
                 )
                 if should_retry:
                     continue
+                await _emit_poll_task_progress(
+                    poll_task_progress,
+                    {
+                        "status": "failed",
+                        "job_phase": "failed",
+                        "upscale_status": "failed",
+                        "captcha_status": cap or "idle",
+                        "captcha_detail": err_text[:240],
+                    },
+                )
                 raise
             finally:
                 await self._notify_browser_captcha_request_finished(browser_id)
 
+        if last_error is not None:
+            err_text = str(last_error)
+            cap = classify_recaptcha_upstream_failure(_http_status_from_flow_error(err_text), err_text)
+            await _emit_poll_task_progress(
+                poll_task_progress,
+                {
+                    "status": "failed",
+                    "job_phase": "failed",
+                    "upscale_status": "failed",
+                    "captcha_status": cap or "idle",
+                    "captcha_detail": err_text[:240],
+                },
+            )
         raise last_error
 
     # ========== 视频生成 (使用AT) - 异步返回 ==========
@@ -2759,13 +2830,13 @@ class FlowClient:
             if encoded_video and "SUCCESSFUL" in status:
                 video_bytes = base64.b64decode(encoded_video)
                 video_filename = f"concat_{uuid.uuid4().hex[:12]}.mp4"
-                save_dir = "tmp"
-                os.makedirs(save_dir, exist_ok=True)
-                save_path = os.path.join(save_dir, video_filename)
+                save_dir = get_runtime_tmp_dir()
+                save_dir.mkdir(parents=True, exist_ok=True)
+                save_path = save_dir / video_filename
                 with open(save_path, "wb") as f:
                     f.write(video_bytes)
                 result["outputUri"] = f"/tmp/{video_filename}"
-                result["local_file"] = save_path
+                result["local_file"] = str(save_path)
                 return result
             if "FAILED" in status or "ERROR" in status:
                 raise Exception(f"视频拼接失败: {status}")
