@@ -2516,6 +2516,7 @@ class GenerationHandler:
                             api_key_id=api_key_id,
                             token_id=token.id,
                             flow_project_id=project_id,
+                            auth_token=token.at,
                         )
                         local_url = self._build_cache_url(
                             cached_filename, response_state, flow_project_id=project_id

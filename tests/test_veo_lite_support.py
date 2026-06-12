@@ -455,6 +455,7 @@ class VideoCacheDeliveryTests(unittest.IsolatedAsyncioTestCase):
             api_key_id=11,
             token_id=7,
             flow_project_id="project-1",
+            auth_token="at-token",
         )
         returned_url = chunks[-1]["generated_assets"]["final_video_url"]
         self.assertIn("/api/cache/blob/cached.mp4", returned_url)
@@ -525,6 +526,7 @@ class VideoCacheDeliveryTests(unittest.IsolatedAsyncioTestCase):
             api_key_id=11,
             token_id=7,
             flow_project_id="project-1",
+            auth_token="at-token",
         )
         self.assertIn("/api/cache/blob/cached.mp4", chunks[-1]["generated_assets"]["final_video_url"])
 
@@ -554,6 +556,7 @@ class FileCacheVideoDownloadTests(unittest.IsolatedAsyncioTestCase):
                     api_key_id=1,
                     token_id=2,
                     flow_project_id="project-1",
+                    auth_token="at-token",
                 )
 
             self.assertTrue(filename.endswith(".mp4"))
@@ -561,6 +564,51 @@ class FileCacheVideoDownloadTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(call_kwargs["allow_redirects"])
             self.assertEqual(call_kwargs["headers"]["Origin"], "https://labs.google")
             self.assertEqual(call_kwargs["headers"]["Referer"], "https://labs.google/")
+            self.assertEqual(call_kwargs["headers"]["Authorization"], "Bearer at-token")
+
+    async def test_video_download_uses_httpx_when_cli_tools_are_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = FileCache(cache_dir=tmp, db=SimpleNamespace(record_cache_file=AsyncMock()))
+            httpx_response = SimpleNamespace(
+                status_code=200,
+                content=b"\x00\x00\x00\x18ftypmp42video-bytes",
+                headers={"content-type": "video/mp4"},
+            )
+            fake_httpx_client = SimpleNamespace(get=AsyncMock(return_value=httpx_response))
+
+            class FailingAsyncSession:
+                async def __aenter__(self):
+                    raise Exception("curl_cffi transport failed")
+
+                async def __aexit__(self, exc_type, exc, tb):
+                    return None
+
+            class FakeHttpxClient:
+                def __init__(self, *args, **kwargs):
+                    self.kwargs = kwargs
+
+                async def __aenter__(self):
+                    return fake_httpx_client
+
+                async def __aexit__(self, exc_type, exc, tb):
+                    return None
+
+            with (
+                patch("src.services.file_cache.AsyncSession", return_value=FailingAsyncSession()),
+                patch("src.services.file_cache.httpx.AsyncClient", FakeHttpxClient),
+                patch("subprocess.run", side_effect=FileNotFoundError("curl")) as run_mock,
+            ):
+                filename = await cache.download_and_cache(
+                    "https://labs.google/fx/api/trpc/media.getMediaUrlRedirect?name=media-1",
+                    "video",
+                    auth_token="at-token",
+                )
+
+            self.assertTrue(filename.endswith(".mp4"))
+            run_mock.assert_not_called()
+            httpx_call_kwargs = fake_httpx_client.get.await_args.kwargs
+            self.assertEqual(httpx_call_kwargs["headers"]["Authorization"], "Bearer at-token")
+            self.assertEqual(httpx_call_kwargs["headers"]["Origin"], "https://labs.google")
 
     async def test_video_download_rejects_html_response(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -581,13 +629,46 @@ class FileCacheVideoDownloadTests(unittest.IsolatedAsyncioTestCase):
 
             with (
                 patch("src.services.file_cache.AsyncSession", return_value=FakeAsyncSession()),
+                patch("src.services.file_cache.httpx.AsyncClient", return_value=FakeAsyncSession()),
                 patch("subprocess.run", side_effect=FileNotFoundError("curl")),
             ):
-                with self.assertRaises(Exception):
+                with self.assertRaises(Exception) as ctx:
                     await cache.download_and_cache(
                         "https://labs.google/fx/api/trpc/media.getMediaUrlRedirect?name=media-1",
                         "video",
                     )
+            self.assertIn("not valid media", str(ctx.exception))
+            self.assertNotIn("curl", str(ctx.exception).lower())
+
+    async def test_video_download_rejected_by_flow_is_not_reported_as_missing_curl(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = FileCache(cache_dir=tmp, db=SimpleNamespace(record_cache_file=AsyncMock()))
+            fake_response = SimpleNamespace(
+                status_code=403,
+                content=b"forbidden",
+                headers={"content-type": "text/plain"},
+            )
+            fake_session = SimpleNamespace(get=AsyncMock(return_value=fake_response))
+
+            class FakeAsyncSession:
+                async def __aenter__(self):
+                    return fake_session
+
+                async def __aexit__(self, exc_type, exc, tb):
+                    return None
+
+            with (
+                patch("src.services.file_cache.AsyncSession", return_value=FakeAsyncSession()),
+                patch("src.services.file_cache.httpx.AsyncClient", return_value=FakeAsyncSession()),
+                patch("subprocess.run", side_effect=FileNotFoundError("curl")),
+            ):
+                with self.assertRaises(Exception) as ctx:
+                    await cache.download_and_cache(
+                        "https://labs.google/fx/api/trpc/media.getMediaUrlRedirect?name=media-1",
+                        "video",
+                    )
+            self.assertIn("rejected by Flow media endpoint", str(ctx.exception))
+            self.assertNotIn("本机未安装 curl", str(ctx.exception))
 
 
 class VeoLiteFlowClientTests(unittest.IsolatedAsyncioTestCase):

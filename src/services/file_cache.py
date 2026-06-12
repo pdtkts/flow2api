@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Optional, Dict, Any, Tuple, List
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
+import httpx
 from curl_cffi.requests import AsyncSession
 from ..core.config import config
 from ..core.logger import debug_logger
@@ -128,6 +129,7 @@ class FileCache:
         self,
         media_type: str,
         fingerprint: Optional[Dict[str, Any]] = None,
+        auth_token: Optional[str] = None,
     ) -> Dict[str, str]:
         """构建媒体下载请求头，优先复用当前打码浏览器指纹。"""
         headers = {
@@ -167,6 +169,9 @@ class FileCache:
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
             "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         )
+        clean_auth_token = (auth_token or "").strip()
+        if clean_auth_token:
+            headers["Authorization"] = f"Bearer {clean_auth_token}"
         return headers
 
     def _is_valid_download_response(self, content: bytes, content_type: str, media_type: str) -> bool:
@@ -206,6 +211,37 @@ class FileCache:
                     temp_path.unlink()
                 except Exception:
                     pass
+
+    async def _store_download_response(
+        self,
+        *,
+        filename: str,
+        file_path: Path,
+        content: bytes,
+        content_type: str,
+        media_type: str,
+        api_key_id: Optional[int],
+        token_id: Optional[int],
+        flow_project_id: Optional[str],
+        source_url: str,
+        method_name: str,
+    ) -> str:
+        if not self._is_valid_download_response(content, content_type, media_type):
+            raise Exception("Downloaded video response is empty or not valid media")
+
+        self._write_cached_content(file_path, content)
+        await self._record_cache_metadata(
+            filename=filename,
+            api_key_id=api_key_id,
+            token_id=token_id,
+            flow_project_id=flow_project_id,
+            media_type=media_type,
+            source_url=source_url,
+        )
+        debug_logger.log_info(
+            f"File cached ({method_name}): {filename} ({len(content)} bytes)"
+        )
+        return filename
 
     async def start_cleanup_task(self):
         """Start background cleanup task"""
@@ -314,6 +350,14 @@ class FileCache:
 
         return message
 
+    def _safe_python_download_error(self, error: Exception, media_type: str) -> Exception:
+        message = str(error or "").strip()
+        if message.startswith("Downloaded ") or "Flow media endpoint" in message:
+            return Exception(message)
+        if media_type == "video":
+            return Exception("Python video cache download failed before receiving media")
+        return error
+
     async def download_and_cache(
         self,
         url: str,
@@ -321,6 +365,7 @@ class FileCache:
         api_key_id: Optional[int] = None,
         token_id: Optional[int] = None,
         flow_project_id: Optional[str] = None,
+        auth_token: Optional[str] = None,
     ) -> str:
         """
         Download file from URL and cache it locally
@@ -373,7 +418,12 @@ class FileCache:
 
             fingerprint = self._get_request_fingerprint()
             proxy_url = await self._resolve_download_proxy(media_type, fingerprint=fingerprint)
-            headers = self._build_download_headers(media_type, fingerprint=fingerprint)
+            headers = self._build_download_headers(
+                media_type,
+                fingerprint=fingerprint,
+                auth_token=auth_token,
+            )
+            python_download_error: Optional[Exception] = None
 
             # Try method 1: curl_cffi with browser impersonation
             try:
@@ -388,32 +438,67 @@ class FileCache:
                         allow_redirects=True,
                     )
 
-                    if response.status_code == 200 and self._is_valid_download_response(
-                        response.content,
-                        response.headers.get("content-type", ""),
-                        media_type,
-                    ):
-                        self._write_cached_content(file_path, response.content)
-                        await self._record_cache_metadata(
+                    if response.status_code == 200:
+                        return await self._store_download_response(
                             filename=filename,
+                            file_path=file_path,
+                            content=response.content,
+                            content_type=response.headers.get("content-type", ""),
+                            media_type=media_type,
                             api_key_id=api_key_id,
                             token_id=token_id,
                             flow_project_id=flow_project_id,
-                            media_type=media_type,
                             source_url=url,
+                            method_name="curl_cffi",
                         )
-                        debug_logger.log_info(
-                            f"File cached (curl_cffi): {filename} ({len(response.content)} bytes)"
-                        )
-                        return filename
+                    if media_type == "video" and response.status_code in (401, 403):
+                        python_download_error = Exception("Video cache download was rejected by Flow media endpoint")
+                    else:
+                        python_download_error = Exception(f"Python video cache download failed with HTTP {response.status_code}")
                     debug_logger.log_warning(
-                        f"curl_cffi failed with HTTP {response.status_code}, trying wget..."
+                        f"curl_cffi failed with HTTP {response.status_code}, trying httpx..."
                     )
 
             except Exception as e:
-                debug_logger.log_warning(f"curl_cffi failed: {str(e)}, trying wget...")
+                python_download_error = self._safe_python_download_error(e, media_type)
+                debug_logger.log_warning(f"curl_cffi failed: {str(e)}, trying httpx...")
 
-            # Try method 2: wget command
+            # Try method 2: httpx pure-Python fallback for environments without wget/curl.
+            try:
+                timeout = httpx.Timeout(60.0, connect=30.0)
+                async with httpx.AsyncClient(
+                    follow_redirects=True,
+                    timeout=timeout,
+                    verify=False,
+                    proxy=proxy_url,
+                ) as client:
+                    response = await client.get(url, headers=headers)
+
+                if response.status_code == 200:
+                    return await self._store_download_response(
+                        filename=filename,
+                        file_path=file_path,
+                        content=response.content,
+                        content_type=response.headers.get("content-type", ""),
+                        media_type=media_type,
+                        api_key_id=api_key_id,
+                        token_id=token_id,
+                        flow_project_id=flow_project_id,
+                        source_url=url,
+                        method_name="httpx",
+                    )
+                if media_type == "video" and response.status_code in (401, 403):
+                    python_download_error = Exception("Video cache download was rejected by Flow media endpoint")
+                else:
+                    python_download_error = Exception(f"Python video cache download failed with HTTP {response.status_code}")
+                debug_logger.log_warning(
+                    f"httpx failed with HTTP {response.status_code}, trying wget..."
+                )
+            except Exception as e:
+                python_download_error = self._safe_python_download_error(e, media_type)
+                debug_logger.log_warning(f"httpx failed: {str(e)}, trying wget...")
+
+            # Try method 3: wget command
             try:
                 import subprocess
 
@@ -430,6 +515,8 @@ class FileCache:
                     f"--header=Referer: {headers.get('Referer', 'https://labs.google/')}",
                     f"--header=Origin: {headers.get('Origin', 'https://labs.google')}",
                 ]
+                if "Authorization" in headers:
+                    wget_cmd.append(f"--header=Authorization: {headers['Authorization']}")
 
                 if "sec-ch-ua" in headers:
                     wget_cmd.append(f"--header=sec-ch-ua: {headers['sec-ch-ua']}")
@@ -469,7 +556,7 @@ class FileCache:
             except Exception as e:
                 debug_logger.log_warning(f"wget failed: {str(e)}, trying curl...")
 
-            # Try method 3: system curl command
+            # Try method 4: system curl command
             try:
                 import subprocess
 
@@ -493,6 +580,8 @@ class FileCache:
                     curl_cmd.extend(["-H", f"sec-ch-ua-mobile: {headers['sec-ch-ua-mobile']}"])
                 if "sec-ch-ua-platform" in headers:
                     curl_cmd.extend(["-H", f"sec-ch-ua-platform: {headers['sec-ch-ua-platform']}"])
+                if "Authorization" in headers:
+                    curl_cmd.extend(["-H", f"Authorization: {headers['Authorization']}"])
                 if proxy_url:
                     curl_cmd.extend(["-x", proxy_url])
 
@@ -516,7 +605,11 @@ class FileCache:
                 raise Exception(f"curl command failed: {error_msg}")
 
             except FileNotFoundError as e:
-                normalized_error = self._normalize_cache_error(e)
+                normalized_error = (
+                    self._normalize_cache_error(python_download_error)
+                    if python_download_error is not None
+                    else self._normalize_cache_error(e)
+                )
                 debug_logger.log_error(
                     error_message=f"Failed to download file: {str(e)}",
                     status_code=0,
@@ -524,7 +617,9 @@ class FileCache:
                 )
                 raise Exception(normalized_error) from e
             except Exception as e:
-                normalized_error = self._normalize_cache_error(e)
+                normalized_error = self._normalize_cache_error(
+                    python_download_error if python_download_error is not None else e
+                )
                 debug_logger.log_error(
                     error_message=f"Failed to download file: {str(e)}",
                     status_code=0,
