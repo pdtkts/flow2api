@@ -1321,7 +1321,7 @@ class GenerationHandler:
                 if unavailable_reason:
                     if error_msg:
                         error_msg = f"{error_msg}；{unavailable_reason}"
-                    else:
+                    elif False:
                         error_msg = unavailable_reason
             if not error_msg:
                 error_msg = self._get_no_token_error_message(generation_type)
@@ -2390,14 +2390,14 @@ class GenerationHandler:
                     # 成功
                     metadata = operation["operation"].get("metadata", {})
                     video_info = metadata.get("video", {})
-                    video_url = video_info.get("fifeUrl")
+                    source_video_url = video_info.get("fifeUrl")
                     video_media_id = video_info.get("mediaGenerationId")
-                    uuid_match = re.search(r"/video/([0-9a-f-]{36})", video_url or "")
+                    uuid_match = re.search(r"/video/([0-9a-f-]{36})", source_video_url or "")
                     if uuid_match:
                         video_media_id = uuid_match.group(1)
                     aspect_ratio = video_info.get("aspectRatio", "VIDEO_ASPECT_RATIO_LANDSCAPE")
 
-                    if not video_url:
+                    if not source_video_url:
                         error_msg = "视频生成失败: 视频URL为空"
                         operation_body = operation.get("operation", {}) if isinstance(operation, dict) else {}
                         url_empty_diagnostics = {
@@ -2501,13 +2501,47 @@ class GenerationHandler:
                                     if concat_url.startswith("/tmp/"):
                                         host = "localhost" if (config.server_host or "") == "0.0.0.0" else (config.server_host or "localhost")
                                         concat_url = f"http://{host}:{config.server_port}{concat_url}"
-                                    video_url = concat_url
+                                    source_video_url = concat_url
                         except Exception as e:
                             debug_logger.log_error(f"[CONCAT] 拼接失败: {str(e)}")
 
                     # 缓存视频 (如果启用)
-                    local_url = video_url
-                    if config.cache_enabled:
+                    await self._update_request_log_progress(request_log_state, token_id=token.id, status_text="caching_video", progress=92)
+                    try:
+                        if stream:
+                            yield self._create_stream_chunk("æ­£åœ¨ç¼“å­˜è§†é¢‘æ–‡ä»¶...\n")
+                        cached_filename = await self.file_cache.download_and_cache(
+                            source_video_url,
+                            "video",
+                            api_key_id=api_key_id,
+                            token_id=token.id,
+                            flow_project_id=project_id,
+                        )
+                        local_url = self._build_cache_url(
+                            cached_filename, response_state, flow_project_id=project_id
+                        )
+                        if stream:
+                            yield self._create_stream_chunk("âœ… è§†é¢‘ç¼“å­˜æˆåŠŸ,å‡†å¤‡è¿”å›žç¼“å­˜åœ°å€...\n")
+                    except Exception as e:
+                        cache_error = self._normalize_error_message(e, max_length=240)
+                        error_msg = f"è§†é¢‘ç”ŸæˆæˆåŠŸï¼Œä½†ç¼“å­˜è§†é¢‘å¤±è´¥: {cache_error}"
+                        debug_logger.log_error(f"Failed to cache video: {str(e)}")
+                        await self._fail_video_task(checked_operations, error_msg)
+                        self._mark_generation_failed(
+                            generation_result,
+                            error_msg,
+                            status_code=502,
+                            error_extra={"video_cache_status": "failed"},
+                        )
+                        if stream:
+                            yield self._create_stream_chunk(f"âŒ {error_msg}\n")
+                        yield self._create_error_response(
+                            error_msg,
+                            status_code=502,
+                            extra_fields={"video_cache_status": "failed"},
+                        )
+                        return
+                    if False and config.cache_enabled:
                         await self._update_request_log_progress(request_log_state, token_id=token.id, status_text="caching_video", progress=92)
                         try:
                             if stream:

@@ -140,6 +140,7 @@ class FileCache:
             "Accept-Encoding": "gzip, deflate, br",
             "Connection": "keep-alive",
             "Referer": "https://labs.google/",
+            "Origin": "https://labs.google",
             "Sec-Fetch-Site": "same-origin",
             "Sec-Fetch-Mode": "cors",
         }
@@ -167,6 +168,30 @@ class FileCache:
             "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         )
         return headers
+
+    def _is_valid_download_response(self, content: bytes, content_type: str, media_type: str) -> bool:
+        if not content:
+            return False
+        normalized_type = (content_type or "").split(";", 1)[0].strip().lower()
+        if media_type == "video":
+            if normalized_type.startswith("text/html"):
+                return False
+            prefix = content[:512].lstrip().lower()
+            if prefix.startswith(b"<!doctype html") or prefix.startswith(b"<html"):
+                return False
+        return True
+
+    def _validate_cached_file(self, file_path: Path, media_type: str) -> int:
+        if not file_path.exists():
+            raise Exception("Downloaded file is missing")
+        file_size = file_path.stat().st_size
+        if file_size <= 0:
+            raise Exception("Downloaded file is empty")
+        with open(file_path, "rb") as f:
+            prefix = f.read(512)
+        if not self._is_valid_download_response(prefix, "", media_type):
+            raise Exception("Downloaded file is not valid media")
+        return file_size
 
     def _write_cached_content(self, file_path: Path, content: bytes):
         """先写临时文件，再原子替换，避免并发读到半截文件。"""
@@ -359,10 +384,15 @@ class FileCache:
                         proxy=proxy_url,
                         headers=headers,
                         impersonate="chrome120",
-                        verify=False
+                        verify=False,
+                        allow_redirects=True,
                     )
 
-                    if response.status_code == 200 and response.content:
+                    if response.status_code == 200 and self._is_valid_download_response(
+                        response.content,
+                        response.headers.get("content-type", ""),
+                        media_type,
+                    ):
                         self._write_cached_content(file_path, response.content)
                         await self._record_cache_metadata(
                             filename=filename,
@@ -398,6 +428,7 @@ class FileCache:
                     f"--header=Accept-Language: {headers.get('Accept-Language', 'zh-CN,zh;q=0.9,en;q=0.8')}",
                     f"--header=Connection: {headers.get('Connection', 'keep-alive')}",
                     f"--header=Referer: {headers.get('Referer', 'https://labs.google/')}",
+                    f"--header=Origin: {headers.get('Origin', 'https://labs.google')}",
                 ]
 
                 if "sec-ch-ua" in headers:
@@ -418,19 +449,17 @@ class FileCache:
                 result = subprocess.run(wget_cmd, capture_output=True, timeout=90, env=env)
 
                 if result.returncode == 0 and file_path.exists():
-                    file_size = file_path.stat().st_size
-                    if file_size > 0:
-                        debug_logger.log_info(f"File cached (wget): {filename} ({file_size} bytes)")
-                        await self._record_cache_metadata(
-                            filename=filename,
-                            api_key_id=api_key_id,
-                            token_id=token_id,
-                            flow_project_id=flow_project_id,
-                            media_type=media_type,
-                            source_url=url,
-                        )
-                        return filename
-                    raise Exception("Downloaded file is empty")
+                    file_size = self._validate_cached_file(file_path, media_type)
+                    debug_logger.log_info(f"File cached (wget): {filename} ({file_size} bytes)")
+                    await self._record_cache_metadata(
+                        filename=filename,
+                        api_key_id=api_key_id,
+                        token_id=token_id,
+                        flow_project_id=flow_project_id,
+                        media_type=media_type,
+                        source_url=url,
+                    )
+                    return filename
 
                 error_msg = result.stderr.decode("utf-8", errors="ignore") if result.stderr else "Unknown error"
                 debug_logger.log_warning(f"wget failed: {error_msg}, trying curl...")
@@ -454,6 +483,7 @@ class FileCache:
                     "-H", f"Accept-Language: {headers.get('Accept-Language', 'zh-CN,zh;q=0.9,en;q=0.8')}",
                     "-H", f"Connection: {headers.get('Connection', 'keep-alive')}",
                     "-H", f"Referer: {headers.get('Referer', 'https://labs.google/')}",
+                    "-H", f"Origin: {headers.get('Origin', 'https://labs.google')}",
                     "-A", headers.get("User-Agent", ""),
                 ]
 
@@ -470,19 +500,17 @@ class FileCache:
                 result = subprocess.run(curl_cmd, capture_output=True, timeout=90)
 
                 if result.returncode == 0 and file_path.exists():
-                    file_size = file_path.stat().st_size
-                    if file_size > 0:
-                        debug_logger.log_info(f"File cached (curl): {filename} ({file_size} bytes)")
-                        await self._record_cache_metadata(
-                            filename=filename,
-                            api_key_id=api_key_id,
-                            token_id=token_id,
-                            flow_project_id=flow_project_id,
-                            media_type=media_type,
-                            source_url=url,
-                        )
-                        return filename
-                    raise Exception("Downloaded file is empty")
+                    file_size = self._validate_cached_file(file_path, media_type)
+                    debug_logger.log_info(f"File cached (curl): {filename} ({file_size} bytes)")
+                    await self._record_cache_metadata(
+                        filename=filename,
+                        api_key_id=api_key_id,
+                        token_id=token_id,
+                        flow_project_id=flow_project_id,
+                        media_type=media_type,
+                        source_url=url,
+                    )
+                    return filename
 
                 error_msg = result.stderr.decode("utf-8", errors="ignore") if result.stderr else "Unknown error"
                 raise Exception(f"curl command failed: {error_msg}")

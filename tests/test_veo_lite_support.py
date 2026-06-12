@@ -1,4 +1,5 @@
 import json
+import tempfile
 import types
 import unittest
 from types import SimpleNamespace
@@ -6,7 +7,9 @@ from unittest.mock import AsyncMock, patch
 
 import src.api.routes as routes
 from src.api.routes import _extract_async_delivery_fields
+from src.core.config import config
 from src.core.model_resolver import resolve_model_name
+from src.services.file_cache import FileCache
 from src.services.flow_client import FlowClient
 from src.services.generation_handler import MODEL_CONFIG, GenerationHandler
 
@@ -363,6 +366,228 @@ class VeoLiteGenerationHandlerTests(unittest.TestCase):
     def test_direct_upsampler_keys_are_not_public_models(self):
         self.assertNotIn("veo_3_1_upsampler_4k", MODEL_CONFIG)
         self.assertNotIn("veo_3_1_upsampler_1080p", MODEL_CONFIG)
+
+
+class VideoCacheDeliveryTests(unittest.IsolatedAsyncioTestCase):
+    def _build_handler(self, operation_status, cache_result="cached.mp4", cache_error=None):
+        handler = GenerationHandler.__new__(GenerationHandler)
+        handler.flow_client = SimpleNamespace(
+            check_video_status=AsyncMock(return_value=operation_status),
+        )
+        handler.file_cache = SimpleNamespace(
+            download_and_cache=AsyncMock(side_effect=cache_error)
+            if cache_error
+            else AsyncMock(return_value=cache_result),
+        )
+        self.db_updates = []
+
+        class FakeDb:
+            async def update_task(_, task_id, **kwargs):
+                self.db_updates.append({"task_id": task_id, **kwargs})
+
+        handler.db = FakeDb()
+        handler._update_request_log_progress = AsyncMock()
+        handler._maybe_update_poll_task = AsyncMock()
+        return handler
+
+    async def _run_poll(self, handler):
+        token = SimpleNamespace(id=7, at="at-token", video_concurrency=1)
+        generation_result = handler._create_generation_result()
+        response_state = handler._create_response_state()
+        response_state["base_url"] = "https://api.example.com"
+        chunks = []
+
+        original_poll_interval = config._config["flow"]["poll_interval"]
+        original_max_attempts = config._config["flow"]["max_poll_attempts"]
+        try:
+            config._config["flow"]["poll_interval"] = 0
+            config._config["flow"]["max_poll_attempts"] = 1
+            async for chunk in handler._poll_video_result(
+                token=token,
+                project_id="project-1",
+                operations=[{"operation": {"name": "media-1"}, "projectId": "project-1"}],
+                stream=False,
+                api_key_id=11,
+                generation_result=generation_result,
+                response_state=response_state,
+                request_log_state={"id": None, "progress": 0, "api_key_id": 11},
+            ):
+                chunks.append(json.loads(chunk))
+        finally:
+            config._config["flow"]["poll_interval"] = original_poll_interval
+            config._config["flow"]["max_poll_attempts"] = original_max_attempts
+
+        return generation_result, chunks
+
+    def _successful_status(self, video_metadata):
+        return {
+            "operations": [
+                {
+                    "operation": {
+                        "name": "media-1",
+                        "metadata": {"video": video_metadata},
+                    },
+                    "mediaName": "media-1",
+                    "projectId": "project-1",
+                    "status": "MEDIA_GENERATION_STATUS_SUCCESSFUL",
+                }
+            ]
+        }
+
+    async def test_video_redirect_source_is_cached_and_only_cache_url_is_returned(self):
+        source_url = "https://labs.google/fx/api/trpc/media.getMediaUrlRedirect?name=media-1"
+        handler = self._build_handler(
+            self._successful_status(
+                {
+                    "fifeUrl": source_url,
+                    "mediaGenerationId": "media-1",
+                    "aspectRatio": "VIDEO_ASPECT_RATIO_PORTRAIT",
+                }
+            )
+        )
+
+        generation_result, chunks = await self._run_poll(handler)
+
+        self.assertTrue(generation_result["success"])
+        handler.file_cache.download_and_cache.assert_awaited_once_with(
+            source_url,
+            "video",
+            api_key_id=11,
+            token_id=7,
+            flow_project_id="project-1",
+        )
+        returned_url = chunks[-1]["generated_assets"]["final_video_url"]
+        self.assertIn("/api/cache/blob/cached.mp4", returned_url)
+        self.assertNotIn("media.getMediaUrlRedirect", returned_url)
+        self.assertNotIn("flow-content.google", chunks[-1]["choices"][0]["message"]["content"])
+        self.assertEqual(self.db_updates[-1]["result_urls"], [returned_url])
+
+    async def test_video_cache_is_required_even_when_global_cache_disabled(self):
+        source_url = "https://flow-content.google/video/source"
+        original_cache_enabled = config.cache_enabled
+        config.set_cache_enabled(False)
+        try:
+            handler = self._build_handler(
+                self._successful_status(
+                    {
+                        "fifeUrl": source_url,
+                        "mediaGenerationId": "media-1",
+                    }
+                )
+            )
+
+            generation_result, chunks = await self._run_poll(handler)
+        finally:
+            config.set_cache_enabled(original_cache_enabled)
+
+        self.assertTrue(generation_result["success"])
+        handler.file_cache.download_and_cache.assert_awaited_once()
+        self.assertIn("/api/cache/blob/cached.mp4", chunks[-1]["generated_assets"]["final_video_url"])
+
+    async def test_video_cache_failure_fails_without_returning_source_url(self):
+        source_url = "https://flow-content.google/video/source"
+        handler = self._build_handler(
+            self._successful_status(
+                {
+                    "fifeUrl": source_url,
+                    "mediaGenerationId": "media-1",
+                }
+            ),
+            cache_error=Exception("disk full"),
+        )
+
+        generation_result, chunks = await self._run_poll(handler)
+
+        self.assertFalse(generation_result["success"])
+        self.assertEqual(generation_result["error_status_code"], 502)
+        self.assertEqual(chunks[-1]["error"]["status_code"], 502)
+        self.assertEqual(chunks[-1]["video_cache_status"], "failed")
+        self.assertNotIn(source_url, json.dumps(chunks[-1], ensure_ascii=False))
+        self.assertEqual(self.db_updates[-1]["status"], "failed")
+
+    async def test_serving_base_uri_is_cached_before_delivery(self):
+        source_url = "https://flow-content.google/video/serving-base"
+        handler = self._build_handler(
+            self._successful_status(
+                {
+                    "fifeUrl": source_url,
+                    "mediaGenerationId": "media-1",
+                }
+            )
+        )
+
+        generation_result, chunks = await self._run_poll(handler)
+
+        self.assertTrue(generation_result["success"])
+        handler.file_cache.download_and_cache.assert_awaited_once_with(
+            source_url,
+            "video",
+            api_key_id=11,
+            token_id=7,
+            flow_project_id="project-1",
+        )
+        self.assertIn("/api/cache/blob/cached.mp4", chunks[-1]["generated_assets"]["final_video_url"])
+
+
+class FileCacheVideoDownloadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_video_download_uses_redirect_and_labs_headers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = FileCache(cache_dir=tmp, db=SimpleNamespace(record_cache_file=AsyncMock()))
+            fake_response = SimpleNamespace(
+                status_code=200,
+                content=b"\x00\x00\x00\x18ftypmp42video-bytes",
+                headers={"content-type": "video/mp4"},
+            )
+            fake_session = SimpleNamespace(get=AsyncMock(return_value=fake_response))
+
+            class FakeAsyncSession:
+                async def __aenter__(self):
+                    return fake_session
+
+                async def __aexit__(self, exc_type, exc, tb):
+                    return None
+
+            with patch("src.services.file_cache.AsyncSession", return_value=FakeAsyncSession()):
+                filename = await cache.download_and_cache(
+                    "https://labs.google/fx/api/trpc/media.getMediaUrlRedirect?name=media-1",
+                    "video",
+                    api_key_id=1,
+                    token_id=2,
+                    flow_project_id="project-1",
+                )
+
+            self.assertTrue(filename.endswith(".mp4"))
+            call_kwargs = fake_session.get.await_args.kwargs
+            self.assertTrue(call_kwargs["allow_redirects"])
+            self.assertEqual(call_kwargs["headers"]["Origin"], "https://labs.google")
+            self.assertEqual(call_kwargs["headers"]["Referer"], "https://labs.google/")
+
+    async def test_video_download_rejects_html_response(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = FileCache(cache_dir=tmp, db=SimpleNamespace(record_cache_file=AsyncMock()))
+            fake_response = SimpleNamespace(
+                status_code=200,
+                content=b"<!doctype html><html></html>",
+                headers={"content-type": "text/html"},
+            )
+            fake_session = SimpleNamespace(get=AsyncMock(return_value=fake_response))
+
+            class FakeAsyncSession:
+                async def __aenter__(self):
+                    return fake_session
+
+                async def __aexit__(self, exc_type, exc, tb):
+                    return None
+
+            with (
+                patch("src.services.file_cache.AsyncSession", return_value=FakeAsyncSession()),
+                patch("subprocess.run", side_effect=FileNotFoundError("curl")),
+            ):
+                with self.assertRaises(Exception):
+                    await cache.download_and_cache(
+                        "https://labs.google/fx/api/trpc/media.getMediaUrlRedirect?name=media-1",
+                        "video",
+                    )
 
 
 class VeoLiteFlowClientTests(unittest.IsolatedAsyncioTestCase):
