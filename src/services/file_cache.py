@@ -127,6 +127,26 @@ class FileCache:
         return suffix
 
     @staticmethod
+    def _is_signed_flow_cdn_url(url: str) -> bool:
+        parsed = urlparse(url or "")
+        host = (parsed.hostname or "").lower()
+        if host != "flow-content.google" and not host.endswith(".googleusercontent.com"):
+            return False
+        query = (parsed.query or "").lower()
+        return "signature=" in query or "expires=" in query
+
+    @staticmethod
+    def _download_phase_for_url(url: str) -> str:
+        if FileCache._is_signed_flow_cdn_url(url):
+            return "cdn"
+        if "getMediaUrlRedirect" in (url or ""):
+            return "labs"
+        host = (urlparse(url or "").hostname or "").lower()
+        if host.endswith("labs.google"):
+            return "labs"
+        return "other"
+
+    @staticmethod
     def _sec_fetch_site_for_url(url: str) -> str:
         host = (urlparse(url or "").hostname or "").lower()
         if host.endswith("labs.google"):
@@ -134,6 +154,47 @@ class FileCache:
         if host.endswith("google.com") or host.endswith("googleusercontent.com"):
             return "cross-site"
         return "cross-site"
+
+    def _apply_fingerprint_headers(
+        self,
+        headers: Dict[str, str],
+        fingerprint: Optional[Dict[str, Any]],
+    ) -> None:
+        if isinstance(fingerprint, dict):
+            if fingerprint.get("user_agent"):
+                headers["User-Agent"] = str(fingerprint["user_agent"])
+            if fingerprint.get("accept_language"):
+                headers["Accept-Language"] = str(fingerprint["accept_language"])
+            if fingerprint.get("sec_ch_ua"):
+                headers["sec-ch-ua"] = str(fingerprint["sec_ch_ua"])
+            if fingerprint.get("sec_ch_ua_mobile"):
+                headers["sec-ch-ua-mobile"] = str(fingerprint["sec_ch_ua_mobile"])
+            if fingerprint.get("sec_ch_ua_platform"):
+                headers["sec-ch-ua-platform"] = str(fingerprint["sec_ch_ua_platform"])
+        headers.setdefault(
+            "User-Agent",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        )
+
+    def _build_cdn_download_headers(
+        self,
+        media_type: str,
+        fingerprint: Optional[Dict[str, Any]] = None,
+        url: Optional[str] = None,
+    ) -> Dict[str, str]:
+        headers = {
+            "Accept": "*/*",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Connection": "keep-alive",
+            "Referer": "https://labs.google/fx/tools/flow",
+            "Sec-Fetch-Site": self._sec_fetch_site_for_url(url or ""),
+            "Sec-Fetch-Mode": "no-cors",
+            "Sec-Fetch-Dest": "video" if media_type == "video" else "image",
+        }
+        self._apply_fingerprint_headers(headers, fingerprint)
+        return headers
 
     def _build_download_headers(
         self,
@@ -144,6 +205,9 @@ class FileCache:
         url: Optional[str] = None,
     ) -> Dict[str, str]:
         """构建媒体下载请求头，优先复用当前打码浏览器指纹。"""
+        if self._is_signed_flow_cdn_url(url or ""):
+            return self._build_cdn_download_headers(media_type, fingerprint=fingerprint, url=url)
+
         headers = {
             "Accept": (
                 "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"
@@ -164,32 +228,24 @@ class FileCache:
         else:
             headers["Sec-Fetch-Dest"] = "video"
 
-        if isinstance(fingerprint, dict):
-            if fingerprint.get("user_agent"):
-                headers["User-Agent"] = str(fingerprint["user_agent"])
-            if fingerprint.get("accept_language"):
-                headers["Accept-Language"] = str(fingerprint["accept_language"])
-            if fingerprint.get("sec_ch_ua"):
-                headers["sec-ch-ua"] = str(fingerprint["sec_ch_ua"])
-            if fingerprint.get("sec_ch_ua_mobile"):
-                headers["sec-ch-ua-mobile"] = str(fingerprint["sec_ch_ua_mobile"])
-            if fingerprint.get("sec_ch_ua_platform"):
-                headers["sec-ch-ua-platform"] = str(fingerprint["sec_ch_ua_platform"])
+        self._apply_fingerprint_headers(headers, fingerprint)
 
-        headers.setdefault(
-            "User-Agent",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        )
         clean_auth_token = (auth_token or "").strip()
         if clean_auth_token:
             headers["Authorization"] = f"Bearer {clean_auth_token}"
         clean_session_token = (session_token or "").strip()
-        if clean_session_token and (
-            "getMediaUrlRedirect" in (url or "") or (urlparse(url or "").hostname or "").endswith("labs.google")
-        ):
+        if clean_session_token and self._download_phase_for_url(url or "") == "labs":
             headers["Cookie"] = f"__Secure-next-auth.session-token={clean_session_token}"
         return headers
+
+    @staticmethod
+    def _video_download_rejection_error(url: str) -> str:
+        phase = FileCache._download_phase_for_url(url)
+        if phase == "cdn":
+            return "Video CDN download was rejected by flow-content.google"
+        if phase == "labs":
+            return "Video cache download was rejected by Flow media endpoint"
+        return "Video cache download was rejected by upstream media endpoint"
 
     def _log_download_rejection(
         self,
@@ -198,14 +254,40 @@ class FileCache:
         status_code: int,
         headers: Dict[str, str],
         client_name: str,
+        response_body: Optional[bytes] = None,
     ) -> None:
         host = urlparse(url or "").hostname or "<unknown>"
+        phase = self._download_phase_for_url(url)
+        body_preview = ""
+        if response_body:
+            body_preview = response_body[:120].decode("utf-8", errors="replace").replace("\n", " ")
         debug_logger.log_warning(
             f"{client_name} video cache download rejected: "
-            f"status={status_code}, host={host}, "
+            f"phase={phase}, status={status_code}, host={host}, "
             f"auth={'yes' if headers.get('Authorization') else 'no'}, "
             f"cookie={'yes' if headers.get('Cookie') else 'no'}"
+            + (f", body_preview={body_preview!r}" if body_preview else "")
         )
+
+    async def _cdn_download_proxy_attempts(
+        self,
+        fingerprint: Optional[Dict[str, Any]],
+    ) -> List[Optional[str]]:
+        attempts: List[Optional[str]] = []
+        fingerprint_proxy = None
+        if isinstance(fingerprint, dict):
+            fingerprint_proxy = str(fingerprint.get("proxy_url") or "").strip() or None
+        attempts.append(fingerprint_proxy)
+
+        media_proxy = None
+        if self.proxy_manager and hasattr(self.proxy_manager, "get_media_proxy_url"):
+            try:
+                media_proxy = await self.proxy_manager.get_media_proxy_url()
+            except Exception as exc:
+                debug_logger.log_warning(f"Resolve CDN media proxy failed: {exc}")
+        if media_proxy and media_proxy not in attempts:
+            attempts.append(media_proxy)
+        return attempts or [None]
 
     def _is_valid_download_response(self, content: bytes, content_type: str, media_type: str) -> bool:
         if not content:
@@ -406,7 +488,12 @@ class FileCache:
 
     def _safe_python_download_error(self, error: Exception, media_type: str) -> Exception:
         message = str(error or "").strip()
-        if message.startswith("Downloaded ") or "Flow media endpoint" in message:
+        if (
+            message.startswith("Downloaded ")
+            or "Flow media endpoint" in message
+            or "flow-content.google" in message
+            or "upstream media endpoint" in message
+        ):
             return Exception(message)
         if media_type == "video":
             return Exception("Python video cache download failed before receiving media")
@@ -483,7 +570,12 @@ class FileCache:
             debug_logger.log_info(f"Downloading file from: {url}")
 
             fingerprint = self._get_request_fingerprint()
-            proxy_url = await self._resolve_download_proxy(media_type, fingerprint=fingerprint)
+            is_cdn = self._is_signed_flow_cdn_url(url)
+            if is_cdn:
+                proxy_attempts = await self._cdn_download_proxy_attempts(fingerprint)
+            else:
+                proxy_attempts = [await self._resolve_download_proxy(media_type, fingerprint=fingerprint)]
+
             headers = self._build_download_headers(
                 media_type,
                 fingerprint=fingerprint,
@@ -493,18 +585,78 @@ class FileCache:
             )
             python_download_error: Optional[Exception] = None
 
-            # Try method 1: curl_cffi with browser impersonation
-            try:
-                async with AsyncSession() as session:
-                    response = await session.get(
-                        url,
-                        timeout=60,
-                        proxy=proxy_url,
-                        headers=headers,
-                        impersonate="chrome120",
-                        verify=False,
-                        allow_redirects=True,
+            for attempt_index, proxy_url in enumerate(proxy_attempts):
+                if is_cdn and attempt_index > 0:
+                    debug_logger.log_warning(
+                        f"CDN download retry via media proxy after direct rejection "
+                        f"(proxy={'set' if proxy_url else 'direct'})"
                     )
+
+                skip_to_next_proxy = False
+
+                # Try method 1: curl_cffi with browser impersonation
+                try:
+                    async with AsyncSession() as session:
+                        response = await session.get(
+                            url,
+                            timeout=60,
+                            proxy=proxy_url,
+                            headers=headers,
+                            impersonate="chrome120",
+                            verify=False,
+                            allow_redirects=True,
+                        )
+
+                        if response.status_code == 200:
+                            return await self._store_download_response(
+                                filename=filename,
+                                file_path=file_path,
+                                content=response.content,
+                                content_type=response.headers.get("content-type", ""),
+                                media_type=media_type,
+                                api_key_id=api_key_id,
+                                token_id=token_id,
+                                flow_project_id=flow_project_id,
+                                source_url=url,
+                                method_name="curl_cffi",
+                            )
+                        if media_type == "video" and response.status_code in (401, 403):
+                            self._log_download_rejection(
+                                url=url,
+                                status_code=response.status_code,
+                                headers=headers,
+                                client_name="curl_cffi",
+                                response_body=response.content,
+                            )
+                            python_download_error = Exception(self._video_download_rejection_error(url))
+                            if is_cdn and attempt_index < len(proxy_attempts) - 1:
+                                skip_to_next_proxy = True
+                        else:
+                            python_download_error = Exception(
+                                f"Python video cache download failed with HTTP {response.status_code}"
+                            )
+                        if not skip_to_next_proxy:
+                            debug_logger.log_warning(
+                                f"curl_cffi failed with HTTP {response.status_code}, trying httpx..."
+                            )
+
+                except Exception as e:
+                    python_download_error = self._safe_python_download_error(e, media_type)
+                    debug_logger.log_warning(f"curl_cffi failed: {str(e)}, trying httpx...")
+
+                if skip_to_next_proxy:
+                    continue
+
+                # Try method 2: httpx pure-Python fallback for environments without wget/curl.
+                try:
+                    timeout = httpx.Timeout(60.0, connect=30.0)
+                    async with httpx.AsyncClient(
+                        follow_redirects=True,
+                        timeout=timeout,
+                        verify=False,
+                        proxy=proxy_url,
+                    ) as client:
+                        response = await client.get(url, headers=headers)
 
                     if response.status_code == 200:
                         return await self._store_download_response(
@@ -517,199 +669,180 @@ class FileCache:
                             token_id=token_id,
                             flow_project_id=flow_project_id,
                             source_url=url,
-                            method_name="curl_cffi",
+                            method_name="httpx",
                         )
                     if media_type == "video" and response.status_code in (401, 403):
                         self._log_download_rejection(
                             url=url,
                             status_code=response.status_code,
                             headers=headers,
-                            client_name="curl_cffi",
+                            client_name="httpx",
+                            response_body=response.content,
                         )
-                        python_download_error = Exception("Video cache download was rejected by Flow media endpoint")
+                        python_download_error = Exception(self._video_download_rejection_error(url))
+                        if is_cdn and attempt_index < len(proxy_attempts) - 1:
+                            skip_to_next_proxy = True
                     else:
-                        python_download_error = Exception(f"Python video cache download failed with HTTP {response.status_code}")
-                    debug_logger.log_warning(
-                        f"curl_cffi failed with HTTP {response.status_code}, trying httpx..."
+                        python_download_error = Exception(
+                            f"Python video cache download failed with HTTP {response.status_code}"
+                        )
+                    if not skip_to_next_proxy:
+                        debug_logger.log_warning(
+                            f"httpx failed with HTTP {response.status_code}, trying wget..."
+                        )
+                except Exception as e:
+                    python_download_error = self._safe_python_download_error(e, media_type)
+                    debug_logger.log_warning(f"httpx failed: {str(e)}, trying wget...")
+
+                if skip_to_next_proxy:
+                    continue
+
+                # Try method 3: wget command
+                try:
+                    import subprocess
+
+                    wget_cmd = [
+                        "wget",
+                        "-q",
+                        "-O", str(file_path),
+                        "--timeout=60",
+                        "--tries=3",
+                        f"--user-agent={headers.get('User-Agent', '')}",
+                        f"--header=Accept: {headers.get('Accept', '*/*')}",
+                        f"--header=Accept-Language: {headers.get('Accept-Language', 'zh-CN,zh;q=0.9,en;q=0.8')}",
+                        f"--header=Connection: {headers.get('Connection', 'keep-alive')}",
+                        f"--header=Referer: {headers.get('Referer', 'https://labs.google/fx/tools/flow')}",
+                    ]
+                    if "Origin" in headers:
+                        wget_cmd.append(f"--header=Origin: {headers['Origin']}")
+                    if "Authorization" in headers:
+                        wget_cmd.append(f"--header=Authorization: {headers['Authorization']}")
+                    if "Cookie" in headers:
+                        wget_cmd.append(f"--header=Cookie: {headers['Cookie']}")
+
+                    if "sec-ch-ua" in headers:
+                        wget_cmd.append(f"--header=sec-ch-ua: {headers['sec-ch-ua']}")
+                    if "sec-ch-ua-mobile" in headers:
+                        wget_cmd.append(f"--header=sec-ch-ua-mobile: {headers['sec-ch-ua-mobile']}")
+                    if "sec-ch-ua-platform" in headers:
+                        wget_cmd.append(f"--header=sec-ch-ua-platform: {headers['sec-ch-ua-platform']}")
+
+                    if proxy_url:
+                        env = os.environ.copy()
+                        env["http_proxy"] = proxy_url
+                        env["https_proxy"] = proxy_url
+                    else:
+                        env = None
+
+                    wget_cmd.append(url)
+                    result = subprocess.run(wget_cmd, capture_output=True, timeout=90, env=env)
+
+                    if result.returncode == 0 and file_path.exists():
+                        file_size = self._validate_cached_file(file_path, media_type)
+                        debug_logger.log_info(f"File cached (wget): {filename} ({file_size} bytes)")
+                        await self._record_cache_metadata(
+                            filename=filename,
+                            api_key_id=api_key_id,
+                            token_id=token_id,
+                            flow_project_id=flow_project_id,
+                            media_type=media_type,
+                            source_url=url,
+                        )
+                        return filename
+
+                    error_msg = result.stderr.decode("utf-8", errors="ignore") if result.stderr else "Unknown error"
+                    debug_logger.log_warning(f"wget failed: {error_msg}, trying curl...")
+
+                except FileNotFoundError:
+                    debug_logger.log_warning("wget not found, trying curl...")
+                except Exception as e:
+                    if "not valid media" in str(e):
+                        python_download_error = Exception("Downloaded video response is not valid media")
+                    debug_logger.log_warning(f"wget failed: {str(e)}, trying curl...")
+
+                # Try method 4: system curl command
+                try:
+                    import subprocess
+
+                    curl_cmd = [
+                        "curl",
+                        "-L",
+                        "-s",
+                        "-o", str(file_path),
+                        "--max-time", "60",
+                        "-H", f"Accept: {headers.get('Accept', '*/*')}",
+                        "-H", f"Accept-Language: {headers.get('Accept-Language', 'zh-CN,zh;q=0.9,en;q=0.8')}",
+                        "-H", f"Connection: {headers.get('Connection', 'keep-alive')}",
+                        "-H", f"Referer: {headers.get('Referer', 'https://labs.google/fx/tools/flow')}",
+                        "-A", headers.get("User-Agent", ""),
+                    ]
+
+                    if "Origin" in headers:
+                        curl_cmd.extend(["-H", f"Origin: {headers['Origin']}"])
+                    if "sec-ch-ua" in headers:
+                        curl_cmd.extend(["-H", f"sec-ch-ua: {headers['sec-ch-ua']}"])
+                    if "sec-ch-ua-mobile" in headers:
+                        curl_cmd.extend(["-H", f"sec-ch-ua-mobile: {headers['sec-ch-ua-mobile']}"])
+                    if "sec-ch-ua-platform" in headers:
+                        curl_cmd.extend(["-H", f"sec-ch-ua-platform: {headers['sec-ch-ua-platform']}"])
+                    if "Authorization" in headers:
+                        curl_cmd.extend(["-H", f"Authorization: {headers['Authorization']}"])
+                    if "Cookie" in headers:
+                        curl_cmd.extend(["-H", f"Cookie: {headers['Cookie']}"])
+                    if proxy_url:
+                        curl_cmd.extend(["-x", proxy_url])
+
+                    curl_cmd.append(url)
+                    result = subprocess.run(curl_cmd, capture_output=True, timeout=90)
+
+                    if result.returncode == 0 and file_path.exists():
+                        file_size = self._validate_cached_file(file_path, media_type)
+                        debug_logger.log_info(f"File cached (curl): {filename} ({file_size} bytes)")
+                        await self._record_cache_metadata(
+                            filename=filename,
+                            api_key_id=api_key_id,
+                            token_id=token_id,
+                            flow_project_id=flow_project_id,
+                            media_type=media_type,
+                            source_url=url,
+                        )
+                        return filename
+
+                    error_msg = result.stderr.decode("utf-8", errors="ignore") if result.stderr else "Unknown error"
+                    raise Exception(f"curl command failed: {error_msg}")
+
+                except FileNotFoundError as e:
+                    if is_cdn and attempt_index < len(proxy_attempts) - 1:
+                        continue
+                    normalized_error = (
+                        self._normalize_cache_error(python_download_error)
+                        if python_download_error is not None
+                        else self._normalize_cache_error(e)
                     )
-
-            except Exception as e:
-                python_download_error = self._safe_python_download_error(e, media_type)
-                debug_logger.log_warning(f"curl_cffi failed: {str(e)}, trying httpx...")
-
-            # Try method 2: httpx pure-Python fallback for environments without wget/curl.
-            try:
-                timeout = httpx.Timeout(60.0, connect=30.0)
-                async with httpx.AsyncClient(
-                    follow_redirects=True,
-                    timeout=timeout,
-                    verify=False,
-                    proxy=proxy_url,
-                ) as client:
-                    response = await client.get(url, headers=headers)
-
-                if response.status_code == 200:
-                    return await self._store_download_response(
-                        filename=filename,
-                        file_path=file_path,
-                        content=response.content,
-                        content_type=response.headers.get("content-type", ""),
-                        media_type=media_type,
-                        api_key_id=api_key_id,
-                        token_id=token_id,
-                        flow_project_id=flow_project_id,
-                        source_url=url,
-                        method_name="httpx",
+                    debug_logger.log_error(
+                        error_message=f"Failed to download file: {str(e)}",
+                        status_code=0,
+                        response_text=str(e),
                     )
-                if media_type == "video" and response.status_code in (401, 403):
-                    self._log_download_rejection(
-                        url=url,
-                        status_code=response.status_code,
-                        headers=headers,
-                        client_name="httpx",
+                    raise Exception(normalized_error) from e
+                except Exception as e:
+                    if "not valid media" in str(e):
+                        python_download_error = Exception("Downloaded video response is not valid media")
+                    if is_cdn and attempt_index < len(proxy_attempts) - 1:
+                        continue
+                    normalized_error = self._normalize_cache_error(
+                        python_download_error if python_download_error is not None else e
                     )
-                    python_download_error = Exception("Video cache download was rejected by Flow media endpoint")
-                else:
-                    python_download_error = Exception(f"Python video cache download failed with HTTP {response.status_code}")
-                debug_logger.log_warning(
-                    f"httpx failed with HTTP {response.status_code}, trying wget..."
-                )
-            except Exception as e:
-                python_download_error = self._safe_python_download_error(e, media_type)
-                debug_logger.log_warning(f"httpx failed: {str(e)}, trying wget...")
-
-            # Try method 3: wget command
-            try:
-                import subprocess
-
-                wget_cmd = [
-                    "wget",
-                    "-q",
-                    "-O", str(file_path),
-                    "--timeout=60",
-                    "--tries=3",
-                    f"--user-agent={headers.get('User-Agent', '')}",
-                    f"--header=Accept: {headers.get('Accept', '*/*')}",
-                    f"--header=Accept-Language: {headers.get('Accept-Language', 'zh-CN,zh;q=0.9,en;q=0.8')}",
-                    f"--header=Connection: {headers.get('Connection', 'keep-alive')}",
-                    f"--header=Referer: {headers.get('Referer', 'https://labs.google/')}",
-                    f"--header=Origin: {headers.get('Origin', 'https://labs.google')}",
-                ]
-                if "Authorization" in headers:
-                    wget_cmd.append(f"--header=Authorization: {headers['Authorization']}")
-                if "Cookie" in headers:
-                    wget_cmd.append(f"--header=Cookie: {headers['Cookie']}")
-
-                if "sec-ch-ua" in headers:
-                    wget_cmd.append(f"--header=sec-ch-ua: {headers['sec-ch-ua']}")
-                if "sec-ch-ua-mobile" in headers:
-                    wget_cmd.append(f"--header=sec-ch-ua-mobile: {headers['sec-ch-ua-mobile']}")
-                if "sec-ch-ua-platform" in headers:
-                    wget_cmd.append(f"--header=sec-ch-ua-platform: {headers['sec-ch-ua-platform']}")
-
-                if proxy_url:
-                    env = os.environ.copy()
-                    env["http_proxy"] = proxy_url
-                    env["https_proxy"] = proxy_url
-                else:
-                    env = None
-
-                wget_cmd.append(url)
-                result = subprocess.run(wget_cmd, capture_output=True, timeout=90, env=env)
-
-                if result.returncode == 0 and file_path.exists():
-                    file_size = self._validate_cached_file(file_path, media_type)
-                    debug_logger.log_info(f"File cached (wget): {filename} ({file_size} bytes)")
-                    await self._record_cache_metadata(
-                        filename=filename,
-                        api_key_id=api_key_id,
-                        token_id=token_id,
-                        flow_project_id=flow_project_id,
-                        media_type=media_type,
-                        source_url=url,
+                    debug_logger.log_error(
+                        error_message=f"Failed to download file: {str(e)}",
+                        status_code=0,
+                        response_text=str(e),
                     )
-                    return filename
+                    raise Exception(normalized_error) from e
 
-                error_msg = result.stderr.decode("utf-8", errors="ignore") if result.stderr else "Unknown error"
-                debug_logger.log_warning(f"wget failed: {error_msg}, trying curl...")
-
-            except FileNotFoundError:
-                debug_logger.log_warning("wget not found, trying curl...")
-            except Exception as e:
-                debug_logger.log_warning(f"wget failed: {str(e)}, trying curl...")
-
-            # Try method 4: system curl command
-            try:
-                import subprocess
-
-                curl_cmd = [
-                    "curl",
-                    "-L",
-                    "-s",
-                    "-o", str(file_path),
-                    "--max-time", "60",
-                    "-H", f"Accept: {headers.get('Accept', '*/*')}",
-                    "-H", f"Accept-Language: {headers.get('Accept-Language', 'zh-CN,zh;q=0.9,en;q=0.8')}",
-                    "-H", f"Connection: {headers.get('Connection', 'keep-alive')}",
-                    "-H", f"Referer: {headers.get('Referer', 'https://labs.google/')}",
-                    "-H", f"Origin: {headers.get('Origin', 'https://labs.google')}",
-                    "-A", headers.get("User-Agent", ""),
-                ]
-
-                if "sec-ch-ua" in headers:
-                    curl_cmd.extend(["-H", f"sec-ch-ua: {headers['sec-ch-ua']}"])
-                if "sec-ch-ua-mobile" in headers:
-                    curl_cmd.extend(["-H", f"sec-ch-ua-mobile: {headers['sec-ch-ua-mobile']}"])
-                if "sec-ch-ua-platform" in headers:
-                    curl_cmd.extend(["-H", f"sec-ch-ua-platform: {headers['sec-ch-ua-platform']}"])
-                if "Authorization" in headers:
-                    curl_cmd.extend(["-H", f"Authorization: {headers['Authorization']}"])
-                if "Cookie" in headers:
-                    curl_cmd.extend(["-H", f"Cookie: {headers['Cookie']}"])
-                if proxy_url:
-                    curl_cmd.extend(["-x", proxy_url])
-
-                curl_cmd.append(url)
-                result = subprocess.run(curl_cmd, capture_output=True, timeout=90)
-
-                if result.returncode == 0 and file_path.exists():
-                    file_size = self._validate_cached_file(file_path, media_type)
-                    debug_logger.log_info(f"File cached (curl): {filename} ({file_size} bytes)")
-                    await self._record_cache_metadata(
-                        filename=filename,
-                        api_key_id=api_key_id,
-                        token_id=token_id,
-                        flow_project_id=flow_project_id,
-                        media_type=media_type,
-                        source_url=url,
-                    )
-                    return filename
-
-                error_msg = result.stderr.decode("utf-8", errors="ignore") if result.stderr else "Unknown error"
-                raise Exception(f"curl command failed: {error_msg}")
-
-            except FileNotFoundError as e:
-                normalized_error = (
-                    self._normalize_cache_error(python_download_error)
-                    if python_download_error is not None
-                    else self._normalize_cache_error(e)
-                )
-                debug_logger.log_error(
-                    error_message=f"Failed to download file: {str(e)}",
-                    status_code=0,
-                    response_text=str(e)
-                )
-                raise Exception(normalized_error) from e
-            except Exception as e:
-                normalized_error = self._normalize_cache_error(
-                    python_download_error if python_download_error is not None else e
-                )
-                debug_logger.log_error(
-                    error_message=f"Failed to download file: {str(e)}",
-                    status_code=0,
-                    response_text=str(e)
-                )
-                raise Exception(normalized_error) from e
+            if python_download_error is not None:
+                raise python_download_error
+            raise Exception("Video cache download failed before receiving media")
 
     async def cache_base64_image(
         self,

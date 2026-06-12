@@ -2554,14 +2554,20 @@ class GenerationHandler:
                     try:
                         if stream:
                             yield self._create_stream_chunk("Caching generated video file...\n")
+                        cache_auth_token = None
+                        if not (
+                            "flow-content.google" in (source_video_url or "")
+                            or (source_video_url or "").find("Signature=") >= 0
+                        ):
+                            cache_auth_token = token.at
                         cached_filename = await self.file_cache.download_and_cache(
                             source_video_url,
                             "video",
                             api_key_id=api_key_id,
                             token_id=token.id,
                             flow_project_id=project_id,
-                            auth_token=token.at,
-                            session_token=token.st,
+                            auth_token=cache_auth_token,
+                            session_token=token.st if "getMediaUrlRedirect" in (source_video_url or "") else None,
                         )
                         local_url = self._build_cache_url(
                             cached_filename, response_state, flow_project_id=project_id
@@ -2572,19 +2578,25 @@ class GenerationHandler:
                         cache_error = self._normalize_error_message(e, max_length=240)
                         error_msg = f"Video generated successfully, but caching the video failed: {cache_error}"
                         debug_logger.log_error(f"Failed to cache video: {str(e)}")
+                        if "flow-content.google" in cache_error:
+                            video_cache_status = "cdn_download_rejected"
+                        elif "not valid media" in cache_error.lower():
+                            video_cache_status = "cdn_invalid_body"
+                        else:
+                            video_cache_status = "failed"
                         await self._fail_video_task(checked_operations, error_msg)
                         self._mark_generation_failed(
                             generation_result,
                             error_msg,
                             status_code=502,
-                            error_extra={"video_cache_status": "failed"},
+                            error_extra={"video_cache_status": video_cache_status},
                         )
                         if stream:
                             yield self._create_stream_chunk(f"Error: {error_msg}\n")
                         yield self._create_error_response(
                             error_msg,
                             status_code=502,
-                            extra_fields={"video_cache_status": "failed"},
+                            extra_fields={"video_cache_status": video_cache_status},
                         )
                         return
 
