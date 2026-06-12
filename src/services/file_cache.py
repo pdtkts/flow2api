@@ -15,6 +15,7 @@ from ..core.logger import debug_logger
 
 _IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp", ".gif", ".avif", ".bmp", ".jpe"})
 _VIDEO_SUFFIXES = frozenset({".mp4", ".webm", ".mov", ".mkv", ".m4v"})
+MIN_VALID_VIDEO_BYTES = 1024
 
 
 class FileCache:
@@ -179,10 +180,26 @@ class FileCache:
             return False
         normalized_type = (content_type or "").split(";", 1)[0].strip().lower()
         if media_type == "video":
-            if normalized_type.startswith("text/html"):
+            if len(content) < MIN_VALID_VIDEO_BYTES:
+                return False
+            if normalized_type and not (
+                normalized_type.startswith("video/")
+                or normalized_type == "application/octet-stream"
+            ):
                 return False
             prefix = content[:512].lstrip().lower()
-            if prefix.startswith(b"<!doctype html") or prefix.startswith(b"<html"):
+            if (
+                prefix.startswith(b"<!doctype html")
+                or prefix.startswith(b"<html")
+                or prefix.startswith(b"{")
+                or prefix.startswith(b"[")
+                or prefix.startswith(b"<?xml")
+            ):
+                return False
+            media_prefix = content[:512]
+            has_mp4_signature = b"ftyp" in media_prefix[:64]
+            has_webm_signature = media_prefix.startswith(b"\x1a\x45\xdf\xa3")
+            if not (has_mp4_signature or has_webm_signature):
                 return False
         return True
 
@@ -193,8 +210,9 @@ class FileCache:
         if file_size <= 0:
             raise Exception("Downloaded file is empty")
         with open(file_path, "rb") as f:
-            prefix = f.read(512)
-        if not self._is_valid_download_response(prefix, "", media_type):
+            prefix = f.read(max(512, MIN_VALID_VIDEO_BYTES if media_type == "video" else 512))
+        guessed_type = mimetypes.guess_type(file_path.name)[0] or ""
+        if not self._is_valid_download_response(prefix, guessed_type, media_type):
             raise Exception("Downloaded file is not valid media")
         return file_size
 
@@ -227,7 +245,11 @@ class FileCache:
         method_name: str,
     ) -> str:
         if not self._is_valid_download_response(content, content_type, media_type):
-            raise Exception("Downloaded video response is empty or not valid media")
+            debug_logger.log_warning(
+                f"Invalid cached {media_type} response from {method_name}: "
+                f"content_type={content_type or '<empty>'}, bytes={len(content or b'')}"
+            )
+            raise Exception("Downloaded video response is not valid media")
 
         self._write_cached_content(file_path, content)
         await self._record_cache_metadata(
@@ -386,32 +408,43 @@ class FileCache:
         async with download_lock:
             # Check if already cached and not expired
             if file_path.exists():
-                if self._is_cleanup_disabled():
-                    await self._record_cache_metadata(
-                        filename=filename,
-                        api_key_id=api_key_id,
-                        token_id=token_id,
-                        flow_project_id=flow_project_id,
-                        media_type=media_type,
-                        source_url=url,
-                    )
-                    return filename
-                file_age = time.time() - file_path.stat().st_mtime
-                if file_age < self.default_timeout:
-                    debug_logger.log_info(f"Cache hit: {filename}")
-                    await self._record_cache_metadata(
-                        filename=filename,
-                        api_key_id=api_key_id,
-                        token_id=token_id,
-                        flow_project_id=flow_project_id,
-                        media_type=media_type,
-                        source_url=url,
-                    )
-                    return filename
                 try:
-                    file_path.unlink()
-                except Exception:
-                    pass
+                    self._validate_cached_file(file_path, media_type)
+                except Exception as e:
+                    debug_logger.log_warning(
+                        f"Invalid cache hit removed: {filename} ({str(e)})"
+                    )
+                    try:
+                        file_path.unlink()
+                    except Exception:
+                        pass
+                else:
+                    if self._is_cleanup_disabled():
+                        await self._record_cache_metadata(
+                            filename=filename,
+                            api_key_id=api_key_id,
+                            token_id=token_id,
+                            flow_project_id=flow_project_id,
+                            media_type=media_type,
+                            source_url=url,
+                        )
+                        return filename
+                    file_age = time.time() - file_path.stat().st_mtime
+                    if file_age < self.default_timeout:
+                        debug_logger.log_info(f"Cache hit: {filename}")
+                        await self._record_cache_metadata(
+                            filename=filename,
+                            api_key_id=api_key_id,
+                            token_id=token_id,
+                            flow_project_id=flow_project_id,
+                            media_type=media_type,
+                            source_url=url,
+                        )
+                        return filename
+                    try:
+                        file_path.unlink()
+                    except Exception:
+                        pass
 
             # Download file
             debug_logger.log_info(f"Downloading file from: {url}")

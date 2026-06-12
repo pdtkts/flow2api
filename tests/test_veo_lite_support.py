@@ -14,6 +14,10 @@ from src.services.flow_client import FlowClient
 from src.services.generation_handler import MODEL_CONFIG, GenerationHandler
 
 
+def fake_mp4_bytes(size: int = 2048) -> bytes:
+    return b"\x00\x00\x00\x18ftypmp42" + b"\x00" * max(0, size - 12)
+
+
 class FlowClientTransportErrorTests(unittest.TestCase):
     def setUp(self):
         self.client = FlowClient(proxy_manager=None)
@@ -537,7 +541,7 @@ class FileCacheVideoDownloadTests(unittest.IsolatedAsyncioTestCase):
             cache = FileCache(cache_dir=tmp, db=SimpleNamespace(record_cache_file=AsyncMock()))
             fake_response = SimpleNamespace(
                 status_code=200,
-                content=b"\x00\x00\x00\x18ftypmp42video-bytes",
+                content=fake_mp4_bytes(),
                 headers={"content-type": "video/mp4"},
             )
             fake_session = SimpleNamespace(get=AsyncMock(return_value=fake_response))
@@ -571,7 +575,7 @@ class FileCacheVideoDownloadTests(unittest.IsolatedAsyncioTestCase):
             cache = FileCache(cache_dir=tmp, db=SimpleNamespace(record_cache_file=AsyncMock()))
             httpx_response = SimpleNamespace(
                 status_code=200,
-                content=b"\x00\x00\x00\x18ftypmp42video-bytes",
+                content=fake_mp4_bytes(),
                 headers={"content-type": "video/mp4"},
             )
             fake_httpx_client = SimpleNamespace(get=AsyncMock(return_value=httpx_response))
@@ -609,6 +613,120 @@ class FileCacheVideoDownloadTests(unittest.IsolatedAsyncioTestCase):
             httpx_call_kwargs = fake_httpx_client.get.await_args.kwargs
             self.assertEqual(httpx_call_kwargs["headers"]["Authorization"], "Bearer at-token")
             self.assertEqual(httpx_call_kwargs["headers"]["Origin"], "https://labs.google")
+
+    async def test_video_download_rejects_tiny_mp4_response(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = FileCache(cache_dir=tmp, db=SimpleNamespace(record_cache_file=AsyncMock()))
+            fake_response = SimpleNamespace(
+                status_code=200,
+                content=b"\x00\x00\x00\x18ftypmp42bad",
+                headers={"content-type": "video/mp4"},
+            )
+            fake_session = SimpleNamespace(get=AsyncMock(return_value=fake_response))
+
+            class FakeAsyncSession:
+                async def __aenter__(self):
+                    return fake_session
+
+                async def __aexit__(self, exc_type, exc, tb):
+                    return None
+
+            with (
+                patch("src.services.file_cache.AsyncSession", return_value=FakeAsyncSession()),
+                patch("src.services.file_cache.httpx.AsyncClient", return_value=FakeAsyncSession()),
+                patch("subprocess.run", side_effect=FileNotFoundError("curl")),
+            ):
+                with self.assertRaises(Exception) as ctx:
+                    await cache.download_and_cache(
+                        "https://labs.google/fx/api/trpc/media.getMediaUrlRedirect?name=media-1",
+                        "video",
+                    )
+            self.assertIn("not valid media", str(ctx.exception))
+
+    async def test_video_download_rejects_text_plain_response(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = FileCache(cache_dir=tmp, db=SimpleNamespace(record_cache_file=AsyncMock()))
+            fake_response = SimpleNamespace(
+                status_code=200,
+                content=b"Authentication required",
+                headers={"content-type": "text/plain"},
+            )
+            fake_session = SimpleNamespace(get=AsyncMock(return_value=fake_response))
+
+            class FakeAsyncSession:
+                async def __aenter__(self):
+                    return fake_session
+
+                async def __aexit__(self, exc_type, exc, tb):
+                    return None
+
+            with (
+                patch("src.services.file_cache.AsyncSession", return_value=FakeAsyncSession()),
+                patch("src.services.file_cache.httpx.AsyncClient", return_value=FakeAsyncSession()),
+                patch("subprocess.run", side_effect=FileNotFoundError("curl")),
+            ):
+                with self.assertRaises(Exception) as ctx:
+                    await cache.download_and_cache(
+                        "https://labs.google/fx/api/trpc/media.getMediaUrlRedirect?name=media-1",
+                        "video",
+                    )
+            self.assertIn("not valid media", str(ctx.exception))
+
+    async def test_video_download_rejects_json_error_response(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = FileCache(cache_dir=tmp, db=SimpleNamespace(record_cache_file=AsyncMock()))
+            fake_response = SimpleNamespace(
+                status_code=200,
+                content=b'{"error":"not ready"}' + b" " * 2048,
+                headers={"content-type": "application/json"},
+            )
+            fake_session = SimpleNamespace(get=AsyncMock(return_value=fake_response))
+
+            class FakeAsyncSession:
+                async def __aenter__(self):
+                    return fake_session
+
+                async def __aexit__(self, exc_type, exc, tb):
+                    return None
+
+            with (
+                patch("src.services.file_cache.AsyncSession", return_value=FakeAsyncSession()),
+                patch("src.services.file_cache.httpx.AsyncClient", return_value=FakeAsyncSession()),
+                patch("subprocess.run", side_effect=FileNotFoundError("curl")),
+            ):
+                with self.assertRaises(Exception) as ctx:
+                    await cache.download_and_cache(
+                        "https://labs.google/fx/api/trpc/media.getMediaUrlRedirect?name=media-1",
+                        "video",
+                    )
+            self.assertIn("not valid media", str(ctx.exception))
+
+    async def test_invalid_existing_video_cache_is_deleted_and_redownloaded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = FileCache(cache_dir=tmp, db=SimpleNamespace(record_cache_file=AsyncMock()))
+            source_url = "https://labs.google/fx/api/trpc/media.getMediaUrlRedirect?name=media-1"
+            filename = cache._generate_cache_filename(source_url, "video")
+            bad_path = cache.cache_dir / filename
+            bad_path.write_bytes(b"\x00\x00\x00\x18ftypmp42bad")
+            fake_response = SimpleNamespace(
+                status_code=200,
+                content=fake_mp4_bytes(),
+                headers={"content-type": "video/mp4"},
+            )
+            fake_session = SimpleNamespace(get=AsyncMock(return_value=fake_response))
+
+            class FakeAsyncSession:
+                async def __aenter__(self):
+                    return fake_session
+
+                async def __aexit__(self, exc_type, exc, tb):
+                    return None
+
+            with patch("src.services.file_cache.AsyncSession", return_value=FakeAsyncSession()):
+                returned_filename = await cache.download_and_cache(source_url, "video")
+
+            self.assertEqual(returned_filename, filename)
+            self.assertEqual(bad_path.read_bytes(), fake_response.content)
 
     async def test_video_download_rejects_html_response(self):
         with tempfile.TemporaryDirectory() as tmp:
