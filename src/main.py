@@ -1,5 +1,6 @@
 """FastAPI application initialization"""
 import os
+import sqlite3
 import sys
 from datetime import datetime, timezone
 
@@ -14,6 +15,7 @@ from pathlib import Path
 
 from .core.config import config
 from .core.database import Database
+from .core.storage_errors import sqlite_operational_error_handler
 from .core.monitoring import CONTENT_TYPE_LATEST, render_main_metrics
 from .services.flow_client import FlowClient
 from .services.proxy_manager import ProxyManager
@@ -443,6 +445,7 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan
 )
+app.add_exception_handler(sqlite3.OperationalError, sqlite_operational_error_handler)
 
 # CORS is added after this block so CORS is outer and still applies to 404s
 app.add_middleware(ApiOnlyHostMiddleware)

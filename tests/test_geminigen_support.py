@@ -2,8 +2,10 @@ import asyncio
 import base64
 import json
 import os
+import sqlite3
 import tempfile
 import time
+from contextlib import asynccontextmanager
 from datetime import datetime, time as datetime_time, timedelta, timezone
 from types import SimpleNamespace
 
@@ -16,6 +18,10 @@ from src.services.geminigen_service import (
 from src.api import routes
 from src.core.geminigen_manifest import GEMINIGEN_MODEL_BY_ID, GEMINIGEN_MODEL_MANIFEST
 from src.core.models import GeminiGenAccount, GeminiGenTask, Token
+from src.core.storage_errors import (
+    is_sqlite_storage_full_error,
+    sqlite_operational_error_handler,
+)
 from src.core.studio_model_catalog import geminigen_studio_metadata, native_studio_metadata
 
 
@@ -132,6 +138,91 @@ def test_dashboard_stats_exclude_non_terminal_and_cancelled_geminigen_tasks():
     assert stats["today_images"] == 0
     assert stats["today_videos"] == 0
     assert stats["today_errors"] == 0
+
+
+class _AdminSessionCursor:
+    def __init__(self, row):
+        self.row = row
+
+    async def fetchone(self):
+        return self.row
+
+
+class _FullAdminSessionConnection:
+    def __init__(self, row=None):
+        self.row = row
+
+    async def execute(self, query, _params=None):
+        if query.lstrip().upper().startswith("SELECT"):
+            return _AdminSessionCursor(self.row)
+        return _AdminSessionCursor(None)
+
+    async def commit(self):
+        raise sqlite3.OperationalError("database or disk is full")
+
+
+def _database_with_connection(connection):
+    db = Database(":memory:")
+
+    @asynccontextmanager
+    async def connect(*, write=False):
+        yield connection
+
+    db._connect = connect
+    return db
+
+
+def test_sqlite_storage_full_classifier_uses_code_and_message_fallback():
+    coded = sqlite3.OperationalError("write failed")
+    coded.sqlite_errorcode = sqlite3.SQLITE_FULL
+
+    assert is_sqlite_storage_full_error(coded) is True
+    assert is_sqlite_storage_full_error(
+        sqlite3.OperationalError("database or disk is full")
+    ) is True
+    assert is_sqlite_storage_full_error(sqlite3.OperationalError("database is locked")) is False
+    assert is_sqlite_storage_full_error(RuntimeError("disk is full")) is False
+
+
+def test_valid_admin_session_survives_storage_full_activity_touch():
+    expires_at = int(time.time()) + 3600
+    db = _database_with_connection(_FullAdminSessionConnection((expires_at,)))
+
+    assert asyncio.run(db.is_admin_session_valid("admin-session")) is True
+
+
+def test_expired_admin_session_stays_rejected_when_storage_is_full():
+    expires_at = int(time.time()) - 1
+    db = _database_with_connection(_FullAdminSessionConnection((expires_at,)))
+
+    assert asyncio.run(db.is_admin_session_valid("expired-session")) is False
+
+
+def test_new_admin_session_storage_failure_maps_to_507_without_returning():
+    db = _database_with_connection(_FullAdminSessionConnection())
+
+    try:
+        asyncio.run(db.insert_admin_session("new-session", int(time.time()) + 3600))
+    except sqlite3.OperationalError as exc:
+        response = asyncio.run(sqlite_operational_error_handler(None, exc))
+    else:
+        raise AssertionError("Expected session persistence to fail")
+
+    payload = json.loads(response.body)
+    assert response.status_code == 507
+    assert payload["code"] == "storage_full"
+    assert "clear cached media" in payload["detail"]
+
+
+def test_non_storage_sqlite_error_is_not_converted_to_507():
+    error = sqlite3.OperationalError("database is locked")
+
+    try:
+        asyncio.run(sqlite_operational_error_handler(None, error))
+    except sqlite3.OperationalError as exc:
+        assert exc is error
+    else:
+        raise AssertionError("Expected non-storage SQLite error to be re-raised")
 
 
 def test_extract_artifact_urls_falls_back_to_preview_without_download_url():

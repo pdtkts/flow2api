@@ -8,6 +8,7 @@ from typing import Optional, List, Dict, Any, Tuple, Set
 from pathlib import Path
 from .config import DEFAULT_YESCAPTCHA_TASK_TYPE, get_runtime_data_dir, normalize_yescaptcha_task_type
 from .runway_manifest import RUNWAY_MANIFEST_VERSION, RUNWAY_MODEL_MANIFEST
+from .storage_errors import is_sqlite_storage_full_error
 from .models import (
     Token,
     TokenStats,
@@ -3453,14 +3454,24 @@ class Database:
                 return False
             expires_at = int(row[0])
             if expires_at <= now:
-                await db.execute("DELETE FROM admin_sessions WHERE token = ?", (token,))
-                await db.commit()
+                try:
+                    await db.execute("DELETE FROM admin_sessions WHERE token = ?", (token,))
+                    await db.commit()
+                except Exception as exc:
+                    if not is_sqlite_storage_full_error(exc):
+                        raise
                 return False
-            await db.execute(
-                "UPDATE admin_sessions SET last_used_at = ? WHERE token = ?",
-                (now, token),
-            )
-            await db.commit()
+            try:
+                await db.execute(
+                    "UPDATE admin_sessions SET last_used_at = ? WHERE token = ?",
+                    (now, token),
+                )
+                await db.commit()
+            except Exception as exc:
+                # Activity timestamps are housekeeping. Keep an already valid
+                # session usable so the admin can reclaim cached disk space.
+                if not is_sqlite_storage_full_error(exc):
+                    raise
             return True
 
     async def delete_admin_session(self, token: str) -> None:
