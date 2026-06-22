@@ -72,6 +72,49 @@ class GeminiGenService:
         return None
 
     @staticmethod
+    def _cookie_header(raw_cookie: str) -> str:
+        raw = (raw_cookie or "").strip()
+        if not raw:
+            return ""
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            parsed = None
+        pairs: List[str] = []
+        if isinstance(parsed, list):
+            for item in parsed:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("name") or "").strip()
+                value = str(item.get("value") or "").strip()
+                if name:
+                    pairs.append(f"{name}={value}")
+        elif isinstance(parsed, dict):
+            if "name" in parsed and "value" in parsed:
+                name = str(parsed.get("name") or "").strip()
+                value = str(parsed.get("value") or "").strip()
+                if name:
+                    pairs.append(f"{name}={value}")
+            else:
+                for name, value in parsed.items():
+                    if str(name).strip():
+                        pairs.append(f"{str(name).strip()}={str(value).strip()}")
+        if pairs:
+            return "; ".join(pairs)
+        cleaned = raw.replace("\r", "\n")
+        lines = [line.strip().strip(";") for line in cleaned.split("\n") if line.strip()]
+        if len(lines) > 1:
+            return "; ".join(lines)
+        return raw.replace("\r", " ").replace("\n", " ").strip()
+
+    @staticmethod
+    def _bearer_header(raw_token: str) -> str:
+        token = (raw_token or "").strip()
+        if token.lower().startswith("bearer "):
+            token = token[7:].strip()
+        return f"Bearer {token}" if token else ""
+
+    @staticmethod
     def _headers(account: GeminiGenAccount, path: str, *, multipart: bool = False) -> Dict[str, str]:
         headers = {
             "Accept": "application/json, text/plain, */*",
@@ -79,10 +122,12 @@ class GeminiGenService:
             "Referer": "https://geminigen.ai/",
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
         }
-        if account.raw_cookie:
-            headers["Cookie"] = account.raw_cookie
-        if account.bearer_token:
-            headers["Authorization"] = f"Bearer {account.bearer_token}"
+        cookie = GeminiGenService._cookie_header(account.raw_cookie)
+        if cookie:
+            headers["Cookie"] = cookie
+        bearer = GeminiGenService._bearer_header(account.bearer_token)
+        if bearer:
+            headers["Authorization"] = bearer
         if account.guard_id:
             headers["x-guard-id"] = account.guard_id
         if not multipart:
@@ -277,7 +322,7 @@ class GeminiGenService:
         proxy = await self._request_proxy()
         async with AsyncSession() as session:
             response = await session.get(
-                f"{base_url.rstrip()}{path}",
+                f"{base_url.rstrip('/')}{path}",
                 headers=self._headers(account, path),
                 timeout=60,
                 proxy=proxy,
