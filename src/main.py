@@ -21,6 +21,7 @@ from .services.token_manager import TokenManager
 from .services.load_balancer import LoadBalancer
 from .services.concurrency_manager import ConcurrencyManager
 from .services.generation_handler import GenerationHandler
+from .services.geminigen_service import GeminiGenService
 from .services.runway_service import RunwayService
 from .services.st_refresh_reasons import describe_st_refresh_reason
 from .api import routes, admin
@@ -422,12 +423,14 @@ generation_handler = GenerationHandler(
     proxy_manager  # 添加 proxy_manager 参数
 )
 runway_service = RunwayService(db, generation_handler.file_cache, proxy_manager)
+geminigen_service = GeminiGenService(db, generation_handler.file_cache, proxy_manager)
 managed_api_key_manager = ApiKeyManager(db, legacy_api_key_provider=lambda: config.api_key)
 
 # Set dependencies
 routes.set_generation_handler(generation_handler)
 routes.set_runway_service(runway_service)
-admin.set_dependencies(token_manager, proxy_manager, db, concurrency_manager, managed_api_key_manager, runway_service)
+routes.set_geminigen_service(geminigen_service)
+admin.set_dependencies(token_manager, proxy_manager, db, concurrency_manager, managed_api_key_manager, runway_service, geminigen_service)
 set_api_key_manager(managed_api_key_manager)
 
 # Create FastAPI app
