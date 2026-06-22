@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import time
 import mimetypes
+import shutil
 from pathlib import Path
 from typing import Optional, Dict, Any, Tuple, List
 from datetime import datetime, timedelta, timezone
@@ -16,6 +17,10 @@ from ..core.logger import debug_logger
 _IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp", ".gif", ".avif", ".bmp", ".jpe"})
 _VIDEO_SUFFIXES = frozenset({".mp4", ".webm", ".mov", ".mkv", ".m4v"})
 MIN_VALID_VIDEO_BYTES = 1024
+MIN_FREE_SPACE_BYTES = 256 * 1024 * 1024
+MAX_FREE_SPACE_BYTES = 1024 * 1024 * 1024
+FREE_SPACE_RATIO = 0.10
+STALE_PART_SECONDS = 300
 
 
 class FileCache:
@@ -44,10 +49,116 @@ class FileCache:
         self.flow_client = flow_client
         self.db = db
         self._cleanup_task = None
+        self._cleanup_lock = asyncio.Lock()
         self._download_locks: Dict[str, asyncio.Lock] = {}
 
     def _is_cleanup_disabled(self) -> bool:
         return self.default_timeout <= 0
+
+    def _disk_usage(self):
+        return shutil.disk_usage(self.cache_dir)
+
+    def _free_space_target(self, total_bytes: int, required_bytes: int = 0) -> int:
+        reserve = max(
+            MIN_FREE_SPACE_BYTES,
+            min(MAX_FREE_SPACE_BYTES, int(total_bytes * FREE_SPACE_RATIO)),
+        )
+        return reserve + max(0, int(required_bytes))
+
+    @staticmethod
+    def _is_generated_media(path: Path) -> bool:
+        return path.suffix.lower() in (_IMAGE_SUFFIXES | _VIDEO_SUFFIXES)
+
+    @staticmethod
+    def _safe_unlink(path: Path) -> int:
+        """Delete one regular file without following symlinks."""
+        try:
+            if path.is_symlink() or not path.is_file():
+                return 0
+            size = path.stat().st_size
+            path.unlink()
+            return size
+        except OSError:
+            return 0
+
+    async def reclaim_cache_space(
+        self,
+        required_bytes: int = 0,
+        *,
+        target_free_bytes: Optional[int] = None,
+    ) -> Dict[str, int]:
+        """Restore the cache-volume reserve by evicting only generated media."""
+        async with self._cleanup_lock:
+            usage = self._disk_usage()
+            target = (
+                self._free_space_target(usage.total, required_bytes)
+                if target_free_bytes is None
+                else max(0, int(target_free_bytes)) + max(0, int(required_bytes))
+            )
+            free_before = usage.free
+            reclaimed = 0
+            removed = 0
+            now = time.time()
+            timeout = self.get_timeout()
+            candidates = []
+
+            try:
+                paths = list(self.cache_dir.iterdir())
+            except OSError:
+                paths = []
+            for path in paths:
+                try:
+                    if path.is_symlink() or not path.is_file():
+                        continue
+                    stat = path.stat()
+                except OSError:
+                    continue
+                age = now - stat.st_mtime
+                if path.name.endswith(".part"):
+                    if age < STALE_PART_SECONDS:
+                        continue
+                    priority = 0
+                elif self._is_generated_media(path):
+                    priority = 1 if timeout > 0 and age > timeout else 2
+                else:
+                    continue
+                candidates.append((priority, stat.st_mtime, path))
+
+            for _priority, _mtime, path in sorted(candidates, key=lambda item: (item[0], item[1])):
+                if free_before + reclaimed >= target:
+                    break
+                size = self._safe_unlink(path)
+                if size or not path.exists():
+                    reclaimed += size
+                    removed += 1
+
+            try:
+                free_after = self._disk_usage().free
+            except OSError:
+                free_after = free_before + reclaimed
+            result = {
+                "free_before": int(free_before),
+                "free_after": int(free_after),
+                "target_free": int(target),
+                "reclaimed_bytes": int(reclaimed),
+                "removed_count": int(removed),
+            }
+            if removed:
+                debug_logger.log_warning(
+                    "Cache space recovery removed "
+                    f"{removed} file(s) ({reclaimed} bytes); free={free_after}, target={target}"
+                )
+            return result
+
+    async def ensure_cache_capacity(self, required_bytes: int = 0) -> Dict[str, int]:
+        result = await self.reclaim_cache_space(required_bytes)
+        if result["free_after"] < result["target_free"]:
+            raise OSError(
+                28,
+                "Insufficient storage for generated media "
+                f"(free={result['free_after']}, required={result['target_free']})",
+            )
+        return result
 
     def _get_request_fingerprint(self) -> Optional[Dict[str, Any]]:
         """读取当前请求链路里绑定的浏览器指纹。"""
@@ -365,6 +476,7 @@ class FileCache:
             )
             raise Exception("Downloaded video response is not valid media")
 
+        await self.ensure_cache_capacity(len(content))
         self._write_cached_content(file_path, content)
         await self._record_cache_metadata(
             filename=filename,
@@ -381,9 +493,6 @@ class FileCache:
 
     async def start_cleanup_task(self):
         """Start background cleanup task"""
-        if self._is_cleanup_disabled():
-            debug_logger.log_info("Cache cleanup disabled (timeout <= 0), skip starting cleanup task")
-            return False
         if self._cleanup_task is None or self._cleanup_task.done():
             self._cleanup_task = asyncio.create_task(self._cleanup_loop())
             return True
@@ -401,9 +510,6 @@ class FileCache:
 
     async def refresh_cleanup_task(self) -> bool:
         """Apply the latest timeout setting to the cleanup background task."""
-        if self._is_cleanup_disabled():
-            await self.stop_cleanup_task()
-            return False
         return await self.start_cleanup_task()
 
     async def _cleanup_loop(self):
@@ -412,6 +518,7 @@ class FileCache:
             try:
                 await asyncio.sleep(300)  # Check every 5 minutes
                 await self._cleanup_expired_files()
+                await self.reclaim_cache_space()
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -425,28 +532,31 @@ class FileCache:
         """Remove expired cache files"""
         try:
             timeout = self.get_timeout()
-            if timeout <= 0:
-                return
             current_time = time.time()
             removed_count = 0
+            removed_bytes = 0
 
             for file_path in self.cache_dir.iterdir():
-                timeout = self.get_timeout()
-                if timeout <= 0:
-                    debug_logger.log_info("Cache cleanup disabled during cleanup pass, stop deleting files")
-                    break
-                if file_path.is_file():
-                    # Check file age
+                try:
+                    if file_path.is_symlink() or not file_path.is_file():
+                        continue
                     file_age = current_time - file_path.stat().st_mtime
-                    if file_age > timeout:
-                        try:
-                            file_path.unlink()
-                            removed_count += 1
-                        except Exception:
-                            pass
+                except OSError:
+                    continue
+                stale_part = file_path.name.endswith(".part") and file_age >= STALE_PART_SECONDS
+                expired_media = (
+                    timeout > 0 and self._is_generated_media(file_path) and file_age > timeout
+                )
+                if stale_part or expired_media:
+                    size = self._safe_unlink(file_path)
+                    if size or not file_path.exists():
+                        removed_bytes += size
+                        removed_count += 1
 
             if removed_count > 0:
                 debug_logger.log_info(f"Cleanup: removed {removed_count} expired cache files")
+
+            return {"removed_count": removed_count, "reclaimed_bytes": removed_bytes}
 
         except Exception as e:
             debug_logger.log_error(
@@ -454,6 +564,7 @@ class FileCache:
                 status_code=0,
                 response_text=""
             )
+            return {"removed_count": 0, "reclaimed_bytes": 0}
 
     def _generate_cache_filename(
         self,
@@ -701,6 +812,8 @@ class FileCache:
                 try:
                     import subprocess
 
+                    await self.ensure_cache_capacity()
+
                     wget_cmd = [
                         "wget",
                         "-q",
@@ -752,10 +865,13 @@ class FileCache:
 
                     error_msg = result.stderr.decode("utf-8", errors="ignore") if result.stderr else "Unknown error"
                     debug_logger.log_warning(f"wget failed: {error_msg}, trying curl...")
+                    self._safe_unlink(file_path)
 
                 except FileNotFoundError:
+                    self._safe_unlink(file_path)
                     debug_logger.log_warning("wget not found, trying curl...")
                 except Exception as e:
+                    self._safe_unlink(file_path)
                     if "not valid media" in str(e):
                         python_download_error = Exception("Downloaded video response is not valid media")
                     debug_logger.log_warning(f"wget failed: {str(e)}, trying curl...")
@@ -763,6 +879,8 @@ class FileCache:
                 # Try method 4: system curl command
                 try:
                     import subprocess
+
+                    await self.ensure_cache_capacity()
 
                     curl_cmd = [
                         "curl",
@@ -812,6 +930,7 @@ class FileCache:
                     raise Exception(f"curl command failed: {error_msg}")
 
                 except FileNotFoundError as e:
+                    self._safe_unlink(file_path)
                     if is_cdn and attempt_index < len(proxy_attempts) - 1:
                         continue
                     normalized_error = (
@@ -826,6 +945,7 @@ class FileCache:
                     )
                     raise Exception(normalized_error) from e
                 except Exception as e:
+                    self._safe_unlink(file_path)
                     if "not valid media" in str(e):
                         python_download_error = Exception("Downloaded video response is not valid media")
                     if is_cdn and attempt_index < len(proxy_attempts) - 1:
@@ -876,8 +996,8 @@ class FileCache:
         try:
             # Decode base64 and save to file
             image_data = base64.b64decode(base64_data)
-            with open(file_path, 'wb') as f:
-                f.write(image_data)
+            await self.ensure_cache_capacity(len(image_data))
+            self._write_cached_content(file_path, image_data)
             await self._record_cache_metadata(
                 filename=filename,
                 api_key_id=api_key_id,
@@ -889,6 +1009,8 @@ class FileCache:
             debug_logger.log_info(f"Base64 image cached: {filename} ({len(image_data)} bytes)")
             return filename
         except Exception as e:
+            self._safe_unlink(file_path)
+            self._safe_unlink(file_path.with_suffix(f"{file_path.suffix}.part"))
             debug_logger.log_error(
                 error_message=f"Failed to cache base64 image: {str(e)}",
                 status_code=0,
