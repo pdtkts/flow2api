@@ -44,6 +44,10 @@ GEMINIGEN_REFRESH_BEFORE_EXPIRY_SEC = 180
 GEMINIGEN_CAPACITY_ERROR_CODE = "MAX_PROCESSING_IMAGEN_EXCEEDED"
 GEMINIGEN_CAPACITY_COOLDOWN_INITIAL_SEC = 20.0
 GEMINIGEN_CAPACITY_COOLDOWN_MAX_SEC = 90.0
+GEMINIGEN_ACTIVE_STATUSES = {"queued", "processing", "submitted", "polling"}
+GEMINIGEN_TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
+GEMINIGEN_UPSTREAM_CANCEL_MARKERS = ("cancel", "canceled", "cancelled", "stop", "stopped")
+GEMINIGEN_UPSTREAM_FAILURE_MARKERS = ("fail", "error", "reject")
 
 
 @dataclass
@@ -521,6 +525,29 @@ class GeminiGenService:
         return ""
 
     @staticmethod
+    def is_geminigen_terminal_status(status: Any) -> bool:
+        return str(status or "").strip().lower() in GEMINIGEN_TERMINAL_STATUSES
+
+    @staticmethod
+    def _history_cancelled(payload: Dict[str, Any], status_text: str) -> bool:
+        if not isinstance(payload, dict):
+            return False
+        raw_status = str(payload.get("status") or "").strip().lower()
+        if raw_status in {"4", "499"}:
+            return True
+        haystack = " ".join(
+            str(value or "").lower()
+            for value in (
+                status_text,
+                payload.get("error_code"),
+                payload.get("error_message"),
+                payload.get("error"),
+                payload.get("message"),
+            )
+        )
+        return any(marker in haystack for marker in GEMINIGEN_UPSTREAM_CANCEL_MARKERS)
+
+    @staticmethod
     def _history_failed(payload: Dict[str, Any], status_text: str) -> bool:
         if not isinstance(payload, dict):
             return False
@@ -534,7 +561,7 @@ class GeminiGenService:
             return True
         if str(payload.get("error_message") or "").strip():
             return True
-        return any(x in (status_text or "") for x in ("fail", "error", "reject", "cancel"))
+        return any(x in (status_text or "") for x in GEMINIGEN_UPSTREAM_FAILURE_MARKERS)
 
     @staticmethod
     def _history_error_text(payload: Dict[str, Any], status_text: str) -> str:
@@ -547,6 +574,46 @@ class GeminiGenService:
         if code:
             return code
         return status_text or "GeminiGen task failed"
+
+    @staticmethod
+    def _history_cancelled_text(payload: Dict[str, Any], status_text: str) -> str:
+        message = str(payload.get("error_message") or payload.get("error") or payload.get("message") or "").strip() if isinstance(payload, dict) else ""
+        return message or status_text or "GeminiGen task cancelled"
+
+    @staticmethod
+    def _public_status_details(task: GeminiGenTask) -> Dict[str, Optional[str]]:
+        status = str(task.status or "").lower()
+        job_phase: Optional[str]
+        upstream_status: Optional[str] = None
+
+        if status == "queued":
+            job_phase = "queued"
+        elif status == "processing":
+            job_phase = "polling" if task.upstream_uuid else "submitting"
+        elif status in GEMINIGEN_TERMINAL_STATUSES:
+            job_phase = status
+        else:
+            job_phase = status or None
+
+        raw_payload = task.response_payload
+        if isinstance(raw_payload, str) and raw_payload.strip():
+            try:
+                payload = json.loads(raw_payload)
+            except Exception:
+                payload = None
+            if isinstance(payload, dict):
+                upstream_status = (
+                    str(payload.get("upstream_status") or payload.get("status") or payload.get("state") or payload.get("generation_status") or "").strip()
+                    or None
+                )
+                nested = payload.get("upstream")
+                if upstream_status is None and isinstance(nested, dict):
+                    upstream_status = (
+                        str(nested.get("status") or nested.get("state") or nested.get("generation_status") or "").strip()
+                        or None
+                    )
+
+        return {"job_phase": job_phase, "upstream_status": upstream_status}
 
     @staticmethod
     def _history_progress(payload: Dict[str, Any], fallback: int) -> int:
@@ -1219,7 +1286,7 @@ class GeminiGenService:
             raise KeyError("GeminiGen job not found")
         if api_key_id is not None and task.api_key_id is not None and int(api_key_id) != int(task.api_key_id):
             raise PermissionError("Not authorized to view this GeminiGen job")
-        if task.status in {"completed", "failed", "cancelled"}:
+        if self.is_geminigen_terminal_status(task.status):
             return task
         if task.status == "queued":
             return task
@@ -1231,7 +1298,8 @@ class GeminiGenService:
         try:
             payload = await self._get_history(account=account, base_url=cfg.base_url, upstream_uuid=task.upstream_uuid or "")
             status_text = self._extract_status(payload)
-            failed = self._history_failed(payload, status_text)
+            cancelled = self._history_cancelled(payload, status_text)
+            failed = False if cancelled else self._history_failed(payload, status_text)
             urls = self.extract_artifact_urls(payload, task.kind)
             completed = bool(urls) or any(x in status_text for x in ("complete", "success", "finished"))
             if completed:
@@ -1265,6 +1333,24 @@ class GeminiGenService:
                         "cached_artifact_urls": cached,
                         "result_urls": cached or urls,
                     },
+                    duration=self._task_duration(task),
+                )
+                await self.db.release_geminigen_account(task.account_id, task.kind)
+            elif cancelled:
+                error_text = self._history_cancelled_text(payload, status_text)
+                await self.db.update_geminigen_task(
+                    job_id,
+                    status="cancelled",
+                    error_message=error_text,
+                    response_payload=json.dumps(payload, ensure_ascii=False),
+                    completed_at=datetime.utcnow(),
+                )
+                await self._update_request_log(
+                    task.request_log_id,
+                    status_text="cancelled",
+                    progress=task.progress,
+                    status_code=499,
+                    response={"status": "cancelled", "job_id": job_id, "upstream_uuid": task.upstream_uuid, "error_message": error_text},
                     duration=self._task_duration(task),
                 )
                 await self.db.release_geminigen_account(task.account_id, task.kind)
@@ -1318,7 +1404,7 @@ class GeminiGenService:
         deadline = time.monotonic() + float(timeout)
         while time.monotonic() < deadline:
             task = await self.poll_task(job_id, api_key_id=api_key_id, base_url=base_url)
-            if task.status in {"completed", "failed", "cancelled"}:
+            if self.is_geminigen_terminal_status(task.status):
                 return task
             await asyncio.sleep(float(interval))
         await self.db.update_geminigen_task(job_id, status="failed", error_message=f"GeminiGen task did not finish within {timeout}s", completed_at=datetime.utcnow())
@@ -1395,10 +1481,13 @@ class GeminiGenService:
 
     @staticmethod
     def task_to_public_dict(task: GeminiGenTask) -> Dict[str, Any]:
+        details = GeminiGenService._public_status_details(task)
         return {
             "job_id": task.job_id,
             "upstream_uuid": task.upstream_uuid,
             "status": task.status,
+            "job_phase": details["job_phase"],
+            "upstream_status": details["upstream_status"],
             "progress": task.progress,
             "model": task.public_model_id,
             "raw_artifact_urls": task.raw_artifact_urls or [],
@@ -1412,12 +1501,13 @@ class GeminiGenService:
     @staticmethod
     def task_to_openai_payload(task: GeminiGenTask) -> Dict[str, Any]:
         if task.status in {"failed", "cancelled"}:
+            cancelled = str(task.status or "").lower() == "cancelled"
             return {
                 "error": {
                     "message": task.error_message or f"GeminiGen task {task.status}",
-                    "type": "server_error",
-                    "code": "geminigen_generation_failed",
-                    "status_code": 502,
+                    "type": "cancelled" if cancelled else "server_error",
+                    "code": "geminigen_generation_cancelled" if cancelled else "geminigen_generation_failed",
+                    "status_code": 499 if cancelled else 502,
                 },
                 "job_id": task.job_id,
             }

@@ -1148,7 +1148,7 @@ async def _iterate_geminigen_openai_stream(
         if current.progress != last_progress and current.status == "processing":
             last_progress = current.progress
             yield _geminigen_openai_chunk(f"GeminiGen progress: {current.progress}%\n")
-        if current.status in {"completed", "failed"}:
+        if service.is_geminigen_terminal_status(current.status):
             payload = service.task_to_openai_payload(current)
             if "error" in payload:
                 yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
@@ -2853,12 +2853,7 @@ async def create_chat_completion_async(
             )
             return JSONResponse(
                 status_code=202,
-                content={
-                    "job_id": task.job_id,
-                    "status": task.status,
-                    "model": task.public_model_id,
-                    "upstream_uuid": task.upstream_uuid,
-                },
+                content=geminigen_service.task_to_public_dict(task),
             )
 
         allowed_token_ids, selected_project_id = await _select_random_active_project_for_api_key(

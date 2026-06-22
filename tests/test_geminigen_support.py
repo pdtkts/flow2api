@@ -9,6 +9,7 @@ from src.services.geminigen_service import (
     GeminiGenService,
     GeminiGenUpstreamError,
 )
+from src.api import routes
 from src.core.geminigen_manifest import GEMINIGEN_MODEL_BY_ID, GEMINIGEN_MODEL_MANIFEST
 from src.core.models import GeminiGenAccount, GeminiGenTask
 from src.core.studio_model_catalog import geminigen_studio_metadata, native_studio_metadata
@@ -196,6 +197,9 @@ class FakeGeminiGenDatabase:
     async def get_geminigen_config(self):
         return self.config
 
+    async def get_geminigen_account(self, account_id):
+        return self.account
+
     async def acquire_geminigen_account(self, kind, excluded_account_ids=None):
         self.acquire_exclusions.append(list(excluded_account_ids or []))
         if self.account.id in (excluded_account_ids or []):
@@ -320,6 +324,136 @@ def test_geminigen_capacity_timeout_uses_sanitized_error():
     assert db.releases == 1
     assert db.task.error_message == "GeminiGen capacity is still full; generation did not start before timeout"
     assert "POST /api/generate_image" not in db.task.error_message
+    assert any(1 in excluded for excluded in db.acquire_exclusions)
+
+
+def test_geminigen_public_status_dict_exposes_phase_and_terminal_urls():
+    completed = GeminiGenTask(
+        job_id="geminigen-complete",
+        public_model_id="geminigen-nano-banana-pro-image-landscape-1k",
+        kind="image",
+        endpoint_type="imagen",
+        prompt="done",
+        status="completed",
+        progress=100,
+        raw_artifact_urls=["https://cdn.example/raw.png"],
+        cached_artifact_urls=["https://flow.example/api/cache/blob/raw.png"],
+        response_payload=json.dumps({"status": "SUCCESSFUL"}),
+    )
+    cancelled = completed.model_copy(
+        update={
+            "job_id": "geminigen-cancelled",
+            "status": "cancelled",
+            "progress": 5,
+            "raw_artifact_urls": [],
+            "cached_artifact_urls": [],
+            "error_message": "User cancelled",
+            "response_payload": json.dumps({"status": "cancelled"}),
+        }
+    )
+
+    completed_public = GeminiGenService.task_to_public_dict(completed)
+    cancelled_public = GeminiGenService.task_to_public_dict(cancelled)
+
+    assert completed_public["status"] == "completed"
+    assert completed_public["job_phase"] == "completed"
+    assert completed_public["upstream_status"] == "SUCCESSFUL"
+    assert completed_public["result_urls"] == ["https://flow.example/api/cache/blob/raw.png"]
+    assert cancelled_public["status"] == "cancelled"
+    assert cancelled_public["job_phase"] == "cancelled"
+    assert cancelled_public["error_message"] == "User cancelled"
+
+
+def test_geminigen_upstream_cancel_status_is_not_classified_as_failed():
+    payload = {"status": "cancelled", "message": "Cancelled by user"}
+
+    assert GeminiGenService._history_cancelled(payload, "cancelled") is True
+    assert GeminiGenService._history_failed(payload, "cancelled") is False
+
+
+def test_geminigen_poll_maps_upstream_cancel_to_cancelled_and_releases_account():
+    db = FakeGeminiGenDatabase()
+    db.task = db.task.model_copy(update={"status": "processing", "account_id": 1, "upstream_uuid": "upstream-uuid", "progress": 12})
+    service = build_capacity_test_service(db)
+
+    async def get_history(**kwargs):
+        return {"status": "stopped", "message": "Stopped by upstream"}
+
+    service._get_history = get_history
+
+    result = asyncio.run(service.poll_task("geminigen-test", api_key_id=None, base_url="https://flow.example"))
+
+    assert result.status == "cancelled"
+    assert result.error_message == "Stopped by upstream"
+    assert db.releases == 1
+    assert any(update.get("status") == "cancelled" for update in db.task_updates)
+
+
+def test_geminigen_wait_for_task_exits_on_cancelled():
+    service = object.__new__(GeminiGenService)
+    cancelled = GeminiGenTask(
+        job_id="geminigen-cancelled",
+        public_model_id="geminigen-nano-banana-pro-image-landscape-1k",
+        kind="image",
+        endpoint_type="imagen",
+        prompt="cancel",
+        status="cancelled",
+        progress=1,
+        error_message="Cancelled",
+    )
+
+    async def get_task(job_id):
+        return cancelled
+
+    async def get_config():
+        return SimpleNamespace(timeout_image_sec=5, timeout_video_sec=5, poll_interval_image_sec=0.1, poll_interval_video_sec=0.1)
+
+    async def poll_task(job_id, api_key_id=None, base_url=None):
+        return cancelled
+
+    service.db = SimpleNamespace(get_geminigen_task=get_task, get_geminigen_config=get_config)
+    service.poll_task = poll_task
+
+    result = asyncio.run(service.wait_for_task("geminigen-cancelled", api_key_id=None, base_url=None))
+
+    assert result.status == "cancelled"
+
+
+def test_geminigen_stream_exits_on_cancelled(monkeypatch):
+    cancelled = GeminiGenTask(
+        job_id="geminigen-cancelled",
+        public_model_id="geminigen-nano-banana-pro-image-landscape-1k",
+        kind="image",
+        endpoint_type="imagen",
+        prompt="cancel",
+        status="cancelled",
+        progress=1,
+        error_message="Cancelled by user",
+    )
+
+    class FakeService:
+        is_geminigen_terminal_status = staticmethod(GeminiGenService.is_geminigen_terminal_status)
+        task_to_openai_payload = staticmethod(GeminiGenService.task_to_openai_payload)
+
+        async def poll_task(self, job_id, api_key_id=None, base_url=None):
+            return cancelled
+
+    async def start_task(*args, **kwargs):
+        return cancelled
+
+    monkeypatch.setattr(routes, "_ensure_geminigen_service", lambda: FakeService())
+    monkeypatch.setattr(routes, "_start_geminigen_from_request", start_task)
+
+    async def collect():
+        chunks = []
+        async for chunk in routes._iterate_geminigen_openai_stream(None, None, api_key_id=None, base_url=None):
+            chunks.append(chunk)
+        return chunks
+
+    chunks = asyncio.run(collect())
+
+    assert any("geminigen_generation_cancelled" in chunk for chunk in chunks)
+    assert chunks[-1] == "data: [DONE]\n\n"
 
 
 def test_veo_ingredient_manifest_only_exposes_supported_eight_second_duration():
