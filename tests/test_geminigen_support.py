@@ -2,10 +2,15 @@ import asyncio
 import base64
 import json
 import time
+from types import SimpleNamespace
 
-from src.services.geminigen_service import GeminiGenService
+from src.services.geminigen_service import (
+    GEMINIGEN_CAPACITY_ERROR_CODE,
+    GeminiGenService,
+    GeminiGenUpstreamError,
+)
 from src.core.geminigen_manifest import GEMINIGEN_MODEL_BY_ID, GEMINIGEN_MODEL_MANIFEST
-from src.core.models import GeminiGenAccount
+from src.core.models import GeminiGenAccount, GeminiGenTask
 from src.core.studio_model_catalog import geminigen_studio_metadata, native_studio_metadata
 
 
@@ -131,6 +136,190 @@ def test_concurrent_token_refresh_is_serialized_per_account():
 
     assert refresh_calls == 1
     assert all(account.refresh_token == "rotated" for account in refreshed)
+
+
+def test_geminigen_capacity_error_is_retryable_and_sanitized():
+    body = json.dumps(
+        {
+            "detail": {
+                "error_code": GEMINIGEN_CAPACITY_ERROR_CODE,
+                "error_message": "You have reached the maximum number of 5 concurrent image generations allowed by your plan.",
+            }
+        }
+    )
+
+    error = GeminiGenService._extract_upstream_error(400, body)
+
+    assert error.retryable_capacity is True
+    assert error.error_code == GEMINIGEN_CAPACITY_ERROR_CODE
+    assert "capacity is full" in str(error)
+    assert "/api/generate_image" not in str(error)
+
+
+def test_geminigen_non_capacity_400_is_not_retryable():
+    body = json.dumps({"detail": {"error_code": "BAD_PROMPT", "error_message": "Prompt is invalid"}})
+
+    error = GeminiGenService._extract_upstream_error(400, body)
+
+    assert error.retryable_capacity is False
+    assert error.error_code == "BAD_PROMPT"
+    assert "Prompt is invalid" in str(error)
+
+
+class FakeGeminiGenDatabase:
+    def __init__(self, *, timeout_image_sec=3.0):
+        self.account = GeminiGenAccount(id=1, label="primary", bearer_token="token", image_concurrency=1, image_in_flight=0)
+        self.task = GeminiGenTask(
+            job_id="geminigen-test",
+            request_log_id=10,
+            public_model_id="geminigen-nano-banana-pro-image-landscape-1k",
+            kind="image",
+            endpoint_type="imagen",
+            prompt="A calm lake",
+            status="queued",
+            progress=0,
+        )
+        self.config = SimpleNamespace(
+            enabled=True,
+            base_url="https://api.geminigen.ai",
+            timeout_image_sec=timeout_image_sec,
+            timeout_video_sec=3.0,
+        )
+        self.releases = 0
+        self.acquire_exclusions = []
+        self.task_updates = []
+        self.account_updates = []
+
+    async def get_geminigen_task(self, job_id):
+        return self.task
+
+    async def get_geminigen_config(self):
+        return self.config
+
+    async def acquire_geminigen_account(self, kind, excluded_account_ids=None):
+        self.acquire_exclusions.append(list(excluded_account_ids or []))
+        if self.account.id in (excluded_account_ids or []):
+            return None
+        self.account.image_in_flight += 1
+        return self.account
+
+    async def release_geminigen_account(self, account_id, kind):
+        self.releases += 1
+        self.account.image_in_flight = max(0, self.account.image_in_flight - 1)
+
+    async def update_geminigen_task(self, job_id, **kwargs):
+        self.task_updates.append(kwargs)
+        self.task = self.task.model_copy(update=kwargs)
+
+    async def update_geminigen_account(self, account_id, **kwargs):
+        self.account_updates.append(kwargs)
+
+
+def build_capacity_test_service(db):
+    service = object.__new__(GeminiGenService)
+    service.db = db
+    service.file_cache = None
+    service.proxy_manager = None
+    service._capacity_cooldowns = {}
+    service._capacity_cooldown_attempts = {}
+    service._token_refresh_locks = {}
+    service._guard_skew_ms = 0
+    service._guard_skew_synced_at = 0.0
+    service._guard_skew_lock = asyncio.Lock()
+
+    async def update_request_log(*args, **kwargs):
+        return None
+
+    service._update_request_log = update_request_log
+    return service
+
+
+def test_geminigen_capacity_releases_slot_and_retries_until_success():
+    db = FakeGeminiGenDatabase()
+    service = build_capacity_test_service(db)
+    post_calls = 0
+
+    def no_cooldown(account_id, kind):
+        service._capacity_cooldowns[(account_id, kind)] = time.monotonic() - 1
+        return 0.0
+
+    async def no_sleep(*args, **kwargs):
+        return None
+
+    async def post_generation(**kwargs):
+        nonlocal post_calls
+        post_calls += 1
+        if post_calls == 1:
+            raise GeminiGenUpstreamError(
+                status_code=400,
+                message=f"GeminiGen upstream capacity is full ({GEMINIGEN_CAPACITY_ERROR_CODE})",
+                error_code=GEMINIGEN_CAPACITY_ERROR_CODE,
+                retryable_capacity=True,
+            )
+        return {"uuid": "upstream-uuid"}
+
+    service._set_capacity_cooldown = no_cooldown
+    service._sleep_for_capacity_or_slot = no_sleep
+    service._post_generation = post_generation
+
+    result = asyncio.run(
+        service._start_queued_task(
+            "geminigen-test",
+            images=[],
+            options={},
+            request_log_id=10,
+            started_at=time.perf_counter(),
+        )
+    )
+
+    assert result.upstream_uuid == "upstream-uuid"
+    assert post_calls == 2
+    assert db.releases == 1
+    assert any(update.get("status") == "queued" for update in db.task_updates)
+    assert db.account.image_in_flight == 1
+
+
+def test_geminigen_capacity_timeout_uses_sanitized_error():
+    db = FakeGeminiGenDatabase(timeout_image_sec=0.01)
+    service = build_capacity_test_service(db)
+
+    def long_cooldown(account_id, kind):
+        service._capacity_cooldowns[(account_id, kind)] = time.monotonic() + 30
+        return 30.0
+
+    async def no_sleep(*args, **kwargs):
+        return None
+
+    async def post_generation(**kwargs):
+        raise GeminiGenUpstreamError(
+            status_code=400,
+            message=f"GeminiGen upstream capacity is full ({GEMINIGEN_CAPACITY_ERROR_CODE})",
+            error_code=GEMINIGEN_CAPACITY_ERROR_CODE,
+            retryable_capacity=True,
+        )
+
+    service._set_capacity_cooldown = long_cooldown
+    service._sleep_for_capacity_or_slot = no_sleep
+    service._post_generation = post_generation
+
+    try:
+        asyncio.run(
+            service._start_queued_task(
+                "geminigen-test",
+                images=[],
+                options={},
+                request_log_id=10,
+                started_at=time.perf_counter(),
+            )
+        )
+    except RuntimeError as exc:
+        assert str(exc) == "GeminiGen capacity is still full; generation did not start before timeout"
+    else:
+        raise AssertionError("Expected capacity timeout")
+
+    assert db.releases == 1
+    assert db.task.error_message == "GeminiGen capacity is still full; generation did not start before timeout"
+    assert "POST /api/generate_image" not in db.task.error_message
 
 
 def test_veo_ingredient_manifest_only_exposes_supported_eight_second_duration():

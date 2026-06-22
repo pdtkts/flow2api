@@ -2919,10 +2919,21 @@ class Database:
             await db.execute("DELETE FROM geminigen_accounts WHERE id = ?", (int(account_id),))
             await db.commit()
 
-    async def acquire_geminigen_account(self, kind: str) -> Optional[GeminiGenAccount]:
+    async def acquire_geminigen_account(
+        self,
+        kind: str,
+        excluded_account_ids: Optional[List[int]] = None,
+    ) -> Optional[GeminiGenAccount]:
         is_video = str(kind or "").lower() == "video"
         limit_col = "video_concurrency" if is_video else "image_concurrency"
         inflight_col = "video_in_flight" if is_video else "image_in_flight"
+        excluded = [int(account_id) for account_id in (excluded_account_ids or []) if account_id]
+        exclusion_clause = ""
+        params: List[Any] = []
+        if excluded:
+            placeholders = ", ".join("?" for _ in excluded)
+            exclusion_clause = f"AND id NOT IN ({placeholders})"
+            params.extend(excluded)
         async with self._connect(write=True) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
@@ -2931,9 +2942,11 @@ class Database:
                 WHERE is_active = 1
                   AND TRIM(COALESCE(bearer_token, '')) != ''
                   AND ({limit_col} < 0 OR {inflight_col} < {limit_col})
+                  {exclusion_clause}
                 ORDER BY COALESCE(last_used_at, '1970-01-01 00:00:00') ASC, id ASC
                 LIMIT 1
-                """
+                """,
+                params,
             )
             row = await cursor.fetchone()
             if not row:

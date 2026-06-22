@@ -7,13 +7,15 @@ import base64
 import hashlib
 import json
 import mimetypes
+import random
 import re
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import datetime
 from email.utils import parsedate_to_datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote, urlparse
 
 from curl_cffi import CurlMime
@@ -39,6 +41,20 @@ GEMINIGEN_CHROME_MAJOR = 147
 GEMINIGEN_GUARD_STABLE_ID_LEN = 22
 GEMINIGEN_GUARD_VERSION_BYTE = 1
 GEMINIGEN_REFRESH_BEFORE_EXPIRY_SEC = 180
+GEMINIGEN_CAPACITY_ERROR_CODE = "MAX_PROCESSING_IMAGEN_EXCEEDED"
+GEMINIGEN_CAPACITY_COOLDOWN_INITIAL_SEC = 20.0
+GEMINIGEN_CAPACITY_COOLDOWN_MAX_SEC = 90.0
+
+
+@dataclass
+class GeminiGenUpstreamError(RuntimeError):
+    status_code: int
+    message: str
+    error_code: Optional[str] = None
+    retryable_capacity: bool = False
+
+    def __post_init__(self) -> None:
+        RuntimeError.__init__(self, self.message)
 
 
 class GeminiGenService:
@@ -52,6 +68,8 @@ class GeminiGenService:
         self._guard_skew_synced_at = 0.0
         self._guard_skew_lock = asyncio.Lock()
         self._token_refresh_locks: Dict[int, asyncio.Lock] = {}
+        self._capacity_cooldowns: Dict[Tuple[int, str], float] = {}
+        self._capacity_cooldown_attempts: Dict[Tuple[int, str], int] = {}
 
     @staticmethod
     def is_geminigen_model(model: str) -> bool:
@@ -790,6 +808,102 @@ class GeminiGenService:
             "veo-video": "/api/video-gen/veo",
         }[endpoint_type]
 
+    @staticmethod
+    def _extract_upstream_error(status_code: int, body: str) -> GeminiGenUpstreamError:
+        error_code: Optional[str] = None
+        error_message: Optional[str] = None
+        parsed: Any = None
+        try:
+            parsed = json.loads(body or "{}")
+        except Exception:
+            parsed = None
+        if isinstance(parsed, dict):
+            detail = parsed.get("detail")
+            if isinstance(detail, dict):
+                error_code = detail.get("error_code") or detail.get("code")
+                error_message = detail.get("error_message") or detail.get("message") or detail.get("error")
+            error_code = error_code or parsed.get("error_code") or parsed.get("code")
+            error_message = error_message or parsed.get("error_message") or parsed.get("message") or parsed.get("error")
+        retryable_capacity = str(error_code or "").upper() == GEMINIGEN_CAPACITY_ERROR_CODE
+        if retryable_capacity:
+            message = f"GeminiGen upstream capacity is full ({GEMINIGEN_CAPACITY_ERROR_CODE})"
+        else:
+            suffix = f": {str(error_message).strip()[:240]}" if error_message else ""
+            message = f"GeminiGen upstream request failed (HTTP {status_code}){suffix}"
+        return GeminiGenUpstreamError(
+            status_code=status_code,
+            message=message,
+            error_code=str(error_code) if error_code else None,
+            retryable_capacity=retryable_capacity,
+        )
+
+    def _capacity_key(self, account_id: Optional[int], kind: str) -> Optional[Tuple[int, str]]:
+        if not account_id:
+            return None
+        normalized_kind = "video" if str(kind or "").lower() == "video" else "image"
+        return int(account_id), normalized_kind
+
+    def _active_capacity_cooldowns(self, kind: str) -> Dict[int, float]:
+        now = time.monotonic()
+        normalized_kind = "video" if str(kind or "").lower() == "video" else "image"
+        active: Dict[int, float] = {}
+        expired: List[Tuple[int, str]] = []
+        for key, until in self._capacity_cooldowns.items():
+            if until <= now:
+                expired.append(key)
+                continue
+            account_id, cooldown_kind = key
+            if cooldown_kind == normalized_kind:
+                active[account_id] = until
+        for key in expired:
+            self._capacity_cooldowns.pop(key, None)
+            self._capacity_cooldown_attempts.pop(key, None)
+        return active
+
+    def _set_capacity_cooldown(self, account_id: Optional[int], kind: str) -> float:
+        key = self._capacity_key(account_id, kind)
+        if not key:
+            return 1.0
+        attempts = self._capacity_cooldown_attempts.get(key, 0) + 1
+        self._capacity_cooldown_attempts[key] = attempts
+        base = min(
+            GEMINIGEN_CAPACITY_COOLDOWN_MAX_SEC,
+            GEMINIGEN_CAPACITY_COOLDOWN_INITIAL_SEC * (2 ** max(0, attempts - 1)),
+        )
+        jitter = random.uniform(0.0, min(5.0, base * 0.1))
+        delay = min(GEMINIGEN_CAPACITY_COOLDOWN_MAX_SEC, base + jitter)
+        self._capacity_cooldowns[key] = time.monotonic() + delay
+        return delay
+
+    def _clear_capacity_cooldown(self, account_id: Optional[int], kind: str) -> None:
+        key = self._capacity_key(account_id, kind)
+        if not key:
+            return
+        self._capacity_cooldowns.pop(key, None)
+        self._capacity_cooldown_attempts.pop(key, None)
+
+    async def _sleep_for_capacity_or_slot(self, *, kind: str, deadline: float) -> None:
+        remaining = max(0.0, deadline - time.monotonic())
+        if remaining <= 0:
+            return
+        active = self._active_capacity_cooldowns(kind)
+        if active:
+            next_ready = max(0.0, min(active.values()) - time.monotonic())
+            await asyncio.sleep(min(1.0, next_ready, remaining))
+        else:
+            await asyncio.sleep(min(1.0, remaining))
+
+    async def _acquire_geminigen_account(self, kind: str) -> Optional[GeminiGenAccount]:
+        excluded = list(self._active_capacity_cooldowns(kind).keys())
+        try:
+            return await self.db.acquire_geminigen_account(kind, excluded_account_ids=excluded)
+        except TypeError:
+            account = await self.db.acquire_geminigen_account(kind)
+            if account and account.id in excluded:
+                await self.db.release_geminigen_account(account.id, kind)
+                return None
+            return account
+
     async def _post_generation(self, *, account: GeminiGenAccount, base_url: str, endpoint_type: str, form: Dict[str, Any]) -> Dict[str, Any]:
         path = self._endpoint_path(endpoint_type)
         url = f"{self._api_base_url(base_url)}{path}"
@@ -829,7 +943,7 @@ class GeminiGenService:
                 break
             account = await self._refresh_account_token(account, base_url)
         if response.status_code >= 400:
-            raise RuntimeError(f"GeminiGen POST {path} failed HTTP {response.status_code}: {response.text[:500]}")
+            raise self._extract_upstream_error(response.status_code, response.text[:2000])
         text = response.text or "{}"
         for line in text.splitlines():
             if line.startswith("data:"):
@@ -932,107 +1046,172 @@ class GeminiGenService:
         cfg = await self.db.get_geminigen_config()
         timeout = cfg.timeout_video_sec if task.kind == "video" else cfg.timeout_image_sec
         deadline = time.monotonic() + float(timeout)
-        account: Optional[GeminiGenAccount] = None
+        saw_capacity = False
+        last_capacity_error: Optional[GeminiGenUpstreamError] = None
+        manifest = geminigen_manifest_entry(task.public_model_id)
         while time.monotonic() < deadline:
-            account = await self.db.acquire_geminigen_account(task.kind)
-            if account:
-                break
+            account = await self._acquire_geminigen_account(task.kind)
+            if not account:
+                active_capacity = self._active_capacity_cooldowns(task.kind)
+                reason = "upstream_capacity_cooldown" if active_capacity else "waiting_for_account_slot"
+                await self._update_request_log(
+                    request_log_id,
+                    status_text="geminigen_queued",
+                    progress=0,
+                    response={"status": "queued", "job_id": job_id, "reason": reason},
+                    duration=time.perf_counter() - (started_at or time.perf_counter()),
+                )
+                await self._sleep_for_capacity_or_slot(kind=task.kind, deadline=deadline)
+                continue
+
             await self._update_request_log(
                 request_log_id,
-                status_text="geminigen_queued",
-                progress=0,
-                response={"status": "queued", "job_id": job_id, "reason": "waiting_for_account_slot"},
+                status_text="geminigen_account_selected",
+                progress=1,
+                response={"status": "account_selected", "job_id": job_id, "account_id": account.id},
                 duration=time.perf_counter() - (started_at or time.perf_counter()),
             )
-            await asyncio.sleep(1.0)
-        if not account:
+            release_now = False
+            try:
+                form = self._build_form(
+                    public_model_id=task.public_model_id,
+                    prompt=task.prompt,
+                    images=images,
+                    options=manifest or {},
+                    extra_options=options,
+                    account=account,
+                )
+                await self.db.update_geminigen_task(
+                    job_id,
+                    account_id=account.id,
+                    status="processing",
+                    progress=1,
+                    error_message=None,
+                    completed_at=None,
+                    started_at=datetime.utcnow(),
+                    request_payload=self._safe_log_json(form),
+                )
+                await self._update_request_log(
+                    request_log_id,
+                    status_text="geminigen_submitting",
+                    progress=3,
+                    response={
+                        "status": "submitting",
+                        "job_id": job_id,
+                        "account_id": account.id,
+                        "endpoint_type": task.endpoint_type,
+                        "form": form,
+                    },
+                    duration=time.perf_counter() - (started_at or time.perf_counter()),
+                )
+                created = await self._post_generation(
+                    account=account,
+                    base_url=cfg.base_url,
+                    endpoint_type=task.endpoint_type,
+                    form=form,
+                )
+                upstream_uuid = self._extract_uuid(created)
+                self._clear_capacity_cooldown(account.id, task.kind)
+                await self.db.update_geminigen_task(
+                    job_id,
+                    upstream_uuid=upstream_uuid,
+                    response_payload=json.dumps(created, ensure_ascii=False),
+                    progress=5,
+                )
+                await self.db.update_geminigen_account(account.id or 0, last_status="submitted", last_error=None)
+                await self._update_request_log(
+                    request_log_id,
+                    status_text="geminigen_submitted",
+                    progress=5,
+                    response={"status": "submitted", "job_id": job_id, "upstream_uuid": upstream_uuid, "upstream": created},
+                    duration=time.perf_counter() - (started_at or time.perf_counter()),
+                )
+                return await self.db.get_geminigen_task(job_id) or task
+            except GeminiGenUpstreamError as exc:
+                if exc.retryable_capacity:
+                    saw_capacity = True
+                    last_capacity_error = exc
+                    release_now = True
+                    cooldown_sec = self._set_capacity_cooldown(account.id, task.kind)
+                    await self.db.update_geminigen_task(
+                        job_id,
+                        account_id=None,
+                        upstream_uuid=None,
+                        status="queued",
+                        progress=0,
+                        error_message=None,
+                    )
+                    await self.db.update_geminigen_account(
+                        account.id or 0,
+                        last_status="capacity_limited",
+                        last_error=exc.error_code or str(exc),
+                    )
+                    await self._update_request_log(
+                        request_log_id,
+                        status_text="geminigen_queued",
+                        progress=0,
+                        response={
+                            "status": "queued",
+                            "job_id": job_id,
+                            "reason": "upstream_capacity_full",
+                            "account_id": account.id,
+                            "upstream_error_code": exc.error_code,
+                            "cooldown_sec": round(cooldown_sec, 2),
+                        },
+                        duration=time.perf_counter() - (started_at or time.perf_counter()),
+                    )
+                    continue
+                release_now = True
+                await self.db.update_geminigen_task(job_id, status="failed", error_message=str(exc), completed_at=datetime.utcnow())
+                await self.db.update_geminigen_account(account.id or 0, last_status="failed", last_error=exc.error_code or str(exc))
+                await self._update_request_log(
+                    request_log_id,
+                    status_text="failed",
+                    progress=task.progress,
+                    status_code=502,
+                    response={"status": "failed", "job_id": job_id, "error_message": str(exc), "upstream_error_code": exc.error_code},
+                    duration=time.perf_counter() - (started_at or time.perf_counter()),
+                )
+                raise
+            except Exception as exc:
+                release_now = True
+                await self.db.update_geminigen_task(job_id, status="failed", error_message=str(exc), completed_at=datetime.utcnow())
+                await self.db.update_geminigen_account(account.id or 0, last_status="failed", last_error=str(exc))
+                await self._update_request_log(
+                    request_log_id,
+                    status_text="failed",
+                    progress=task.progress,
+                    status_code=502,
+                    response={"status": "failed", "job_id": job_id, "error_message": str(exc)},
+                    duration=time.perf_counter() - (started_at or time.perf_counter()),
+                )
+                raise
+            finally:
+                if release_now:
+                    await self.db.release_geminigen_account(account.id, task.kind)
+
+        if saw_capacity:
+            error = "GeminiGen capacity is still full; generation did not start before timeout"
+            last_detail = last_capacity_error.error_code if last_capacity_error else GEMINIGEN_CAPACITY_ERROR_CODE
+            status_response = {
+                "status": "failed",
+                "job_id": job_id,
+                "error_message": error,
+                "upstream_error_code": last_detail,
+            }
+        else:
             error = "GeminiGen queue timed out waiting for an available account slot"
-            await self.db.update_geminigen_task(job_id, status="failed", error_message=error, completed_at=datetime.utcnow())
-            await self._update_request_log(
-                request_log_id,
-                status_text="failed",
-                progress=0,
-                status_code=504,
-                response={"status": "failed", "job_id": job_id, "error_message": error},
-                duration=time.perf_counter() - (started_at or time.perf_counter()),
-            )
-            raise RuntimeError(error)
+            status_response = {"status": "failed", "job_id": job_id, "error_message": error}
+        await self.db.update_geminigen_task(job_id, status="failed", error_message=error, completed_at=datetime.utcnow())
         await self._update_request_log(
             request_log_id,
-            status_text="geminigen_account_selected",
-            progress=1,
-            response={"status": "account_selected", "job_id": job_id, "account_id": account.id},
+            status_text="failed",
+            progress=0,
+            status_code=504,
+            response=status_response,
             duration=time.perf_counter() - (started_at or time.perf_counter()),
         )
-        manifest = geminigen_manifest_entry(task.public_model_id)
-        release_now = False
-        try:
-            form = self._build_form(
-                public_model_id=task.public_model_id,
-                prompt=task.prompt,
-                images=images,
-                options=manifest or {},
-                extra_options=options,
-                account=account,
-            )
-            await self.db.update_geminigen_task(
-                job_id,
-                account_id=account.id,
-                status="processing",
-                progress=1,
-                started_at=datetime.utcnow(),
-                request_payload=self._safe_log_json(form),
-            )
-            await self._update_request_log(
-                request_log_id,
-                status_text="geminigen_submitting",
-                progress=3,
-                response={
-                    "status": "submitting",
-                    "job_id": job_id,
-                    "account_id": account.id,
-                    "endpoint_type": task.endpoint_type,
-                    "form": form,
-                },
-                duration=time.perf_counter() - (started_at or time.perf_counter()),
-            )
-            created = await self._post_generation(
-                account=account,
-                base_url=cfg.base_url,
-                endpoint_type=task.endpoint_type,
-                form=form,
-            )
-            upstream_uuid = self._extract_uuid(created)
-            await self.db.update_geminigen_task(
-                job_id,
-                upstream_uuid=upstream_uuid,
-                response_payload=json.dumps(created, ensure_ascii=False),
-                progress=5,
-            )
-            await self._update_request_log(
-                request_log_id,
-                status_text="geminigen_submitted",
-                progress=5,
-                response={"status": "submitted", "job_id": job_id, "upstream_uuid": upstream_uuid, "upstream": created},
-                duration=time.perf_counter() - (started_at or time.perf_counter()),
-            )
-            return await self.db.get_geminigen_task(job_id) or task
-        except Exception as exc:
-            release_now = True
-            await self.db.update_geminigen_task(job_id, status="failed", error_message=str(exc), completed_at=datetime.utcnow())
-            await self.db.update_geminigen_account(account.id or 0, last_status="failed", last_error=str(exc))
-            await self._update_request_log(
-                request_log_id,
-                status_text="failed",
-                progress=task.progress,
-                status_code=502,
-                response={"status": "failed", "job_id": job_id, "error_message": str(exc)},
-                duration=time.perf_counter() - (started_at or time.perf_counter()),
-            )
-            raise
-        finally:
-            if release_now:
-                await self.db.release_geminigen_account(account.id, task.kind)
+        raise RuntimeError(error)
 
     async def poll_task(self, job_id: str, *, api_key_id: Optional[int] = None, base_url: Optional[str] = None) -> GeminiGenTask:
         task = await self.db.get_geminigen_task(job_id)
