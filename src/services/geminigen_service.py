@@ -539,14 +539,32 @@ class GeminiGenService:
             for item in value:
                 GeminiGenService._walk_urls(item, found)
 
+    @staticmethod
+    def _walk_urls_for_keys(value: Any, keys: set[str], found: List[str]) -> None:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                lk = key.lower()
+                if lk in keys and isinstance(item, str):
+                    if item.startswith(("http://", "https://")) and item not in found:
+                        found.append(item)
+                else:
+                    GeminiGenService._walk_urls_for_keys(item, keys, found)
+        elif isinstance(value, list):
+            for item in value:
+                GeminiGenService._walk_urls_for_keys(item, keys, found)
+
     @classmethod
     def extract_artifact_urls(cls, payload: Dict[str, Any], kind: str) -> List[str]:
+        final_urls: List[str] = []
+        cls._walk_urls_for_keys(payload, {"file_download_url", "download_url"}, final_urls)
+        if final_urls:
+            return final_urls
+
         found: List[str] = []
         if kind == "video":
             cls._walk_urls(payload.get("generated_video"), found)
         else:
             cls._walk_urls(payload.get("generated_image"), found)
-        cls._walk_urls(payload.get("file_download_url"), found)
         cls._walk_urls(payload.get("result"), found)
         cls._walk_urls(payload.get("data"), found)
         return found
