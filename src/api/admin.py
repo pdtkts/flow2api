@@ -2442,6 +2442,34 @@ async def delete_geminigen_account(
     return {"success": True, "account_id": account_id}
 
 
+@router.post("/api/admin/geminigen/queue/clear")
+async def clear_geminigen_queue(token: str = Depends(verify_admin_token)):
+    result = await db.clear_geminigen_queue(reason="Manually cleared by admin")
+    accounts = await db.list_geminigen_accounts()
+    return {
+        "success": True,
+        **result,
+        "accounts": [_geminigen_account_payload(account) for account in accounts],
+    }
+
+
+@router.post("/api/admin/geminigen/accounts/{account_id}/clear-slots")
+async def clear_geminigen_account_slots(
+    account_id: int,
+    token: str = Depends(verify_admin_token),
+):
+    account = await db.get_geminigen_account(account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="GeminiGen account not found")
+    result = await db.clear_geminigen_queue(account_id=account_id, reason="Manually cleared by admin")
+    account = await db.get_geminigen_account(account_id)
+    return {
+        "success": True,
+        **result,
+        "account": _geminigen_account_payload(account) if account else None,
+    }
+
+
 @router.post("/api/admin/geminigen/accounts/{account_id}/test")
 async def test_geminigen_account(
     account_id: int,

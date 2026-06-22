@@ -252,6 +252,30 @@ export function GeminiGenSettings({ active }: { active: boolean }) {
     }
   }
 
+  const clearQueue = async () => {
+    if (!window.confirm("Clear all GeminiGen queued/processing jobs and reset all GeminiGen slots?")) return
+    const r = await adminFetch("/api/admin/geminigen/queue/clear", token, { method: "POST" })
+    const d = await r?.json().catch(() => null)
+    if (r?.ok && d?.success) {
+      toast.success(`GeminiGen queue cleared: ${d.tasks_cleared ?? 0} task(s)`)
+      await refreshAll()
+    } else {
+      toast.error(d?.detail || "Could not clear GeminiGen queue")
+    }
+  }
+
+  const clearAccountSlots = async (account: GeminiGenAccount) => {
+    if (!window.confirm(`Clear GeminiGen slots and active jobs for "${account.label}"?`)) return
+    const r = await adminFetch(`/api/admin/geminigen/accounts/${account.id}/clear-slots`, token, { method: "POST" })
+    const d = await r?.json().catch(() => null)
+    if (r?.ok && d?.success) {
+      toast.success(`GeminiGen slots cleared: ${d.tasks_cleared ?? 0} task(s)`)
+      await refreshAll()
+    } else {
+      toast.error(d?.detail || "Could not clear GeminiGen slots")
+    }
+  }
+
   const refreshAll = async () => {
     await Promise.all([load(), loadStatus()])
   }
@@ -400,9 +424,14 @@ export function GeminiGenSettings({ active }: { active: boolean }) {
       <Card>
         <CardHeader className="flex flex-row items-center justify-between gap-4">
           <CardTitle>GeminiGen Accounts</CardTitle>
-          <Button size="sm" onClick={openNew}>
-            <Plus className="h-4 w-4 mr-2" /> Add account
-          </Button>
+          <div className="flex gap-2">
+            <Button size="sm" variant="outline" onClick={clearQueue}>
+              <RefreshCw className="h-4 w-4 mr-2" /> Clear GeminiGen Queue
+            </Button>
+            <Button size="sm" onClick={openNew}>
+              <Plus className="h-4 w-4 mr-2" /> Add account
+            </Button>
+          </div>
         </CardHeader>
         <CardContent>
           <Table>
@@ -431,6 +460,9 @@ export function GeminiGenSettings({ active }: { active: boolean }) {
                     <div className="flex justify-end gap-2">
                       <Button size="icon" variant="ghost" onClick={() => testAccount(account)} title="Test">
                         <CheckCircle2 className="h-4 w-4" />
+                      </Button>
+                      <Button size="icon" variant="ghost" onClick={() => clearAccountSlots(account)} title="Clear slots">
+                        <RefreshCw className="h-4 w-4" />
                       </Button>
                       <Button size="icon" variant="ghost" onClick={() => patchAccount(account, { is_active: !account.is_active })} title="Toggle">
                         <RefreshCw className="h-4 w-4" />

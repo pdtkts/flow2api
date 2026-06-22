@@ -20,6 +20,7 @@ export const STATUS_MAP: Record<string, string> = {
   geminigen_submitting: "GeminiGen submitting",
   geminigen_submitted: "GeminiGen submitted",
   geminigen_polling: "GeminiGen polling",
+  manual_cleared: "Manually cleared",
   completed: "Completed",
   failed: "Failed",
   processing: "Processing",

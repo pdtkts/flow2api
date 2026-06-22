@@ -2920,7 +2920,7 @@ class Database:
                 f"""
                 SELECT * FROM geminigen_accounts
                 WHERE is_active = 1
-                  AND TRIM(COALESCE(raw_cookie, '')) != ''
+                  AND TRIM(COALESCE(bearer_token, '')) != ''
                   AND ({limit_col} < 0 OR {inflight_col} < {limit_col})
                 ORDER BY COALESCE(last_used_at, '1970-01-01 00:00:00') ASC, id ASC
                 LIMIT 1
@@ -2962,6 +2962,86 @@ class Database:
                 (int(account_id),),
             )
             await db.commit()
+
+    async def clear_geminigen_queue(self, account_id: Optional[int] = None, reason: str = "Manually cleared by admin") -> Dict[str, int]:
+        now = datetime.utcnow()
+        response = json.dumps(
+            {"status": "manual_cleared", "reason": reason},
+            ensure_ascii=False,
+        )
+        reset_params: List[Any] = []
+        reset_where = ""
+        task_params: List[Any] = []
+        task_where = "status IN ('queued', 'processing')"
+        if account_id is not None:
+            reset_where = " WHERE id = ?"
+            reset_params.append(int(account_id))
+            task_where += " AND account_id = ?"
+            task_params.append(int(account_id))
+        async with self._connect(write=True) as db:
+            db.row_factory = aiosqlite.Row
+            account_cursor = await db.execute(
+                f"SELECT COUNT(*) FROM geminigen_accounts{reset_where}",
+                reset_params,
+            )
+            account_count = int((await account_cursor.fetchone())[0] or 0)
+            cursor = await db.execute(
+                f"SELECT job_id, request_log_id FROM geminigen_tasks WHERE {task_where}",
+                task_params,
+            )
+            rows = await cursor.fetchall()
+            await db.execute(
+                f"""
+                UPDATE geminigen_accounts
+                SET image_in_flight = 0,
+                    video_in_flight = 0,
+                    updated_at = CURRENT_TIMESTAMP
+                {reset_where}
+                """,
+                reset_params,
+            )
+            await db.execute(
+                f"""
+                UPDATE geminigen_tasks
+                SET status = 'cancelled',
+                    error_message = ?,
+                    completed_at = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE {task_where}
+                """,
+                [reason, now, *task_params],
+            )
+            log_count = 0
+            for row in rows:
+                log_id = row["request_log_id"]
+                if not log_id:
+                    continue
+                body = json.dumps(
+                    {
+                        "status": "manual_cleared",
+                        "job_id": row["job_id"],
+                        "reason": reason,
+                    },
+                    ensure_ascii=False,
+                )
+                await db.execute(
+                    """
+                    UPDATE request_logs
+                    SET response_body = ?,
+                        status_code = 499,
+                        status_text = 'manual_cleared',
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    (body or response, int(log_id)),
+                )
+                log_count += 1
+            await db.commit()
+            return {
+                "accounts_reset": account_count,
+                "tasks_cleared": len(rows),
+                "logs_updated": log_count,
+            }
 
     async def create_geminigen_task(self, task: GeminiGenTask) -> int:
         async with self._connect(write=True) as db:
