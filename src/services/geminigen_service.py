@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote, urlparse
 
+from curl_cffi import CurlMime
 from curl_cffi.requests import AsyncSession
 
 from ..core.database import Database
@@ -555,22 +556,25 @@ class GeminiGenService:
         path = self._endpoint_path(endpoint_type)
         url = f"{self._api_base_url(base_url)}{path}"
         proxy = await self._request_proxy()
-        files: List[Any] = []
+        multipart = CurlMime()
         for key, value in form.items():
             if isinstance(value, list):
                 for item in value:
-                    files.append((key, (None, str(item))))
+                    multipart.addpart(name=key, data=str(item))
             else:
-                files.append((key, (None, str(value))))
-        async with AsyncSession() as session:
-            response = await session.post(
-                url,
-                headers=self._headers(account, path, multipart=True),
-                files=files,
-                timeout=120,
-                proxy=proxy,
-                impersonate="chrome120",
-            )
+                multipart.addpart(name=key, data=str(value))
+        try:
+            async with AsyncSession() as session:
+                response = await session.post(
+                    url,
+                    headers=self._headers(account, path, multipart=True),
+                    multipart=multipart,
+                    timeout=120,
+                    proxy=proxy,
+                    impersonate="chrome120",
+                )
+        finally:
+            multipart.close()
         if response.status_code >= 400:
             raise RuntimeError(f"GeminiGen POST {path} failed HTTP {response.status_code}: {response.text[:500]}")
         text = response.text or "{}"
