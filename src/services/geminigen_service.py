@@ -1047,6 +1047,43 @@ class GeminiGenService:
         options: Optional[Dict[str, Any]] = None,
         api_key_id: Optional[int] = None,
     ) -> GeminiGenTask:
+        queued = await self.enqueue_task(
+            public_model_id=public_model_id,
+            prompt=prompt,
+            images=images,
+            options=options,
+            api_key_id=api_key_id,
+        )
+        started_at = time.perf_counter()
+        try:
+            return await self._start_queued_task(
+                queued.job_id,
+                images=images or [],
+                options=options or {},
+                request_log_id=queued.request_log_id,
+                started_at=started_at,
+            )
+        except Exception as exc:
+            await self._update_request_log(
+                queued.request_log_id,
+                status_text="failed",
+                progress=0,
+                status_code=502,
+                response={"status": "failed", "job_id": queued.job_id, "error_message": str(exc)},
+                duration=time.perf_counter() - started_at,
+            )
+            raise
+
+    async def enqueue_task(
+        self,
+        *,
+        public_model_id: str,
+        prompt: str,
+        images: Optional[List[bytes]] = None,
+        options: Optional[Dict[str, Any]] = None,
+        api_key_id: Optional[int] = None,
+    ) -> GeminiGenTask:
+        """Persist a GeminiGen job as queued without waiting for an upstream slot."""
         manifest = geminigen_manifest_entry(public_model_id)
         if not manifest:
             raise RuntimeError(f"GeminiGen model does not exist: {public_model_id}")
@@ -1055,7 +1092,6 @@ class GeminiGenService:
             raise RuntimeError("GeminiGen integration is disabled")
         kind = str(manifest["kind"])
         job_id = f"geminigen-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
-        started_at = time.perf_counter()
         request_log_id = await self._create_request_log(
             api_key_id=api_key_id,
             kind=kind,
@@ -1079,24 +1115,33 @@ class GeminiGenService:
             request_payload=json.dumps({"images": len(images or []), "options": options or {}}, ensure_ascii=False),
         )
         await self.db.create_geminigen_task(queued)
+        return queued
+
+    async def start_and_complete_queued_task_in_background(
+        self,
+        job_id: str,
+        *,
+        images: List[bytes],
+        options: Dict[str, Any],
+        api_key_id: Optional[int],
+        base_url: Optional[str],
+    ) -> None:
+        """Wait for capacity, submit a queued task, then poll it to completion."""
+        started_at = time.perf_counter()
         try:
-            return await self._start_queued_task(
+            task = await self.db.get_geminigen_task(job_id)
+            if not task:
+                return
+            await self._start_queued_task(
                 job_id,
-                images=images or [],
-                options=options or {},
-                request_log_id=request_log_id,
+                images=images,
+                options=options,
+                request_log_id=task.request_log_id,
                 started_at=started_at,
             )
+            await self.wait_for_task(job_id, api_key_id=api_key_id, base_url=base_url)
         except Exception as exc:
-            await self._update_request_log(
-                request_log_id,
-                status_text="failed",
-                progress=0,
-                status_code=502,
-                response={"status": "failed", "job_id": job_id, "error_message": str(exc)},
-                duration=time.perf_counter() - started_at,
-            )
-            raise
+            debug_logger.log_warning(f"GeminiGen queued background task failed for {job_id}: {exc}")
 
     async def _start_queued_task(
         self,
@@ -1289,6 +1334,10 @@ class GeminiGenService:
         if self.is_geminigen_terminal_status(task.status):
             return task
         if task.status == "queued":
+            return task
+        if task.status == "processing" and not task.upstream_uuid:
+            # Submission is in flight. Do not poll GeminiGen history until its
+            # upstream UUID has been persisted by the submitter.
             return task
         account = await self.db.get_geminigen_account(int(task.account_id or 0))
         if not account:

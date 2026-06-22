@@ -328,6 +328,15 @@ def test_geminigen_capacity_timeout_uses_sanitized_error():
 
 
 def test_geminigen_public_status_dict_exposes_phase_and_terminal_urls():
+    queued = GeminiGenTask(
+        job_id="geminigen-queued",
+        public_model_id="geminigen-nano-banana-pro-image-landscape-1k",
+        kind="image",
+        endpoint_type="imagen",
+        prompt="waiting",
+        status="queued",
+        progress=0,
+    )
     completed = GeminiGenTask(
         job_id="geminigen-complete",
         public_model_id="geminigen-nano-banana-pro-image-landscape-1k",
@@ -352,9 +361,13 @@ def test_geminigen_public_status_dict_exposes_phase_and_terminal_urls():
         }
     )
 
+    queued_public = GeminiGenService.task_to_public_dict(queued)
     completed_public = GeminiGenService.task_to_public_dict(completed)
     cancelled_public = GeminiGenService.task_to_public_dict(cancelled)
 
+    assert queued_public["status"] == "queued"
+    assert queued_public["job_phase"] == "queued"
+    assert queued_public["upstream_status"] is None
     assert completed_public["status"] == "completed"
     assert completed_public["job_phase"] == "completed"
     assert completed_public["upstream_status"] == "SUCCESSFUL"
@@ -387,6 +400,22 @@ def test_geminigen_poll_maps_upstream_cancel_to_cancelled_and_releases_account()
     assert result.error_message == "Stopped by upstream"
     assert db.releases == 1
     assert any(update.get("status") == "cancelled" for update in db.task_updates)
+
+
+def test_geminigen_poll_does_not_query_history_while_submission_is_in_flight():
+    db = FakeGeminiGenDatabase()
+    db.task = db.task.model_copy(update={"status": "processing", "account_id": 1, "upstream_uuid": None, "progress": 1})
+    service = build_capacity_test_service(db)
+
+    async def unexpected_history_call(**kwargs):
+        raise AssertionError("history must not be queried before upstream_uuid exists")
+
+    service._get_history = unexpected_history_call
+
+    result = asyncio.run(service.poll_task("geminigen-test", api_key_id=None, base_url="https://flow.example"))
+
+    assert result.status == "processing"
+    assert result.upstream_uuid is None
 
 
 def test_geminigen_wait_for_task_exits_on_cancelled():

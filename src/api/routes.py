@@ -1119,6 +1119,21 @@ async def _start_geminigen_from_request(
     )
 
 
+async def _enqueue_geminigen_from_request(
+    request: Any,
+    normalized: NormalizedGenerationRequest,
+    api_key_id: Optional[int],
+) -> GeminiGenTask:
+    service = _ensure_geminigen_service()
+    return await service.enqueue_task(
+        public_model_id=normalized.model,
+        prompt=normalized.prompt,
+        images=normalized.images,
+        options=_geminigen_options_from_request(request),
+        api_key_id=api_key_id,
+    )
+
+
 async def _geminigen_openai_non_stream(
     request: Any,
     normalized: NormalizedGenerationRequest,
@@ -2839,15 +2854,17 @@ async def create_chat_completion_async(
 
         if _is_geminigen_model(normalized.model):
             _require_geminigen_scope(auth_ctx)
-            task = await _start_geminigen_from_request(
+            task = await _enqueue_geminigen_from_request(
                 request,
                 normalized,
                 api_key_id=auth_ctx.key_id,
             )
             geminigen_service = _ensure_geminigen_service()
             background_tasks.add_task(
-                geminigen_service.complete_task_in_background,
+                geminigen_service.start_and_complete_queued_task_in_background,
                 task.job_id,
+                images=normalized.images,
+                options=_geminigen_options_from_request(request),
                 api_key_id=auth_ctx.key_id,
                 base_url=request_base_url,
             )
