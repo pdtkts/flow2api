@@ -1,7 +1,11 @@
 import json
+import os
+import sqlite3
 import tempfile
+import time
 import types
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -1396,6 +1400,143 @@ class VeoLiteFlowClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(_needs_video_url_resolve(cdn, "media-1"))
         self.assertFalse(_needs_video_url_resolve(local, "media-1"))
         self.assertFalse(_needs_video_url_resolve(redirect, None))
+
+
+class FileCacheSpaceRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_reclaims_stale_then_expired_then_oldest_and_stops(self):
+        with tempfile.TemporaryDirectory() as root:
+            cache_dir = Path(root) / "tmp"
+            cache_dir.mkdir()
+            cache = FileCache(cache_dir=str(cache_dir), default_timeout=60)
+            now = time.time()
+            files = {
+                "stale.mp4.part": now - 600,
+                "expired.mp4": now - 300,
+                "old.mp4": now - 30,
+                "new.mp4": now - 10,
+            }
+            for name, mtime in files.items():
+                path = cache_dir / name
+                path.write_bytes(b"x" * 10)
+                os.utime(path, (mtime, mtime))
+
+            initial_names = set(files)
+
+            def disk_usage():
+                remaining = sum(
+                    (cache_dir / name).stat().st_size
+                    for name in initial_names
+                    if (cache_dir / name).exists()
+                )
+                freed = 40 - remaining
+                return SimpleNamespace(total=1000, used=1000 - freed, free=freed)
+
+            cache._disk_usage = disk_usage
+            result = await cache.reclaim_cache_space(target_free_bytes=25)
+
+            self.assertEqual(result["removed_count"], 3)
+            self.assertFalse((cache_dir / "stale.mp4.part").exists())
+            self.assertFalse((cache_dir / "expired.mp4").exists())
+            self.assertFalse((cache_dir / "old.mp4").exists())
+            self.assertTrue((cache_dir / "new.mp4").exists())
+
+    async def test_recovery_never_touches_database_directories_symlinks_or_other_files(self):
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            cache_dir = root_path / "tmp"
+            data_dir = root_path / "data"
+            cache_dir.mkdir()
+            data_dir.mkdir()
+            database = data_dir / "flow.db"
+            database.write_bytes(b"database")
+            unrelated = cache_dir / "notes.txt"
+            unrelated.write_bytes(b"keep")
+            nested = cache_dir / "nested"
+            nested.mkdir()
+            (nested / "inside.mp4").write_bytes(b"keep")
+            media = cache_dir / "evict.mp4"
+            media.write_bytes(b"media")
+            link = cache_dir / "linked.mp4"
+            try:
+                link.symlink_to(database)
+            except OSError:
+                link = None
+
+            cache = FileCache(cache_dir=str(cache_dir))
+            cache._disk_usage = lambda: SimpleNamespace(total=1000, used=1000, free=0)
+            await cache.reclaim_cache_space(target_free_bytes=100)
+
+            self.assertTrue(database.exists())
+            self.assertTrue(unrelated.exists())
+            self.assertTrue(nested.is_dir())
+            self.assertTrue((nested / "inside.mp4").exists())
+            if link is not None:
+                self.assertTrue(link.is_symlink())
+
+    async def test_base64_write_checks_capacity_and_removes_partial_file(self):
+        with tempfile.TemporaryDirectory() as root:
+            cache = FileCache(cache_dir=root)
+            cache.ensure_cache_capacity = AsyncMock(return_value={})
+
+            def fail_write(path, _content):
+                path.with_suffix(f"{path.suffix}.part").write_bytes(b"partial")
+                raise OSError(28, "disk full")
+
+            cache._write_cached_content = fail_write
+            with self.assertRaisesRegex(Exception, "disk full"):
+                await cache.cache_base64_image("aGVsbG8=")
+
+            cache.ensure_cache_capacity.assert_awaited_once_with(5)
+            self.assertEqual(list(Path(root).glob("*.part")), [])
+
+
+class StartupStorageRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_sqlite_full_reclaims_cache_and_retries_once(self):
+        from src.main import _init_database_with_storage_recovery
+
+        database = SimpleNamespace(
+            init_db=AsyncMock(
+                side_effect=[sqlite3.OperationalError("database or disk is full"), None]
+            )
+        )
+        cache = SimpleNamespace(
+            _cleanup_expired_files=AsyncMock(return_value={}),
+            reclaim_cache_space=AsyncMock(
+                return_value={
+                    "free_after": 600,
+                    "target_free": 500,
+                    "reclaimed_bytes": 400,
+                }
+            ),
+        )
+
+        await _init_database_with_storage_recovery(database, cache)
+        self.assertEqual(database.init_db.await_count, 2)
+        cache._cleanup_expired_files.assert_awaited_once()
+        cache.reclaim_cache_space.assert_awaited_once()
+
+    async def test_unrecoverable_full_volume_has_concise_diagnostic(self):
+        from src.main import _init_database_with_storage_recovery
+
+        database = SimpleNamespace(
+            init_db=AsyncMock(side_effect=sqlite3.OperationalError("database or disk is full"))
+        )
+        cache = SimpleNamespace(
+            _cleanup_expired_files=AsyncMock(return_value={}),
+            reclaim_cache_space=AsyncMock(
+                return_value={
+                    "free_after": 10,
+                    "target_free": 500,
+                    "reclaimed_bytes": 25,
+                }
+            ),
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError, r"volume remains full.*free=10 bytes, reclaimed=25 bytes"
+        ):
+            await _init_database_with_storage_recovery(database, cache)
+        self.assertEqual(database.init_db.await_count, 1)
 
 
 if __name__ == "__main__":
