@@ -277,7 +277,7 @@ class Database:
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 completed_at TIMESTAMP,
-                FOREIGN KEY (account_id) REFERENCES runway_accounts(id),
+                FOREIGN KEY (account_id) REFERENCES runway_accounts(id) ON DELETE SET NULL,
                 FOREIGN KEY (api_key_id) REFERENCES api_keys(id)
             )
         """)
@@ -2442,6 +2442,15 @@ class Database:
 
     async def delete_runway_account(self, account_id: int) -> None:
         async with self._connect(write=True) as db:
+            await db.execute(
+                """
+                UPDATE runway_tasks
+                SET account_id = NULL,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE account_id = ?
+                """,
+                (account_id,),
+            )
             await db.execute("DELETE FROM runway_accounts WHERE id = ?", (account_id,))
             await db.commit()
 
