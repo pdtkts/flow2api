@@ -84,7 +84,7 @@ def build_geminigen_manifest() -> List[Dict[str, Any]]:
                                 "kind": "video",
                                 "endpoint_type": "veo-video",
                                 "options": {
-                                    "model": model_key,
+                                    "model": "veo-3-fast" if model_key == "veo-3.1-fast" else model_key,
                                     "aspect_ratio": ASPECTS[aspect],
                                     "resolution": resolution,
                                     "duration": duration.rstrip("s"),
@@ -97,7 +97,8 @@ def build_geminigen_manifest() -> List[Dict[str, Any]]:
     for ref_mode in ("frame", "ingredient"):
         for aspect in ("landscape", "portrait"):
             for resolution in ("720p", "1080p"):
-                for duration in ("4s", "6s", "8s"):
+                durations = ("8s",) if ref_mode == "ingredient" else ("4s", "6s", "8s")
+                for duration in durations:
                     public_id = f"geminigen-veo-3.1-fast-i2v-{ref_mode}-{aspect}-{resolution}-{duration}"
                     models.append(
                         {
@@ -106,7 +107,7 @@ def build_geminigen_manifest() -> List[Dict[str, Any]]:
                             "kind": "video",
                             "endpoint_type": "veo-video",
                             "options": {
-                                "model": "veo-3.1-fast",
+                                "model": "veo-3-fast",
                                 "aspect_ratio": ASPECTS[aspect],
                                 "resolution": resolution,
                                 "duration": duration.rstrip("s"),

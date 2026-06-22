@@ -1,4 +1,10 @@
+import asyncio
+import base64
+import json
+import time
+
 from src.services.geminigen_service import GeminiGenService
+from src.core.geminigen_manifest import GEMINIGEN_MODEL_BY_ID
 from src.core.models import GeminiGenAccount
 
 
@@ -38,7 +44,7 @@ def test_veo_frame_images_are_real_multipart_files():
         options={
             "endpoint_type": "veo-video",
             "options": {
-                "model": "veo-3.1-fast",
+                "model": "veo-3-fast",
                 "reference_mode": "frame",
                 "duration": "4",
                 "resolution": "720p",
@@ -69,7 +75,7 @@ def test_veo_ingredient_prompt_gets_reference_tags():
         images=[b"\xff\xd8\xffcontent"],
         options={
             "endpoint_type": "veo-video",
-            "options": {"model": "veo-3.1-fast", "reference_mode": "ingredient"},
+            "options": {"model": "veo-3-fast", "reference_mode": "ingredient"},
         },
         extra_options={},
         account=GeminiGenAccount(id=1, name="test", bearer_token="token"),
@@ -78,3 +84,55 @@ def test_veo_ingredient_prompt_gets_reference_tags():
     assert form["mode_image"] == "ingredient"
     assert form["prompt"].startswith("@image1 ")
     assert form["_file_parts"][0]["content_type"] == "image/jpeg"
+
+
+def test_concurrent_token_refresh_is_serialized_per_account():
+    def token(exp: int) -> str:
+        payload = base64.urlsafe_b64encode(json.dumps({"exp": exp}).encode()).decode().rstrip("=")
+        return f"header.{payload}.signature"
+
+    stale = GeminiGenAccount(
+        id=1,
+        name="test",
+        bearer_token=token(int(time.time()) - 60),
+        refresh_token="refresh",
+    )
+
+    class FakeDatabase:
+        account = stale
+
+        async def get_geminigen_account(self, account_id):
+            return self.account
+
+    service = object.__new__(GeminiGenService)
+    service.db = FakeDatabase()
+    service._token_refresh_locks = {}
+    refresh_calls = 0
+
+    async def refresh_once(account, base_url):
+        nonlocal refresh_calls
+        refresh_calls += 1
+        await asyncio.sleep(0.01)
+        service.db.account = account.model_copy(
+            update={"bearer_token": token(int(time.time()) + 3600), "refresh_token": "rotated"}
+        )
+        return service.db.account
+
+    service._refresh_account_token_unlocked = refresh_once
+
+    async def run():
+        return await asyncio.gather(
+            service._refresh_account_token(stale, "https://api.geminigen.ai"),
+            service._refresh_account_token(stale, "https://api.geminigen.ai"),
+        )
+
+    refreshed = asyncio.run(run())
+
+    assert refresh_calls == 1
+    assert all(account.refresh_token == "rotated" for account in refreshed)
+
+
+def test_veo_ingredient_manifest_only_exposes_supported_eight_second_duration():
+    assert "geminigen-veo-3.1-fast-i2v-ingredient-landscape-720p-8s" in GEMINIGEN_MODEL_BY_ID
+    assert "geminigen-veo-3.1-fast-i2v-ingredient-landscape-720p-4s" not in GEMINIGEN_MODEL_BY_ID
+    assert "geminigen-veo-3.1-fast-i2v-ingredient-landscape-720p-6s" not in GEMINIGEN_MODEL_BY_ID

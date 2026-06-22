@@ -51,6 +51,7 @@ class GeminiGenService:
         self._guard_skew_ms = 0
         self._guard_skew_synced_at = 0.0
         self._guard_skew_lock = asyncio.Lock()
+        self._token_refresh_locks: Dict[int, asyncio.Lock] = {}
 
     @staticmethod
     def is_geminigen_model(model: str) -> bool:
@@ -294,6 +295,18 @@ class GeminiGenService:
         return "TOKEN_EXPIRED" in text or "Token has been expired" in text
 
     async def _refresh_account_token(self, account: GeminiGenAccount, base_url: str) -> GeminiGenAccount:
+        account_key = int(account.id or 0)
+        lock = self._token_refresh_locks.setdefault(account_key, asyncio.Lock())
+        async with lock:
+            if account.id:
+                fresh = await self.db.get_geminigen_account(int(account.id))
+                if fresh:
+                    account = fresh
+                    if not self._needs_token_refresh(account):
+                        return account
+            return await self._refresh_account_token_unlocked(account, base_url)
+
+    async def _refresh_account_token_unlocked(self, account: GeminiGenAccount, base_url: str) -> GeminiGenAccount:
         refresh_token = str(getattr(account, "refresh_token", "") or "").strip()
         if not refresh_token:
             raise RuntimeError("GeminiGen refresh token is required to refresh expired access token")
@@ -737,7 +750,7 @@ class GeminiGenService:
         elif endpoint_type == "veo-video":
             form.update(
                 {
-                    "model": merged.get("model", "veo-3.1-fast"),
+                    "model": merged.get("model", "veo-3-fast"),
                     "aspect_ratio": merged.get("aspect_ratio", "16:9"),
                     "duration": str(merged.get("duration", "8")),
                     "resolution": merged.get("resolution", "720p"),
