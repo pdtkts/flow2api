@@ -221,6 +221,12 @@ def _require_runway_scope(auth_ctx: AuthContext) -> None:
     _require_managed_scope(auth_ctx, "runway:generate")
 
 
+def _require_geminigen_scope(auth_ctx: AuthContext) -> None:
+    if auth_ctx.key_id is None:
+        raise HTTPException(status_code=403, detail="Managed API key required for GeminiGen")
+    _require_managed_scope(auth_ctx, "geminigen:generate")
+
+
 async def _logged_managed_adobe_call(
     auth_ctx: AuthContext,
     operation: str,
@@ -2666,6 +2672,7 @@ async def create_chat_completion(
             )
 
         if _is_geminigen_model(normalized.model):
+            _require_geminigen_scope(auth_ctx)
             if request.stream:
                 return StreamingResponse(
                     _iterate_geminigen_openai_stream(
@@ -2775,6 +2782,7 @@ async def create_chat_completion_async(
             )
 
         if _is_geminigen_model(normalized.model):
+            _require_geminigen_scope(auth_ctx)
             task = await _start_geminigen_from_request(
                 request,
                 normalized,
@@ -2924,6 +2932,7 @@ async def generate_content(
 
         request_base_url = _get_request_base_url(raw_request)
         if _is_geminigen_model(normalized.model):
+            _require_geminigen_scope(auth_ctx)
             payload = await _geminigen_openai_non_stream(
                 request,
                 normalized,
@@ -3011,6 +3020,7 @@ async def stream_generate_content(
 
         request_base_url = _get_request_base_url(raw_request)
         if _is_geminigen_model(normalized.model):
+            _require_geminigen_scope(auth_ctx)
             return StreamingResponse(
                 _iterate_geminigen_openai_stream(
                     request,

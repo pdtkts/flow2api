@@ -51,6 +51,40 @@ type GeminiGenResponse = {
   models?: GeminiGenModel[]
 }
 
+type GeminiGenStatusRow = {
+  model_name: string
+  group_key: string
+  type: string
+  success_rate: number | null
+  status: string
+  status_bucket: string
+  generated_at?: string | null
+  updated_at?: string | null
+  matching_local_model_count: number
+}
+
+type GeminiGenStatusResponse = {
+  success?: boolean
+  status?: string
+  error?: string
+  window?: string
+  generated_at?: string | null
+  models?: GeminiGenStatusRow[]
+  summary?: {
+    operational?: number
+    degraded?: number
+    outage?: number
+    unknown?: number
+    matching_model_groups?: number
+  }
+  geminigen?: {
+    enabled?: boolean
+    active_account_count?: number
+    image_in_flight?: number
+    video_in_flight?: number
+  }
+}
+
 type AccountDraft = {
   id?: number
   label: string
@@ -92,6 +126,8 @@ export function GeminiGenSettings({ active }: { active: boolean }) {
   const [draft, setDraft] = useState<AccountDraft>(EMPTY_ACCOUNT)
   const [dialogOpen, setDialogOpen] = useState(false)
   const [saving, setSaving] = useState(false)
+  const [statusLoading, setStatusLoading] = useState(false)
+  const [modelStatus, setModelStatus] = useState<GeminiGenStatusResponse | null>(null)
 
   const load = useCallback(async () => {
     const resp = await adminJson<GeminiGenResponse>("/api/admin/geminigen/config", token)
@@ -104,6 +140,21 @@ export function GeminiGenSettings({ active }: { active: boolean }) {
   useEffect(() => {
     if (active) void load()
   }, [active, load])
+
+  const loadStatus = useCallback(async () => {
+    if (!active) return
+    setStatusLoading(true)
+    try {
+      const resp = await adminJson<GeminiGenStatusResponse>("/api/admin/geminigen/models/status?window=1h", token)
+      if (resp.data) setModelStatus(resp.data)
+    } finally {
+      setStatusLoading(false)
+    }
+  }, [active, token])
+
+  useEffect(() => {
+    if (active) void loadStatus()
+  }, [active, loadStatus])
 
   const stats = useMemo(() => {
     return {
@@ -211,12 +262,27 @@ export function GeminiGenSettings({ active }: { active: boolean }) {
     }
   }
 
+  const refreshAll = async () => {
+    await Promise.all([load(), loadStatus()])
+  }
+
+  const statusVariant = (bucket?: string) => {
+    if (bucket === "operational") return "default"
+    if (bucket === "degraded") return "secondary"
+    if (bucket === "outage") return "destructive"
+    return "outline"
+  }
+
+  const statusRows = Array.isArray(modelStatus?.models)
+    ? modelStatus.models.filter((row) => (row.matching_local_model_count || 0) > 0)
+    : []
+
   return (
     <div className="space-y-6">
       <Card>
         <CardHeader className="flex flex-row items-center justify-between gap-4">
           <CardTitle>GeminiGen Overview</CardTitle>
-          <Button size="sm" variant="outline" onClick={load}>
+          <Button size="sm" variant="outline" onClick={refreshAll}>
             <RefreshCw className="h-4 w-4 mr-2" /> Refresh
           </Button>
         </CardHeader>
@@ -233,6 +299,74 @@ export function GeminiGenSettings({ active }: { active: boolean }) {
             <div className="text-xs text-muted-foreground">Models</div>
             <div className="text-lg font-semibold tabular-nums">{stats.models}</div>
           </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader className="flex flex-row items-center justify-between gap-4">
+          <div>
+            <CardTitle>Model Status</CardTitle>
+            {modelStatus?.generated_at ? (
+              <div className="text-xs text-muted-foreground mt-1">Updated {modelStatus.generated_at}</div>
+            ) : null}
+          </div>
+          <Button size="sm" variant="outline" onClick={loadStatus} disabled={statusLoading}>
+            <RefreshCw className={`h-4 w-4 mr-2 ${statusLoading ? "animate-spin" : ""}`} /> Refresh status
+          </Button>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid gap-3 sm:grid-cols-4">
+            <div className="rounded-md border bg-muted/20 px-3 py-2">
+              <div className="text-xs text-muted-foreground">Operational</div>
+              <div className="text-lg font-semibold tabular-nums">{modelStatus?.summary?.operational ?? 0}</div>
+            </div>
+            <div className="rounded-md border bg-muted/20 px-3 py-2">
+              <div className="text-xs text-muted-foreground">Degraded</div>
+              <div className="text-lg font-semibold tabular-nums">{modelStatus?.summary?.degraded ?? 0}</div>
+            </div>
+            <div className="rounded-md border bg-muted/20 px-3 py-2">
+              <div className="text-xs text-muted-foreground">Outage</div>
+              <div className="text-lg font-semibold tabular-nums">{modelStatus?.summary?.outage ?? 0}</div>
+            </div>
+            <div className="rounded-md border bg-muted/20 px-3 py-2">
+              <div className="text-xs text-muted-foreground">Matched groups</div>
+              <div className="text-lg font-semibold tabular-nums">{modelStatus?.summary?.matching_model_groups ?? 0}</div>
+            </div>
+          </div>
+          {modelStatus?.error ? <div className="text-xs text-destructive">{modelStatus.error}</div> : null}
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Provider model</TableHead>
+                <TableHead>Type</TableHead>
+                <TableHead>Status</TableHead>
+                <TableHead>Success rate</TableHead>
+                <TableHead>Local models</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {statusRows.length ? statusRows.map((row) => (
+                <TableRow key={`${row.group_key}-${row.model_name}`}>
+                  <TableCell>
+                    <div className="font-medium">{row.model_name}</div>
+                    <div className="font-mono text-xs text-muted-foreground">{row.group_key}</div>
+                  </TableCell>
+                  <TableCell>{row.type || "-"}</TableCell>
+                  <TableCell>
+                    <Badge variant={statusVariant(row.status_bucket)}>{row.status || "Unknown"}</Badge>
+                  </TableCell>
+                  <TableCell className="tabular-nums">{row.success_rate == null ? "-" : `${row.success_rate}%`}</TableCell>
+                  <TableCell className="tabular-nums">{row.matching_local_model_count}</TableCell>
+                </TableRow>
+              )) : (
+                <TableRow>
+                  <TableCell colSpan={5} className="text-center text-muted-foreground">
+                    {statusLoading ? "Loading model status..." : "No GeminiGen model status available."}
+                  </TableCell>
+                </TableRow>
+              )}
+            </TableBody>
+          </Table>
         </CardContent>
       </Card>
 

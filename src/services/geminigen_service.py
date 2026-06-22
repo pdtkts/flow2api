@@ -49,6 +49,163 @@ class GeminiGenService:
         ]
 
     @staticmethod
+    def _local_model_counts_by_group() -> Dict[str, int]:
+        counts: Dict[str, int] = {}
+        for item in GEMINIGEN_MODEL_MANIFEST:
+            options = item.get("options") if isinstance(item, dict) else {}
+            if not isinstance(options, dict):
+                continue
+            model = str(options.get("model") or "").strip()
+            if model:
+                counts[model] = counts.get(model, 0) + 1
+            elif item.get("endpoint_type") == "grok-image":
+                counts["grok-image"] = counts.get("grok-image", 0) + 1
+        return counts
+
+    @staticmethod
+    def _status_bucket(status: str) -> str:
+        value = (status or "").strip().lower()
+        if "operational" in value:
+            return "operational"
+        if "degraded" in value:
+            return "degraded"
+        if "outage" in value or "down" in value or "failed" in value:
+            return "outage"
+        return "unknown"
+
+    @staticmethod
+    def _normalize_success_rate(value: Any) -> Optional[float]:
+        if value is None:
+            return None
+        try:
+            return round(float(value), 2)
+        except Exception:
+            return None
+
+    async def _first_active_account(self) -> Optional[GeminiGenAccount]:
+        for account in await self.db.list_geminigen_accounts():
+            if account.is_active:
+                return account
+        return None
+
+    async def get_model_status(self, window: str = "1h") -> Dict[str, Any]:
+        cfg = await self.db.get_geminigen_config()
+        local_counts = self._local_model_counts_by_group()
+        base_summary = {
+            "operational": 0,
+            "degraded": 0,
+            "outage": 0,
+            "unknown": 0,
+            "matching_model_groups": 0,
+        }
+        accounts = await self.db.list_geminigen_accounts()
+        image_in_flight = sum(int(account.image_in_flight or 0) for account in accounts)
+        video_in_flight = sum(int(account.video_in_flight or 0) for account in accounts)
+        active_accounts = len([account for account in accounts if account.is_active])
+
+        if not cfg.enabled:
+            return {
+                "success": False,
+                "status": "disabled",
+                "error": "GeminiGen integration is disabled",
+                "window": window,
+                "generated_at": None,
+                "models": [],
+                "summary": base_summary,
+                "geminigen": {
+                    "enabled": False,
+                    "active_account_count": active_accounts,
+                    "image_in_flight": image_in_flight,
+                    "video_in_flight": video_in_flight,
+                },
+            }
+
+        account = await self._first_active_account()
+        if not account:
+            return {
+                "success": False,
+                "status": "unavailable",
+                "error": "No active GeminiGen account configured",
+                "window": window,
+                "generated_at": None,
+                "models": [],
+                "summary": base_summary,
+                "geminigen": {
+                    "enabled": True,
+                    "active_account_count": active_accounts,
+                    "image_in_flight": image_in_flight,
+                    "video_in_flight": video_in_flight,
+                },
+            }
+
+        clean_window = (window or "1h").strip() or "1h"
+        if clean_window not in {"1h", "6h", "24h", "7d"}:
+            clean_window = "1h"
+        path = "/api/v1/models/status"
+        proxy = await self._request_proxy()
+        async with AsyncSession() as session:
+            response = await session.get(
+                f"{self._api_base_url(cfg.base_url)}{path}",
+                params={"window": clean_window},
+                headers=self._headers(account, path),
+                timeout=30,
+                proxy=proxy,
+                impersonate="chrome120",
+            )
+        if response.status_code >= 400:
+            raise RuntimeError(f"GeminiGen model status failed HTTP {response.status_code}: {response.text[:300]}")
+        payload = response.json() if response.text else {}
+        raw_models = payload.get("models") if isinstance(payload, dict) else []
+        if not isinstance(raw_models, list):
+            raw_models = []
+
+        rows: List[Dict[str, Any]] = []
+        summary = dict(base_summary)
+        for item in raw_models:
+            if not isinstance(item, dict):
+                continue
+            group_key = str(item.get("group_key") or item.get("model") or item.get("key") or "").strip()
+            aliases = item.get("models") if isinstance(item.get("models"), list) else []
+            matching_count = local_counts.get(group_key, 0)
+            for alias in aliases:
+                alias_key = str(alias or "").strip()
+                if alias_key and alias_key != group_key:
+                    matching_count += local_counts.get(alias_key, 0)
+            status = str(item.get("status") or item.get("state") or "").strip() or "Unknown"
+            bucket = self._status_bucket(status)
+            if matching_count > 0:
+                summary[bucket] = int(summary.get(bucket, 0)) + 1
+                summary["matching_model_groups"] = int(summary.get("matching_model_groups", 0)) + 1
+            rows.append(
+                {
+                    "model_name": str(item.get("model_name") or item.get("name") or group_key or "Unknown").strip(),
+                    "group_key": group_key,
+                    "type": str(item.get("type") or item.get("model_type") or "").strip(),
+                    "success_rate": self._normalize_success_rate(item.get("success_rate")),
+                    "status": status,
+                    "status_bucket": bucket,
+                    "updated_at": item.get("updated_at") or payload.get("generated_at"),
+                    "generated_at": payload.get("generated_at"),
+                    "matching_local_model_count": matching_count,
+                }
+            )
+
+        return {
+            "success": True,
+            "status": "available",
+            "window": clean_window,
+            "generated_at": payload.get("generated_at"),
+            "models": rows,
+            "summary": summary,
+            "geminigen": {
+                "enabled": True,
+                "active_account_count": active_accounts,
+                "image_in_flight": image_in_flight,
+                "video_in_flight": video_in_flight,
+            },
+        }
+
+    @staticmethod
     def describe_credential(raw_cookie: str, bearer_token: str = "", guard_id: str = "") -> Dict[str, str]:
         if not (raw_cookie or "").strip():
             return {"status": "missing_cookie", "error": "GeminiGen cookie is required"}

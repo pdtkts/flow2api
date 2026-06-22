@@ -2331,6 +2331,40 @@ async def update_geminigen_admin_config(
     }
 
 
+@router.get("/api/admin/geminigen/models/status")
+async def get_geminigen_model_status(
+    window: str = Query("1h"),
+    token: str = Depends(verify_admin_token),
+):
+    service = _require_geminigen_service()
+    try:
+        return await service.get_model_status(window=window)
+    except Exception as exc:
+        accounts = await db.list_geminigen_accounts()
+        cfg = await db.get_geminigen_config()
+        return {
+            "success": False,
+            "status": "unavailable",
+            "error": str(exc),
+            "window": window,
+            "generated_at": None,
+            "models": [],
+            "summary": {
+                "operational": 0,
+                "degraded": 0,
+                "outage": 0,
+                "unknown": 0,
+                "matching_model_groups": 0,
+            },
+            "geminigen": {
+                "enabled": bool(cfg.enabled),
+                "active_account_count": len([account for account in accounts if account.is_active]),
+                "image_in_flight": sum(int(account.image_in_flight or 0) for account in accounts),
+                "video_in_flight": sum(int(account.video_in_flight or 0) for account in accounts),
+            },
+        }
+
+
 @router.post("/api/admin/geminigen/accounts")
 async def create_geminigen_account(
     request: GeminiGenAccountRequest,

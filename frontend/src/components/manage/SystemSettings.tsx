@@ -17,7 +17,7 @@ import {
   SelectValue,
 } from "../ui/select"
 import { toast } from "sonner"
-import { Download, Loader2, Upload } from "lucide-react"
+import { Download, Loader2, RefreshCw, Upload } from "lucide-react"
 
 type CaptchaForm = {
   captcha_method: string
@@ -127,6 +127,25 @@ type ExtensionWorkerRow = {
   allow_generation?: boolean
 }
 
+type GeminiGenSystemStatus = {
+  success?: boolean
+  status?: string
+  error?: string
+  summary?: {
+    operational?: number
+    degraded?: number
+    outage?: number
+    unknown?: number
+    matching_model_groups?: number
+  }
+  geminigen?: {
+    enabled?: boolean
+    active_account_count?: number
+    image_in_flight?: number
+    video_in_flight?: number
+  }
+}
+
 export function SystemSettings({ active }: { active: boolean }) {
   const { token } = useAuth()
 
@@ -166,6 +185,8 @@ export function SystemSettings({ active }: { active: boolean }) {
 
   const [captcha, setCaptcha] = useState<CaptchaForm>(defaultCaptcha)
   const [extensionWorkers, setExtensionWorkers] = useState<ExtensionWorkerRow[]>([])
+  const [geminiGenStatus, setGeminiGenStatus] = useState<GeminiGenSystemStatus | null>(null)
+  const [geminiGenStatusLoading, setGeminiGenStatusLoading] = useState(false)
 
   const [busy, setBusy] = useState(false)
   /** Bumps when leaving extension mode so in-flight worker list fetches do not repopulate state. */
@@ -174,7 +195,7 @@ export function SystemSettings({ active }: { active: boolean }) {
   const loadAll = useCallback(async () => {
     if (!token || !active) return
 
-    const [a, p, g, c, plug, cap, workersResp] = await Promise.all([
+    const [a, p, g, c, plug, cap, workersResp, geminiStatusResp] = await Promise.all([
       adminJson<{
         admin_username?: string
         api_key?: string
@@ -209,6 +230,7 @@ export function SystemSettings({ active }: { active: boolean }) {
         success?: boolean
         workers?: ExtensionWorkerRow[]
       }>("/api/admin/extension/workers", token),
+      adminJson<GeminiGenSystemStatus>("/api/admin/geminigen/models/status?window=1h", token),
     ])
 
     if (a.data) {
@@ -311,6 +333,7 @@ export function SystemSettings({ active }: { active: boolean }) {
         setExtensionWorkers([])
       }
     }
+    if (geminiStatusResp.data) setGeminiGenStatus(geminiStatusResp.data)
   }, [token, active])
 
   useEffect(() => {
@@ -740,6 +763,17 @@ export function SystemSettings({ active }: { active: boolean }) {
     }
   }
 
+  const refreshGeminiGenStatus = async () => {
+    if (!token) return
+    setGeminiGenStatusLoading(true)
+    try {
+      const resp = await adminJson<GeminiGenSystemStatus>("/api/admin/geminigen/models/status?window=1h", token)
+      if (resp.data) setGeminiGenStatus(resp.data)
+    } finally {
+      setGeminiGenStatusLoading(false)
+    }
+  }
+
   const genPluginToken = () => {
     const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
     let out = ""
@@ -885,6 +919,53 @@ export function SystemSettings({ active }: { active: boolean }) {
             <Label>Enable debug logging</Label>
           </div>
           <p className="text-xs text-muted-foreground">Writes verbose upstream logs (disk usage).</p>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader className="flex flex-row items-center justify-between gap-4">
+          <div>
+            <CardTitle>GeminiGen Status</CardTitle>
+            <CardDescription>{geminiGenStatus?.status || "unavailable"}</CardDescription>
+          </div>
+          <Button size="sm" variant="outline" onClick={refreshGeminiGenStatus} disabled={geminiGenStatusLoading}>
+            <RefreshCw className={`h-4 w-4 ${geminiGenStatusLoading ? "animate-spin" : ""}`} />
+          </Button>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid grid-cols-2 gap-3 text-sm">
+            <div className="rounded-md border bg-muted/20 px-3 py-2">
+              <div className="text-xs text-muted-foreground">Enabled</div>
+              <div className="font-medium">{geminiGenStatus?.geminigen?.enabled ? "Yes" : "No"}</div>
+            </div>
+            <div className="rounded-md border bg-muted/20 px-3 py-2">
+              <div className="text-xs text-muted-foreground">Active accounts</div>
+              <div className="font-medium tabular-nums">{geminiGenStatus?.geminigen?.active_account_count ?? 0}</div>
+            </div>
+            <div className="rounded-md border bg-muted/20 px-3 py-2">
+              <div className="text-xs text-muted-foreground">Image in-flight</div>
+              <div className="font-medium tabular-nums">{geminiGenStatus?.geminigen?.image_in_flight ?? 0}</div>
+            </div>
+            <div className="rounded-md border bg-muted/20 px-3 py-2">
+              <div className="text-xs text-muted-foreground">Video in-flight</div>
+              <div className="font-medium tabular-nums">{geminiGenStatus?.geminigen?.video_in_flight ?? 0}</div>
+            </div>
+          </div>
+          <div className="grid grid-cols-3 gap-3 text-sm">
+            <div>
+              <div className="text-xs text-muted-foreground">Operational</div>
+              <div className="font-medium tabular-nums">{geminiGenStatus?.summary?.operational ?? 0}</div>
+            </div>
+            <div>
+              <div className="text-xs text-muted-foreground">Degraded</div>
+              <div className="font-medium tabular-nums">{geminiGenStatus?.summary?.degraded ?? 0}</div>
+            </div>
+            <div>
+              <div className="text-xs text-muted-foreground">Outage</div>
+              <div className="font-medium tabular-nums">{geminiGenStatus?.summary?.outage ?? 0}</div>
+            </div>
+          </div>
+          {geminiGenStatus?.error ? <p className="text-xs text-destructive">{geminiGenStatus.error}</p> : null}
         </CardContent>
       </Card>
 

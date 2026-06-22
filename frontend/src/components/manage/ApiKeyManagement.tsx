@@ -99,6 +99,11 @@ const AVAILABLE_SCOPES: ScopeOption[] = [
     label: "Runway generation",
     description: "Allows Runway models through `/v1/chat/completions` and `/v1/runway/*` task routes.",
   },
+  {
+    id: "geminigen:generate",
+    label: "GeminiGen generation",
+    description: "Allows GeminiGen models through OpenAI/Gemini-compatible generation routes.",
+  },
 ]
 
 /** All selectable scope ids (no wildcard); used for Select all and legacy `*` expansion. */
