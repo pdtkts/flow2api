@@ -278,8 +278,39 @@ def _build_model_description(model_config: Dict[str, Any]) -> str:
     return description
 
 
-def _get_openai_model_catalog() -> List[Dict[str, str]]:
+async def _has_native_flow_accounts() -> bool:
+    if generation_handler is None:
+        return False
+    db = getattr(generation_handler, "db", None)
+    if db is None:
+        return False
+    return bool(await db.get_active_tokens())
+
+
+async def _has_runway_accounts() -> bool:
+    if runway_service is None:
+        return False
+    accounts = await runway_service.db.list_runway_accounts()
+    return any(
+        bool(account.is_active) and bool((account.raw_credential or "").strip())
+        for account in accounts
+    )
+
+
+async def _has_geminigen_accounts() -> bool:
+    if geminigen_service is None:
+        return False
+    accounts = await geminigen_service.db.list_geminigen_accounts()
+    return any(
+        bool(account.is_active) and bool((account.bearer_token or "").strip())
+        for account in accounts
+    )
+
+
+async def _get_openai_model_catalog() -> List[Dict[str, str]]:
     """Collect OpenAI-compatible model list entries."""
+    if not await _has_native_flow_accounts():
+        return []
     return [
         {
             "id": model_id,
@@ -294,6 +325,8 @@ async def _get_runway_openai_model_catalog() -> List[Dict[str, str]]:
         return []
     cfg = await runway_service.db.get_runway_config()
     if not cfg.enabled:
+        return []
+    if not await _has_runway_accounts():
         return []
     models = await runway_service.db.list_runway_models(enabled_only=True)
     return [
@@ -311,22 +344,24 @@ async def _get_geminigen_openai_model_catalog() -> List[Dict[str, str]]:
     cfg = await geminigen_service.db.get_geminigen_config()
     if not cfg.enabled:
         return []
+    if not await _has_geminigen_accounts():
+        return []
     return GeminiGenService.model_catalog()
 
 
-def _get_gemini_model_catalog() -> Dict[str, str]:
+async def _get_gemini_model_catalog() -> Dict[str, str]:
     """Collect Gemini-compatible model metadata for /models endpoints."""
     catalog: Dict[str, str] = {}
 
-    for alias_id, description in get_base_model_aliases().items():
-        catalog[alias_id] = description
+    if await _has_native_flow_accounts():
+        for alias_id, description in get_base_model_aliases().items():
+            catalog[alias_id] = description
 
-    for model_id, model_config in MODEL_CONFIG.items():
-        catalog.setdefault(model_id, _build_model_description(model_config))
+        for model_id, model_config in MODEL_CONFIG.items():
+            catalog.setdefault(model_id, _build_model_description(model_config))
 
-    if geminigen_service is not None:
-        for model in GeminiGenService.model_catalog():
-            catalog.setdefault(model["id"], model["description"])
+    for model in await _get_geminigen_openai_model_catalog():
+        catalog.setdefault(model["id"], model["description"])
 
     return catalog
 
@@ -2371,7 +2406,7 @@ async def list_models(auth_ctx: AuthContext = Depends(verify_api_key_flexible)):
             "owned_by": "flow2api",
             "description": model["description"],
         }
-        for model in _get_openai_model_catalog()
+        for model in await _get_openai_model_catalog()
     ]
     models.extend(
         {
@@ -2398,7 +2433,7 @@ async def list_models(auth_ctx: AuthContext = Depends(verify_api_key_flexible)):
 @router.get("/v1/models/aliases")
 async def list_model_aliases(auth_ctx: AuthContext = Depends(verify_api_key_flexible)):
     """List simplified model aliases for generationConfig-based resolution."""
-    aliases = get_base_model_aliases()
+    aliases = get_base_model_aliases() if await _has_native_flow_accounts() else {}
     alias_models = []
     for alias_id, description in aliases.items():
         alias_models.append(
@@ -2417,7 +2452,7 @@ async def list_model_aliases(auth_ctx: AuthContext = Depends(verify_api_key_flex
 @router.get("/models")
 async def list_gemini_models(auth_ctx: AuthContext = Depends(verify_api_key_flexible)):
     """List available models using Gemini-compatible response shape."""
-    catalog = _get_gemini_model_catalog()
+    catalog = await _get_gemini_model_catalog()
     return {
         "models": [
             _build_gemini_model_resource(model_id, description)
@@ -2430,7 +2465,7 @@ async def list_gemini_models(auth_ctx: AuthContext = Depends(verify_api_key_flex
 @router.get("/models/{model}")
 async def get_gemini_model(model: str, auth_ctx: AuthContext = Depends(verify_api_key_flexible)):
     """Return a single model using Gemini-compatible response shape."""
-    catalog = _get_gemini_model_catalog()
+    catalog = await _get_gemini_model_catalog()
     description = catalog.get(model)
     if not description:
         return JSONResponse(
