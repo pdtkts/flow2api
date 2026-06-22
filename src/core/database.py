@@ -3043,6 +3043,105 @@ class Database:
                 "logs_updated": log_count,
             }
 
+    async def cancel_geminigen_task_by_log_id(self, log_id: int, reason: str = "Cancelled by admin") -> Dict[str, Any]:
+        now = datetime.utcnow()
+        async with self._connect(write=True) as db:
+            db.row_factory = aiosqlite.Row
+            log_cursor = await db.execute(
+                "SELECT id, operation, request_body, status_code, status_text FROM request_logs WHERE id = ? LIMIT 1",
+                (int(log_id),),
+            )
+            log_row = await log_cursor.fetchone()
+            if not log_row:
+                return {"success": False, "error": "Request log not found", "status_code": 404}
+            operation = str(log_row["operation"] or "")
+            if operation not in {"geminigen_image", "geminigen_video"}:
+                return {"success": False, "error": "Log is not a GeminiGen generation", "status_code": 400}
+
+            task_cursor = await db.execute(
+                """
+                SELECT *
+                FROM geminigen_tasks
+                WHERE request_log_id = ?
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (int(log_id),),
+            )
+            task = await task_cursor.fetchone()
+            if not task:
+                return {"success": False, "error": "GeminiGen task not found for this log", "status_code": 404}
+
+            job_id = str(task["job_id"] or "")
+            status = str(task["status"] or "")
+            if status in {"completed", "failed", "cancelled"}:
+                return {
+                    "success": True,
+                    "job_id": job_id,
+                    "status": status,
+                    "already_terminal": True,
+                    "task_cancelled": False,
+                    "slot_released": False,
+                }
+
+            account_id = task["account_id"]
+            kind = str(task["kind"] or "image")
+            await db.execute(
+                """
+                UPDATE geminigen_tasks
+                SET status = 'cancelled',
+                    error_message = ?,
+                    completed_at = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE job_id = ?
+                """,
+                (reason, now, job_id),
+            )
+            slot_released = False
+            if account_id:
+                inflight_col = "video_in_flight" if kind.lower() == "video" else "image_in_flight"
+                await db.execute(
+                    f"""
+                    UPDATE geminigen_accounts
+                    SET {inflight_col} = CASE WHEN {inflight_col} > 0 THEN {inflight_col} - 1 ELSE 0 END,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    (int(account_id),),
+                )
+                slot_released = True
+
+            await db.execute(
+                """
+                UPDATE request_logs
+                SET response_body = ?,
+                    status_code = 499,
+                    status_text = 'cancelled',
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (
+                    json.dumps(
+                        {
+                            "status": "cancelled",
+                            "job_id": job_id,
+                            "reason": reason,
+                        },
+                        ensure_ascii=False,
+                    ),
+                    int(log_id),
+                ),
+            )
+            await db.commit()
+            return {
+                "success": True,
+                "job_id": job_id,
+                "status": "cancelled",
+                "already_terminal": False,
+                "task_cancelled": True,
+                "slot_released": slot_released,
+            }
+
     async def create_geminigen_task(self, task: GeminiGenTask) -> int:
         async with self._connect(write=True) as db:
             cursor = await db.execute(

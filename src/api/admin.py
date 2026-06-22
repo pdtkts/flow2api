@@ -2715,6 +2715,20 @@ async def get_log_detail(
     }
 
 
+@router.post("/api/logs/{log_id}/geminigen/cancel")
+async def cancel_geminigen_log_task(
+    log_id: int,
+    token: str = Depends(verify_admin_token),
+):
+    result = await db.cancel_geminigen_task_by_log_id(log_id, reason="Cancelled by admin")
+    if not result.get("success"):
+        raise HTTPException(
+            status_code=int(result.get("status_code") or 400),
+            detail=result.get("error") or "Could not cancel GeminiGen task",
+        )
+    return result
+
+
 @router.delete("/api/logs")
 async def clear_logs(token: str = Depends(verify_admin_token)):
     """Clear all logs"""

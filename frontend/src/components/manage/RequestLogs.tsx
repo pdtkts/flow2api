@@ -12,7 +12,7 @@ import { Button } from "../ui/button"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../ui/table"
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "../ui/dialog"
 import { toast } from "sonner"
-import { ChevronLeft, ChevronRight, RefreshCw, Trash2, Loader2 } from "lucide-react"
+import { ChevronLeft, ChevronRight, RefreshCw, Trash2, Loader2, XCircle } from "lucide-react"
 import { cn } from "@/lib/utils"
 
 const LOG_PAGE_SIZE = 50
@@ -96,6 +96,39 @@ export function RequestLogs() {
       toast.error("Failed to load log details")
     } finally {
       setDetailLoading(false)
+    }
+  }
+
+  const canCancelGeminiGenLog = (log: LogListItem) => {
+    const op = String(log.operation || "")
+    const st = String(log.status_text || "")
+    return (
+      (op === "geminigen_image" || op === "geminigen_video") &&
+      Number(log.status_code) === 102 &&
+      [
+        "geminigen_queued",
+        "geminigen_polling",
+        "geminigen_submitted",
+        "geminigen_account_selected",
+        "geminigen_submitting",
+      ].includes(st)
+    )
+  }
+
+  const cancelGeminiGenLog = async (log: LogListItem) => {
+    if (!token) return
+    if (!confirm("Cancel this GeminiGen job locally and release its Flow2API slot?")) return
+    try {
+      const r = await adminFetch(`/api/logs/${log.id}/geminigen/cancel`, token, { method: "POST" })
+      const d = await r?.json().catch(() => null)
+      if (r?.ok && d?.success) {
+        toast.success("GeminiGen job cancelled")
+        await fetchLogs()
+      } else {
+        toast.error(d?.detail || "Could not cancel GeminiGen job")
+      }
+    } catch {
+      toast.error("Network error")
     }
   }
 
@@ -228,14 +261,27 @@ export function RequestLogs() {
                         {log.created_at ? new Date(log.created_at).toLocaleString("en-US") : "—"}
                       </TableCell>
                       <TableCell className="py-2.5 px-3 align-top">
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => void openDetail(log.id)}
-                          className="h-7 px-2 text-xs hover:bg-accent hover:text-accent-foreground"
-                        >
-                          View
-                        </Button>
+                        <div className="flex items-center gap-1">
+                          {canCancelGeminiGenLog(log) ? (
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => void cancelGeminiGenLog(log)}
+                              className="h-7 px-2 text-xs text-destructive hover:bg-destructive/10 hover:text-destructive"
+                            >
+                              <XCircle className="h-3.5 w-3.5 mr-1" />
+                              Cancel
+                            </Button>
+                          ) : null}
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => void openDetail(log.id)}
+                            className="h-7 px-2 text-xs hover:bg-accent hover:text-accent-foreground"
+                          >
+                            View
+                          </Button>
+                        </div>
                       </TableCell>
                     </TableRow>
                   )

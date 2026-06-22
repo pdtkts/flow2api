@@ -21,6 +21,8 @@ export const STATUS_MAP: Record<string, string> = {
   geminigen_submitted: "GeminiGen submitted",
   geminigen_polling: "GeminiGen polling",
   manual_cleared: "Manually cleared",
+  cancelled: "Cancelled",
+  waiting_for_account_slot: "Waiting for GeminiGen slot",
   completed: "Completed",
   failed: "Failed",
   processing: "Processing",
@@ -102,13 +104,20 @@ export function formatProgressLabel(l: LogListItem): string {
 
 export function formatOutcome(l: LogListItem): string {
   const code = Number(l.status_code)
+  const st = String(l.status_text || "").trim()
   if (code === 200) {
     const op = String(l.operation || "").trim()
     if (op === "generate_image" || op === "geminigen_image") return "Image result returned"
     if (op === "generate_video" || op === "geminigen_video") return "Video result returned"
     return "Result returned"
   }
-  if (code === 102) return "Processing"
+  if (st === "cancelled") return "Cancelled by admin"
+  if (st === "manual_cleared") return "Manually cleared by admin"
+  if (code === 102) {
+    if (st === "geminigen_queued") return "Waiting for GeminiGen slot"
+    if (st.startsWith("geminigen_")) return "GeminiGen generation running"
+    return "Processing"
+  }
   const err = (l.error_summary || "").trim()
   if (err) return err.length > 96 ? `${err.slice(0, 93)}…` : err
   if (code >= 400) return "Request failed"
