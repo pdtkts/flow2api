@@ -723,17 +723,6 @@ class GeminiGenService:
                     form["ref_images"] = refs[:2]
                 else:
                     form["ref_images"] = refs
-        elif endpoint_type == "grok-video":
-            form.update(
-                {
-                    "model": "grok-video",
-                    "aspect_ratio": merged.get("aspect_ratio", "landscape"),
-                    "duration": str(merged.get("duration", "6")),
-                    "resolution": merged.get("resolution", "720p"),
-                }
-            )
-            if images:
-                form["ref_images"] = [self._data_url_from_image(images[0])]
         return form
 
     @staticmethod
@@ -742,7 +731,6 @@ class GeminiGenService:
             "imagen": "/api/generate_image",
             "grok-image": "/api/imagen/grok",
             "veo-video": "/api/video-gen/veo",
-            "grok-video": "/api/video-gen/grok-stream",
         }[endpoint_type]
 
     async def _post_generation(self, *, account: GeminiGenAccount, base_url: str, endpoint_type: str, form: Dict[str, Any]) -> Dict[str, Any]:

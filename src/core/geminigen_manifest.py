@@ -120,25 +120,6 @@ def build_geminigen_manifest() -> List[Dict[str, Any]]:
                         }
                     )
 
-    for orientation in ("landscape", "portrait", "square", "vertical", "horizontal"):
-        for resolution in ("480p", "720p"):
-            for duration in ("6s", "10s"):
-                public_id = f"geminigen-grok-video-{orientation}-{resolution}-{duration}"
-                models.append(
-                    {
-                        "id": public_id,
-                        "display_name": f"GeminiGen Grok Video {_title(orientation)} {resolution} {duration}",
-                        "kind": "video",
-                        "endpoint_type": "grok-video",
-                        "options": {
-                            "model": "grok-video",
-                            "aspect_ratio": orientation,
-                            "resolution": resolution,
-                            "duration": duration.rstrip("s"),
-                        },
-                    }
-                )
-
     return models
 
 
