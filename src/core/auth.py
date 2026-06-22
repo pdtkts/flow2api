@@ -67,11 +67,7 @@ async def verify_api_key_flexible(
     if not api_key:
         raise HTTPException(status_code=401, detail="Invalid API key")
     endpoint = request.url.path
-    require_assignment = endpoint in {
-        "/v1/chat/completions",
-    } or endpoint.endswith(":generateContent") or endpoint.endswith(":streamGenerateContent") or (
-        endpoint == "/v1/projects" and request.method.upper() == "POST"
-    )
+    require_assignment = endpoint == "/v1/projects" and request.method.upper() == "POST"
     if api_key_manager is None:
         if not AuthManager.verify_api_key(api_key):
             raise HTTPException(status_code=401, detail="Invalid API key")

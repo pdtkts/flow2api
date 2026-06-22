@@ -2904,8 +2904,6 @@ async def create_managed_api_key(
 ):
     if not api_key_manager:
         raise HTTPException(status_code=503, detail="API key manager not initialized")
-    if not request.account_ids:
-        raise HTTPException(status_code=400, detail="account_ids cannot be empty")
     scopes_str = (request.scopes or "").strip()
     if not scopes_str:
         raise HTTPException(status_code=400, detail="scopes cannot be empty")

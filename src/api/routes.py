@@ -741,6 +741,8 @@ async def _extract_prompt_and_images_from_gemini_contents(
 
 
 def _resolve_request_model(model: str, request: Any) -> str:
+    if RunwayService.is_runway_model(model) or GeminiGenService.is_geminigen_model(model):
+        return model
     resolved_model = resolve_model_name(model=model, request=request, model_config=MODEL_CONFIG)
     if resolved_model != model:
         debug_logger.log_info(f"[ROUTE] 模型名已转换: {model} → {resolved_model}")

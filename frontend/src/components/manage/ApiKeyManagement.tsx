@@ -298,7 +298,6 @@ export function ApiKeyManagement() {
   const createKey = async () => {
     if (!token) return
     if (!clientName.trim()) return toast.error("Client name is required")
-    if (!selectedAccountIds.length) return toast.error("Select at least one account")
     if (!selectedScopes.length) return toast.error("Select at least one scope")
 
     setSaving(true)
@@ -544,7 +543,6 @@ export function ApiKeyManagement() {
   const submitEditKey = async () => {
     if (!token || editingKeyId == null) return
     if (!clientName.trim()) return toast.error("Client name is required")
-    if (!selectedAccountIds.length) return toast.error("Select at least one account")
     if (!selectedScopes.length) return toast.error("Select at least one scope")
     setSaving(true)
     try {
@@ -1249,7 +1247,7 @@ export function ApiKeyManagement() {
                     </Table>
                   </div>
                 ) : (
-                  <p className="text-xs text-muted-foreground">No accounts assigned — add accounts above to manage projects.</p>
+                  <p className="text-xs text-muted-foreground">No native accounts assigned. Provider-only scopes like GeminiGen can still be used.</p>
                 )}
 
                 <div className="rounded-md border bg-background">
