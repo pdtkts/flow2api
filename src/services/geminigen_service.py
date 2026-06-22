@@ -490,6 +490,42 @@ class GeminiGenService:
         return ""
 
     @staticmethod
+    def _history_failed(payload: Dict[str, Any], status_text: str) -> bool:
+        if not isinstance(payload, dict):
+            return False
+        raw_status = payload.get("status")
+        try:
+            if int(raw_status) == 3:
+                return True
+        except Exception:
+            pass
+        if str(payload.get("error_code") or "").strip():
+            return True
+        if str(payload.get("error_message") or "").strip():
+            return True
+        return any(x in (status_text or "") for x in ("fail", "error", "reject", "cancel"))
+
+    @staticmethod
+    def _history_error_text(payload: Dict[str, Any], status_text: str) -> str:
+        code = str(payload.get("error_code") or "").strip() if isinstance(payload, dict) else ""
+        message = str(payload.get("error_message") or payload.get("error") or payload.get("message") or "").strip() if isinstance(payload, dict) else ""
+        if code and message:
+            return f"{code}: {message}"
+        if message:
+            return message
+        if code:
+            return code
+        return status_text or "GeminiGen task failed"
+
+    @staticmethod
+    def _history_progress(payload: Dict[str, Any], fallback: int) -> int:
+        try:
+            value = int(float(payload.get("status_percentage")))
+            return max(int(fallback or 0), max(0, min(99, value)))
+        except Exception:
+            return max(int(fallback or 0), 10)
+
+    @staticmethod
     def _walk_urls(value: Any, found: List[str]) -> None:
         if isinstance(value, dict):
             for key, item in value.items():
@@ -961,7 +997,7 @@ class GeminiGenService:
         try:
             payload = await self._get_history(account=account, base_url=cfg.base_url, upstream_uuid=task.upstream_uuid or "")
             status_text = self._extract_status(payload)
-            failed = any(x in status_text for x in ("fail", "error", "reject", "cancel"))
+            failed = self._history_failed(payload, status_text)
             urls = self.extract_artifact_urls(payload, task.kind)
             completed = bool(urls) or any(x in status_text for x in ("complete", "success", "finished"))
             if completed:
@@ -999,7 +1035,7 @@ class GeminiGenService:
                 )
                 await self.db.release_geminigen_account(task.account_id, task.kind)
             elif failed:
-                error_text = str(payload.get("error") or payload.get("message") or status_text or "GeminiGen task failed")
+                error_text = self._history_error_text(payload, status_text)
                 await self.db.update_geminigen_task(job_id, status="failed", error_message=error_text, response_payload=json.dumps(payload, ensure_ascii=False), completed_at=datetime.utcnow())
                 await self._update_request_log(
                     task.request_log_id,
@@ -1011,16 +1047,18 @@ class GeminiGenService:
                 )
                 await self.db.release_geminigen_account(task.account_id, task.kind)
             else:
-                await self.db.update_geminigen_task(job_id, status="processing", progress=max(task.progress, 10), response_payload=json.dumps(payload, ensure_ascii=False))
+                next_progress = self._history_progress(payload, task.progress)
+                await self.db.update_geminigen_task(job_id, status="processing", progress=next_progress, response_payload=json.dumps(payload, ensure_ascii=False))
                 await self._update_request_log(
                     task.request_log_id,
                     status_text="geminigen_polling",
-                    progress=max(task.progress, 10),
+                    progress=next_progress,
                     response={
                         "status": "polling",
                         "job_id": job_id,
                         "upstream_uuid": task.upstream_uuid,
                         "upstream_status": status_text,
+                        "upstream_progress": payload.get("status_percentage") if isinstance(payload, dict) else None,
                     },
                     duration=self._task_duration(task),
                 )
