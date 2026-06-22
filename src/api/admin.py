@@ -890,6 +890,7 @@ class GeminiGenAccountRequest(BaseModel):
     label: str = ""
     raw_cookie: str = ""
     bearer_token: str = ""
+    refresh_token: str = ""
     guard_id: str = ""
     turnstile_token: str = ""
     is_active: bool = True
@@ -901,6 +902,7 @@ class GeminiGenAccountUpdateRequest(BaseModel):
     label: Optional[str] = None
     raw_cookie: Optional[str] = None
     bearer_token: Optional[str] = None
+    refresh_token: Optional[str] = None
     guard_id: Optional[str] = None
     turnstile_token: Optional[str] = None
     is_active: Optional[bool] = None
@@ -1975,6 +1977,8 @@ def _geminigen_account_payload(account) -> Dict[str, Any]:
         "raw_cookie_preview": _mask_secret(account.raw_cookie),
         "bearer_token": "",
         "bearer_token_preview": _mask_secret(account.bearer_token),
+        "refresh_token": "",
+        "refresh_token_preview": _mask_secret(getattr(account, "refresh_token", "")),
         "guard_id": "",
         "guard_id_preview": _mask_secret(account.guard_id),
         "turnstile_token": "",
@@ -2377,6 +2381,7 @@ async def create_geminigen_account(
         label=request.label.strip() or "GeminiGen account",
         raw_cookie="",
         bearer_token=request.bearer_token.strip(),
+        refresh_token=request.refresh_token.strip(),
         guard_id="",
         turnstile_token=request.turnstile_token.strip(),
         is_active=request.is_active,
@@ -2399,13 +2404,13 @@ async def update_geminigen_account(
     if not account:
         raise HTTPException(status_code=404, detail="GeminiGen account not found")
     updates: Dict[str, Any] = {}
-    for field in ("label", "raw_cookie", "bearer_token", "guard_id", "turnstile_token"):
+    for field in ("label", "raw_cookie", "bearer_token", "refresh_token", "guard_id", "turnstile_token"):
         value = getattr(request, field)
         if value is not None:
             stripped = value.strip()
             if field in {"raw_cookie", "guard_id"}:
                 updates[field] = ""
-            elif field == "bearer_token" and not stripped:
+            elif field in {"bearer_token", "refresh_token"} and not stripped:
                 continue
             else:
                 updates[field] = stripped

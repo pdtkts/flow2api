@@ -431,6 +431,7 @@ class GeminiGenAccount(BaseModel):
     label: str = ""
     raw_cookie: str = ""
     bearer_token: str = ""
+    refresh_token: str = ""
     guard_id: str = ""
     turnstile_token: str = ""
     is_active: bool = True

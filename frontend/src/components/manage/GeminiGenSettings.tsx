@@ -27,6 +27,8 @@ type GeminiGenAccount = {
   label: string
   bearer_token: string
   bearer_token_preview: string
+  refresh_token: string
+  refresh_token_preview: string
   is_active: boolean
   image_concurrency: number
   video_concurrency: number
@@ -85,6 +87,7 @@ type AccountDraft = {
   id?: number
   label: string
   bearer_token: string
+  refresh_token: string
   is_active: boolean
   image_concurrency: string
   video_concurrency: string
@@ -103,6 +106,7 @@ const DEFAULT_CONFIG: GeminiGenConfig = {
 const EMPTY_ACCOUNT: AccountDraft = {
   label: "",
   bearer_token: "",
+  refresh_token: "",
   is_active: true,
   image_concurrency: "5",
   video_concurrency: "5",
@@ -178,6 +182,7 @@ export function GeminiGenSettings({ active }: { active: boolean }) {
       id: account.id,
       label: account.label,
       bearer_token: "",
+      refresh_token: "",
       is_active: account.is_active,
       image_concurrency: String(account.image_concurrency ?? 5),
       video_concurrency: String(account.video_concurrency ?? 5),
@@ -195,6 +200,7 @@ export function GeminiGenSettings({ active }: { active: boolean }) {
       const payload = {
         label: draft.label.trim() || "GeminiGen account",
         bearer_token: draft.bearer_token.trim(),
+        refresh_token: draft.refresh_token.trim(),
         is_active: draft.is_active,
         image_concurrency: Number(draft.image_concurrency) || 5,
         video_concurrency: Number(draft.video_concurrency) || 5,
@@ -475,6 +481,10 @@ export function GeminiGenSettings({ active }: { active: boolean }) {
             <div className="space-y-2">
               <Label>Bearer token {draft.id ? "(leave blank to keep current)" : "*"}</Label>
               <Input className="font-mono text-xs" type="password" value={draft.bearer_token} onChange={(e) => setDraft((d) => ({ ...d, bearer_token: e.target.value }))} />
+            </div>
+            <div className="space-y-2">
+              <Label>Refresh token {draft.id ? "(leave blank to keep current)" : ""}</Label>
+              <Input className="font-mono text-xs" type="password" value={draft.refresh_token} onChange={(e) => setDraft((d) => ({ ...d, refresh_token: e.target.value }))} />
             </div>
           </div>
           <DialogFooter>

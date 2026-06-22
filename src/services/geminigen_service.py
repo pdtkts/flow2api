@@ -38,6 +38,7 @@ GEMINIGEN_TIME_BUCKET_WINDOW_MS = 60_000
 GEMINIGEN_CHROME_MAJOR = 147
 GEMINIGEN_GUARD_STABLE_ID_LEN = 22
 GEMINIGEN_GUARD_VERSION_BYTE = 1
+GEMINIGEN_REFRESH_BEFORE_EXPIRY_SEC = 300
 
 
 class GeminiGenService:
@@ -159,16 +160,21 @@ class GeminiGenService:
         if clean_window not in {"1h", "6h", "24h", "7d"}:
             clean_window = "1h"
         path = "/api/v1/models/status"
+        account = await self._ensure_fresh_account_token(account, cfg.base_url)
         proxy = await self._request_proxy()
-        async with AsyncSession() as session:
-            response = await session.get(
-                f"{self._api_base_url(cfg.base_url)}{path}",
-                params={"window": clean_window},
-                headers=await self._headers(account, path, method="get"),
-                timeout=30,
-                proxy=proxy,
-                impersonate="chrome120",
-            )
+        for attempt in range(2):
+            async with AsyncSession() as session:
+                response = await session.get(
+                    f"{self._api_base_url(cfg.base_url)}{path}",
+                    params={"window": clean_window},
+                    headers=await self._headers(account, path, method="get"),
+                    timeout=30,
+                    proxy=proxy,
+                    impersonate="chrome120",
+                )
+            if response.status_code < 400 or attempt or not self._token_expired_response(response):
+                break
+            account = await self._refresh_account_token(account, cfg.base_url)
         if response.status_code >= 400:
             raise RuntimeError(f"GeminiGen model status failed HTTP {response.status_code}: {response.text[:300]}")
         payload = response.json() if response.text else {}
@@ -254,6 +260,82 @@ class GeminiGenService:
         if token.lower().startswith("bearer "):
             token = token[7:].strip()
         return f"Bearer {token}" if token else ""
+
+    @staticmethod
+    def _jwt_exp(access_token: str) -> Optional[int]:
+        try:
+            token = (access_token or "").strip()
+            if token.lower().startswith("bearer "):
+                token = token[7:].strip()
+            payload = token.split(".")[1]
+            payload += "=" * (-len(payload) % 4)
+            data = json.loads(base64.urlsafe_b64decode(payload.encode("ascii")).decode("utf-8"))
+            exp = data.get("exp")
+            return int(exp) if exp is not None else None
+        except Exception:
+            return None
+
+    @classmethod
+    def _needs_token_refresh(cls, account: GeminiGenAccount) -> bool:
+        token = (account.bearer_token or "").strip()
+        if not token:
+            return True
+        exp = cls._jwt_exp(token)
+        if exp is None:
+            return False
+        return exp <= int(time.time()) + GEMINIGEN_REFRESH_BEFORE_EXPIRY_SEC
+
+    @staticmethod
+    def _token_expired_response(response: Any) -> bool:
+        try:
+            text = str(getattr(response, "text", "") or "")
+        except Exception:
+            text = ""
+        return "TOKEN_EXPIRED" in text or "Token has been expired" in text
+
+    async def _refresh_account_token(self, account: GeminiGenAccount, base_url: str) -> GeminiGenAccount:
+        refresh_token = str(getattr(account, "refresh_token", "") or "").strip()
+        if not refresh_token:
+            raise RuntimeError("GeminiGen refresh token is required to refresh expired access token")
+        path = "/api/refresh-token"
+        proxy = await self._request_proxy()
+        try:
+            async with AsyncSession() as session:
+                response = await session.post(
+                    f"{self._api_base_url(base_url)}{path}",
+                    headers=await self._headers(account, path, method="post"),
+                    json={"refresh_token": refresh_token},
+                    timeout=60,
+                    proxy=proxy,
+                    impersonate="chrome120",
+                )
+            if response.status_code >= 400:
+                raise RuntimeError(f"GeminiGen refresh token failed HTTP {response.status_code}: {response.text[:300]}")
+            payload = response.json() if response.text else {}
+            access_token = str(payload.get("access_token") or "").strip()
+            new_refresh_token = str(payload.get("refresh_token") or refresh_token).strip()
+            if not access_token:
+                raise RuntimeError("GeminiGen refresh response did not include access_token")
+            if account.id:
+                await self.db.update_geminigen_account(
+                    int(account.id),
+                    bearer_token=access_token,
+                    refresh_token=new_refresh_token,
+                    last_status="token_refreshed",
+                    last_error="",
+                )
+                fresh = await self.db.get_geminigen_account(int(account.id))
+                return fresh or account.model_copy(update={"bearer_token": access_token, "refresh_token": new_refresh_token})
+            return account.model_copy(update={"bearer_token": access_token, "refresh_token": new_refresh_token})
+        except Exception as exc:
+            if account.id:
+                await self.db.update_geminigen_account(int(account.id), last_status="failed", last_error=str(exc))
+            raise
+
+    async def _ensure_fresh_account_token(self, account: GeminiGenAccount, base_url: str) -> GeminiGenAccount:
+        if self._needs_token_refresh(account) and str(getattr(account, "refresh_token", "") or "").strip():
+            return await self._refresh_account_token(account, base_url)
+        return account
 
     @staticmethod
     def _zg_hex(message: str) -> str:
@@ -444,7 +526,7 @@ class GeminiGenService:
                 clean: Dict[str, Any] = {}
                 for key, nested in item.items():
                     lk = str(key).lower()
-                    if lk in {"raw_cookie", "cookie", "authorization", "bearer_token", "guard_id", "turnstile_token"}:
+                    if lk in {"raw_cookie", "cookie", "authorization", "bearer_token", "refresh_token", "guard_id", "turnstile_token"}:
                         clean[key] = "[redacted]"
                     elif lk in {"ref_images", "images"} and isinstance(nested, list):
                         clean[key] = [f"[media omitted #{idx + 1}]" for idx, _ in enumerate(nested)]
@@ -631,25 +713,30 @@ class GeminiGenService:
         path = self._endpoint_path(endpoint_type)
         url = f"{self._api_base_url(base_url)}{path}"
         proxy = await self._request_proxy()
-        multipart = CurlMime()
-        for key, value in form.items():
-            if isinstance(value, list):
-                for item in value:
-                    multipart.addpart(name=key, data=str(item))
-            else:
-                multipart.addpart(name=key, data=str(value))
-        try:
-            async with AsyncSession() as session:
-                response = await session.post(
-                    url,
-                    headers=await self._headers(account, path, method="post", multipart=True),
-                    multipart=multipart,
-                    timeout=120,
-                    proxy=proxy,
-                    impersonate="chrome120",
-                )
-        finally:
-            multipart.close()
+        account = await self._ensure_fresh_account_token(account, base_url)
+        for attempt in range(2):
+            multipart = CurlMime()
+            for key, value in form.items():
+                if isinstance(value, list):
+                    for item in value:
+                        multipart.addpart(name=key, data=str(item))
+                else:
+                    multipart.addpart(name=key, data=str(value))
+            try:
+                async with AsyncSession() as session:
+                    response = await session.post(
+                        url,
+                        headers=await self._headers(account, path, method="post", multipart=True),
+                        multipart=multipart,
+                        timeout=120,
+                        proxy=proxy,
+                        impersonate="chrome120",
+                    )
+            finally:
+                multipart.close()
+            if response.status_code < 400 or attempt or not self._token_expired_response(response):
+                break
+            account = await self._refresh_account_token(account, base_url)
         if response.status_code >= 400:
             raise RuntimeError(f"GeminiGen POST {path} failed HTTP {response.status_code}: {response.text[:500]}")
         text = response.text or "{}"
@@ -662,14 +749,19 @@ class GeminiGenService:
     async def _get_history(self, *, account: GeminiGenAccount, base_url: str, upstream_uuid: str) -> Dict[str, Any]:
         path = f"/api/history/{upstream_uuid}"
         proxy = await self._request_proxy()
-        async with AsyncSession() as session:
-            response = await session.get(
-                f"{self._api_base_url(base_url)}{path}",
-                headers=await self._headers(account, path, method="get"),
-                timeout=60,
-                proxy=proxy,
-                impersonate="chrome120",
-            )
+        account = await self._ensure_fresh_account_token(account, base_url)
+        for attempt in range(2):
+            async with AsyncSession() as session:
+                response = await session.get(
+                    f"{self._api_base_url(base_url)}{path}",
+                    headers=await self._headers(account, path, method="get"),
+                    timeout=60,
+                    proxy=proxy,
+                    impersonate="chrome120",
+                )
+            if response.status_code < 400 or attempt or not self._token_expired_response(response):
+                break
+            account = await self._refresh_account_token(account, base_url)
         if response.status_code >= 400:
             raise RuntimeError(f"GeminiGen GET {path} failed HTTP {response.status_code}: {response.text[:500]}")
         return response.json() if response.text else {}
@@ -978,14 +1070,19 @@ class GeminiGenService:
         try:
             proxy = await self._request_proxy()
             path = "/api/me"
-            async with AsyncSession() as session:
-                response = await session.get(
-                    f"{self._api_base_url(cfg.base_url)}{path}",
-                    headers=await self._headers(account, path, method="get"),
-                    timeout=30,
-                    proxy=proxy,
-                    impersonate="chrome120",
-                )
+            account = await self._ensure_fresh_account_token(account, cfg.base_url)
+            for attempt in range(2):
+                async with AsyncSession() as session:
+                    response = await session.get(
+                        f"{self._api_base_url(cfg.base_url)}{path}",
+                        headers=await self._headers(account, path, method="get"),
+                        timeout=30,
+                        proxy=proxy,
+                        impersonate="chrome120",
+                    )
+                if response.status_code < 400 or attempt or not self._token_expired_response(response):
+                    break
+                account = await self._refresh_account_token(account, cfg.base_url)
             if response.status_code >= 400:
                 raise RuntimeError(f"HTTP {response.status_code}: {response.text[:300]}")
             try:

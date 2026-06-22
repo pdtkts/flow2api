@@ -371,6 +371,7 @@ class Database:
                 label TEXT DEFAULT '',
                 raw_cookie TEXT DEFAULT '',
                 bearer_token TEXT DEFAULT '',
+                refresh_token TEXT DEFAULT '',
                 guard_id TEXT DEFAULT '',
                 turnstile_token TEXT DEFAULT '',
                 is_active BOOLEAN DEFAULT 1,
@@ -414,6 +415,7 @@ class Database:
         """)
         account_columns = [
             ("bearer_token", "TEXT DEFAULT ''"),
+            ("refresh_token", "TEXT DEFAULT ''"),
             ("guard_id", "TEXT DEFAULT ''"),
             ("turnstile_token", "TEXT DEFAULT ''"),
             ("image_concurrency", "INTEGER DEFAULT 5"),
@@ -2843,6 +2845,7 @@ class Database:
         label: str,
         raw_cookie: str,
         bearer_token: str = "",
+        refresh_token: str = "",
         guard_id: str = "",
         turnstile_token: str = "",
         is_active: bool = True,
@@ -2855,15 +2858,16 @@ class Database:
             cursor = await db.execute(
                 """
                 INSERT INTO geminigen_accounts (
-                    label, raw_cookie, bearer_token, guard_id, turnstile_token, is_active,
+                    label, raw_cookie, bearer_token, refresh_token, guard_id, turnstile_token, is_active,
                     image_concurrency, video_concurrency, last_status, last_error
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     (label or "").strip(),
                     raw_cookie or "",
                     bearer_token or "",
+                    refresh_token or "",
                     guard_id or "",
                     turnstile_token or "",
                     int(bool(is_active)),
@@ -2878,7 +2882,7 @@ class Database:
 
     async def update_geminigen_account(self, account_id: int, **kwargs) -> None:
         allowed = {
-            "label", "raw_cookie", "bearer_token", "guard_id", "turnstile_token",
+            "label", "raw_cookie", "bearer_token", "refresh_token", "guard_id", "turnstile_token",
             "is_active", "image_concurrency", "video_concurrency",
             "image_in_flight", "video_in_flight", "last_status", "last_error", "last_used_at",
         }
