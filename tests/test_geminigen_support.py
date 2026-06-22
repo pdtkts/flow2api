@@ -4,8 +4,9 @@ import json
 import time
 
 from src.services.geminigen_service import GeminiGenService
-from src.core.geminigen_manifest import GEMINIGEN_MODEL_BY_ID
+from src.core.geminigen_manifest import GEMINIGEN_MODEL_BY_ID, GEMINIGEN_MODEL_MANIFEST
 from src.core.models import GeminiGenAccount
+from src.core.studio_model_catalog import geminigen_studio_metadata, native_studio_metadata
 
 
 def test_extract_artifact_urls_prefers_final_download_url_over_preview():
@@ -136,3 +137,20 @@ def test_veo_ingredient_manifest_only_exposes_supported_eight_second_duration():
     assert "geminigen-veo-3.1-fast-i2v-ingredient-landscape-720p-8s" in GEMINIGEN_MODEL_BY_ID
     assert "geminigen-veo-3.1-fast-i2v-ingredient-landscape-720p-4s" not in GEMINIGEN_MODEL_BY_ID
     assert "geminigen-veo-3.1-fast-i2v-ingredient-landscape-720p-6s" not in GEMINIGEN_MODEL_BY_ID
+
+
+def test_studio_metadata_exposes_native_variant_and_geminigen_reference_mode():
+    native = native_studio_metadata(
+        "gemini-3.1-flash-image-square-4k",
+        {
+            "type": "image",
+            "model_name": "NARWHAL",
+            "aspect_ratio": "IMAGE_ASPECT_RATIO_SQUARE",
+            "upsample": "UPSAMPLE_IMAGE_RESOLUTION_4K",
+        },
+    )
+    assert native["family_id"] == "native:gemini-3.1-flash-image"
+    assert native["variant"] == {"resolution": "4K", "aspect_ratio": "1:1"}
+
+    geminigen = next(item for item in GEMINIGEN_MODEL_MANIFEST if "i2v-frame" in item["id"])
+    assert geminigen_studio_metadata(geminigen)["modes"] == ["image_to_video"]

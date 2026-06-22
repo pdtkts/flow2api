@@ -27,6 +27,12 @@ from ..core.logger import debug_logger
 from ..core.route_log_sanitize import dumps_for_request_log
 from ..core.account_tiers import normalize_user_paygate_tier, supports_model_for_tier
 from ..core.model_resolver import get_base_model_aliases, resolve_model_name
+from ..core.geminigen_manifest import GEMINIGEN_MODEL_MANIFEST
+from ..core.studio_model_catalog import (
+    geminigen_studio_metadata,
+    native_studio_metadata,
+    runway_studio_metadata,
+)
 from ..core.models import (
     ChatCompletionRequest,
     ChatMessage,
@@ -315,6 +321,7 @@ async def _get_openai_model_catalog() -> List[Dict[str, str]]:
         {
             "id": model_id,
             "description": _build_model_description(model_config),
+            "studio": native_studio_metadata(model_id, model_config),
         }
         for model_id, model_config in MODEL_CONFIG.items()
     ]
@@ -333,8 +340,10 @@ async def _get_runway_openai_model_catalog() -> List[Dict[str, str]]:
         {
             "id": model.public_model_id,
             "description": f"Runway {model.kind} generation - {model.task_type}",
+            "studio": runway_studio_metadata(model),
         }
         for model in models
+        if bool(model.live_available)
     ]
 
 
@@ -346,7 +355,14 @@ async def _get_geminigen_openai_model_catalog() -> List[Dict[str, str]]:
         return []
     if not await _has_geminigen_accounts():
         return []
-    return GeminiGenService.model_catalog()
+    return [
+        {
+            "id": item["id"],
+            "description": f"GeminiGen {item['kind']} generation - {item['endpoint_type']}",
+            "studio": geminigen_studio_metadata(item),
+        }
+        for item in GEMINIGEN_MODEL_MANIFEST
+    ]
 
 
 async def _get_gemini_model_catalog() -> Dict[str, str]:
@@ -2405,6 +2421,7 @@ async def list_models(auth_ctx: AuthContext = Depends(verify_api_key_flexible)):
             "object": "model",
             "owned_by": "flow2api",
             "description": model["description"],
+            **({"studio": model["studio"]} if model.get("studio") else {}),
         }
         for model in await _get_openai_model_catalog()
     ]
@@ -2414,6 +2431,7 @@ async def list_models(auth_ctx: AuthContext = Depends(verify_api_key_flexible)):
             "object": "model",
             "owned_by": "runway",
             "description": model["description"],
+            **({"studio": model["studio"]} if model.get("studio") else {}),
         }
         for model in await _get_runway_openai_model_catalog()
     )
@@ -2423,6 +2441,7 @@ async def list_models(auth_ctx: AuthContext = Depends(verify_api_key_flexible)):
             "object": "model",
             "owned_by": "geminigen",
             "description": model["description"],
+            **({"studio": model["studio"]} if model.get("studio") else {}),
         }
         for model in await _get_geminigen_openai_model_catalog()
     )
