@@ -593,6 +593,8 @@ class GeminiGenService:
                 return clean
             if isinstance(item, list):
                 return [scrub(nested) for nested in item]
+            if isinstance(item, bytes):
+                return f"[binary media omitted, length={len(item)}]"
             if isinstance(item, str) and item.startswith("data:image/"):
                 return f"[data URL omitted, length={len(item)}]"
             return item
@@ -697,6 +699,14 @@ class GeminiGenService:
             mime_type = "image/webp"
         return f"data:{mime_type};base64,{base64.b64encode(image).decode('ascii')}"
 
+    @staticmethod
+    def _image_file_metadata(image: bytes) -> tuple[str, str]:
+        if image.startswith(b"\xff\xd8\xff"):
+            return "image/jpeg", "jpg"
+        if image.startswith(b"RIFF") and image[8:12] == b"WEBP":
+            return "image/webp", "webp"
+        return "image/png", "png"
+
     def _build_form(self, *, public_model_id: str, prompt: str, images: List[bytes], options: Dict[str, Any], extra_options: Dict[str, Any], account: GeminiGenAccount) -> Dict[str, Any]:
         endpoint_type = options["endpoint_type"]
         merged = dict(options.get("options") or {})
@@ -736,11 +746,27 @@ class GeminiGenService:
             )
             ref_mode = merged.get("reference_mode")
             if images:
-                refs = [self._data_url_from_image(img) for img in images]
-                if ref_mode == "frame":
-                    form["ref_images"] = refs[:2]
-                else:
-                    form["ref_images"] = refs
+                refs = images[:2] if ref_mode == "frame" else images
+                if ref_mode in {"frame", "ingredient"}:
+                    form["mode_image"] = ref_mode
+                if ref_mode == "ingredient":
+                    tags = " ".join(f"@image{index}" for index in range(1, len(refs) + 1))
+                    if tags and not any(f"@image{index}" in prompt for index in range(1, len(refs) + 1)):
+                        form["prompt"] = f"{tags} {prompt}".strip()
+                form["_file_parts"] = [
+                    {
+                        "name": "ref_images",
+                        "data": image,
+                        "filename": f"ref_image_{index}.{extension}",
+                        "content_type": content_type,
+                    }
+                    for index, image in enumerate(refs, start=1)
+                    for content_type, extension in [self._image_file_metadata(image)]
+                ]
+            if "negative_prompt" in merged:
+                form["negative_prompt"] = merged["negative_prompt"]
+            if "enhance_prompt" in merged:
+                form["enhance_prompt"] = str(bool(merged["enhance_prompt"])).lower()
         return form
 
     @staticmethod
@@ -758,12 +784,22 @@ class GeminiGenService:
         account = await self._ensure_fresh_account_token(account, base_url)
         for attempt in range(2):
             multipart = CurlMime()
+            file_parts = form.get("_file_parts") or []
             for key, value in form.items():
+                if key.startswith("_"):
+                    continue
                 if isinstance(value, list):
                     for item in value:
-                        multipart.addpart(name=key, data=str(item))
+                        multipart.addpart(name=key, data=str(item).encode("utf-8"))
                 else:
-                    multipart.addpart(name=key, data=str(value))
+                    multipart.addpart(name=key, data=str(value).encode("utf-8"))
+            for part in file_parts:
+                multipart.addpart(
+                    name=part["name"],
+                    data=part["data"],
+                    filename=part["filename"],
+                    content_type=part["content_type"],
+                )
             try:
                 async with AsyncSession() as session:
                     response = await session.post(
@@ -932,7 +968,7 @@ class GeminiGenService:
                 status="processing",
                 progress=1,
                 started_at=datetime.utcnow(),
-                request_payload=json.dumps(form, ensure_ascii=False),
+                request_payload=self._safe_log_json(form),
             )
             await self._update_request_log(
                 request_log_id,
