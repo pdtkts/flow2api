@@ -287,6 +287,9 @@ export function CacheManagement({ active }: { active: boolean }) {
             <Switch checked={cacheEnabled} onCheckedChange={setCacheEnabled} />
             <Label>Enable file cache</Label>
           </div>
+          <p className="text-xs text-muted-foreground">
+            Turning cache off prevents new cache writes; it does not delete existing files.
+          </p>
           {cacheEnabled ? (
             <>
               <div>

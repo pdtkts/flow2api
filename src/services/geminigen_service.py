@@ -21,6 +21,7 @@ from urllib.parse import quote, urlparse
 from curl_cffi import CurlMime
 from curl_cffi.requests import AsyncSession
 
+from ..core.config import config as global_config
 from ..core.database import Database
 from ..core.geminigen_manifest import GEMINIGEN_MODEL_MANIFEST, geminigen_manifest_entry
 from ..core.logger import debug_logger
@@ -74,6 +75,7 @@ class GeminiGenService:
         self._token_refresh_locks: Dict[int, asyncio.Lock] = {}
         self._capacity_cooldowns: Dict[Tuple[int, str], float] = {}
         self._capacity_cooldown_attempts: Dict[Tuple[int, str], int] = {}
+        self._finalize_locks: Dict[str, asyncio.Lock] = {}
 
     @staticmethod
     def is_geminigen_model(model: str) -> bool:
@@ -651,12 +653,34 @@ class GeminiGenService:
             for item in value:
                 GeminiGenService._walk_urls_for_keys(item, keys, found)
 
+    @staticmethod
+    def _artifact_url_identity(url: str) -> str:
+        parsed = urlparse(url or "")
+        if not parsed.scheme or not parsed.netloc:
+            return url
+        host = (parsed.hostname or parsed.netloc).lower()
+        port = f":{parsed.port}" if parsed.port else ""
+        path = parsed.path or "/"
+        return f"{parsed.scheme.lower()}://{host}{port}{path}"
+
+    @classmethod
+    def _dedupe_artifact_urls(cls, urls: List[str]) -> List[str]:
+        deduped: List[str] = []
+        seen: set[str] = set()
+        for url in urls:
+            identity = cls._artifact_url_identity(url)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            deduped.append(url)
+        return deduped
+
     @classmethod
     def extract_artifact_urls(cls, payload: Dict[str, Any], kind: str) -> List[str]:
         final_urls: List[str] = []
         cls._walk_urls_for_keys(payload, {"file_download_url", "download_url"}, final_urls)
         if final_urls:
-            return final_urls
+            return cls._dedupe_artifact_urls(final_urls)
 
         found: List[str] = []
         if kind == "video":
@@ -665,7 +689,7 @@ class GeminiGenService:
             cls._walk_urls(payload.get("generated_image"), found)
         cls._walk_urls(payload.get("result"), found)
         cls._walk_urls(payload.get("data"), found)
-        return found
+        return cls._dedupe_artifact_urls(found)
 
     def _cache_url(self, filename: str, base_url: Optional[str]) -> str:
         base = (base_url or "").strip().rstrip("/")
@@ -787,6 +811,17 @@ class GeminiGenService:
             except Exception as exc:
                 debug_logger.log_warning(f"GeminiGen artifact cache failed: {exc}")
         return cached
+
+    def _finalize_lock_for_job(self, job_id: str) -> asyncio.Lock:
+        locks = getattr(self, "_finalize_locks", None)
+        if locks is None:
+            locks = {}
+            self._finalize_locks = locks
+        lock = locks.get(job_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            locks[job_id] = lock
+        return lock
 
     @staticmethod
     def _data_url_from_image(image: bytes) -> str:
@@ -1352,39 +1387,80 @@ class GeminiGenService:
             urls = self.extract_artifact_urls(payload, task.kind)
             completed = bool(urls) or any(x in status_text for x in ("complete", "success", "finished"))
             if completed:
-                await self._update_request_log(
-                    task.request_log_id,
-                    status_text="caching_video" if task.kind == "video" else "caching_image",
-                    progress=90,
-                    response={"status": "caching", "job_id": job_id, "raw_artifact_urls": urls},
-                    duration=self._task_duration(task),
-                )
-                cached = await self._cache_artifacts(urls, kind=task.kind, api_key_id=task.api_key_id, base_url=base_url, enabled=bool(cfg.cache_outputs))
-                await self.db.update_geminigen_task(
-                    job_id,
-                    status="completed",
-                    progress=100,
-                    raw_artifact_urls=urls,
-                    cached_artifact_urls=cached,
-                    response_payload=json.dumps(payload, ensure_ascii=False),
-                    completed_at=datetime.utcnow(),
-                )
-                await self._update_request_log(
-                    task.request_log_id,
-                    status_text="completed",
-                    progress=100,
-                    status_code=200,
-                    response={
-                        "status": "completed",
-                        "job_id": job_id,
-                        "upstream_uuid": task.upstream_uuid,
-                        "raw_artifact_urls": urls,
-                        "cached_artifact_urls": cached,
-                        "result_urls": cached or urls,
-                    },
-                    duration=self._task_duration(task),
-                )
-                await self.db.release_geminigen_account(task.account_id, task.kind)
+                async with self._finalize_lock_for_job(job_id):
+                    fresh_task = await self.db.get_geminigen_task(job_id)
+                    if fresh_task and self.is_geminigen_terminal_status(fresh_task.status):
+                        return fresh_task
+                    if fresh_task:
+                        task = fresh_task
+                    if not urls:
+                        error_text = "GeminiGen completed but did not return any artifact URLs"
+                        await self.db.update_geminigen_task(
+                            job_id,
+                            status="failed",
+                            progress=task.progress,
+                            error_message=error_text,
+                            response_payload=json.dumps(payload, ensure_ascii=False),
+                            completed_at=datetime.utcnow(),
+                        )
+                        await self._update_request_log(
+                            task.request_log_id,
+                            status_text="failed",
+                            progress=task.progress,
+                            status_code=502,
+                            response={
+                                "status": "failed",
+                                "job_id": job_id,
+                                "upstream_uuid": task.upstream_uuid,
+                                "error_message": error_text,
+                                "raw_artifact_urls": [],
+                                "cached_artifact_urls": [],
+                                "result_urls": [],
+                            },
+                            duration=self._task_duration(task),
+                        )
+                        await self.db.release_geminigen_account(task.account_id, task.kind)
+                        return await self.db.get_geminigen_task(job_id) or task
+                    await self._update_request_log(
+                        task.request_log_id,
+                        status_text="caching_video" if task.kind == "video" else "caching_image",
+                        progress=90,
+                        response={"status": "caching", "job_id": job_id, "raw_artifact_urls": urls},
+                        duration=self._task_duration(task),
+                    )
+                    cached = await self._cache_artifacts(
+                        urls,
+                        kind=task.kind,
+                        api_key_id=task.api_key_id,
+                        base_url=base_url,
+                        enabled=bool(global_config.cache_enabled and getattr(cfg, "cache_outputs", True)),
+                    )
+                    result_urls = cached or urls
+                    await self.db.update_geminigen_task(
+                        job_id,
+                        status="completed",
+                        progress=100,
+                        raw_artifact_urls=urls,
+                        cached_artifact_urls=cached,
+                        response_payload=json.dumps(payload, ensure_ascii=False),
+                        completed_at=datetime.utcnow(),
+                    )
+                    await self._update_request_log(
+                        task.request_log_id,
+                        status_text="completed",
+                        progress=100,
+                        status_code=200,
+                        response={
+                            "status": "completed",
+                            "job_id": job_id,
+                            "upstream_uuid": task.upstream_uuid,
+                            "raw_artifact_urls": urls,
+                            "cached_artifact_urls": cached,
+                            "result_urls": result_urls,
+                        },
+                        duration=self._task_duration(task),
+                    )
+                    await self.db.release_geminigen_account(task.account_id, task.kind)
             elif cancelled:
                 error_text = self._history_cancelled_text(payload, status_text)
                 await self.db.update_geminigen_task(
@@ -1529,8 +1605,13 @@ class GeminiGenService:
         return {"success": status == "healthy", "status": status, "error": error}
 
     @staticmethod
+    def _result_urls_for_task(task: GeminiGenTask) -> List[str]:
+        return task.cached_artifact_urls or task.raw_artifact_urls or []
+
+    @staticmethod
     def task_to_public_dict(task: GeminiGenTask) -> Dict[str, Any]:
         details = GeminiGenService._public_status_details(task)
+        result_urls = GeminiGenService._result_urls_for_task(task)
         return {
             "job_id": task.job_id,
             "upstream_uuid": task.upstream_uuid,
@@ -1541,7 +1622,7 @@ class GeminiGenService:
             "model": task.public_model_id,
             "raw_artifact_urls": task.raw_artifact_urls or [],
             "cached_artifact_urls": task.cached_artifact_urls or [],
-            "result_urls": task.cached_artifact_urls or task.raw_artifact_urls or [],
+            "result_urls": result_urls,
             "error_message": task.error_message,
             "created_at": task.created_at.isoformat() if task.created_at else None,
             "completed_at": task.completed_at.isoformat() if task.completed_at else None,
@@ -1559,8 +1640,11 @@ class GeminiGenService:
                     "status_code": 499 if cancelled else 502,
                 },
                 "job_id": task.job_id,
+                "raw_artifact_urls": task.raw_artifact_urls or [],
+                "cached_artifact_urls": task.cached_artifact_urls or [],
+                "result_urls": GeminiGenService._result_urls_for_task(task),
             }
-        urls = task.cached_artifact_urls or task.raw_artifact_urls or []
+        urls = GeminiGenService._result_urls_for_task(task)
         parts: List[str] = []
         for url in urls:
             suffix = Path(urlparse(url).path).suffix.lower()
@@ -1578,4 +1662,5 @@ class GeminiGenService:
             "job_id": task.job_id,
             "raw_artifact_urls": task.raw_artifact_urls or [],
             "cached_artifact_urls": task.cached_artifact_urls or [],
+            "result_urls": urls,
         }

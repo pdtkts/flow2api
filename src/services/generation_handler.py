@@ -1851,6 +1851,31 @@ class GenerationHandler:
                                 }
                             }
 
+                            if not config.cache_enabled:
+                                data_url = f"data:image/png;base64,{encoded_image}"
+                                response_state["url"] = data_url
+                                response_state["generated_assets"]["upscaled_image"]["url"] = data_url
+                                self._mark_generation_succeeded(generation_result)
+                                if image_trace is not None:
+                                    image_trace["upsample_ms"] = int((time.time() - upsample_started_at) * 1000)
+                                if stream:
+                                    yield self._create_stream_chunk(
+                                        f"![Generated Image]({data_url})",
+                                        finish_reason="stop",
+                                        extra_fields={
+                                            "generated_assets": response_state.get("generated_assets")
+                                        },
+                                    )
+                                else:
+                                    yield self._create_completion_response(
+                                        data_url,
+                                        media_type="image",
+                                        extra_fields={
+                                            "generated_assets": response_state.get("generated_assets")
+                                        },
+                                    )
+                                return
+
                             try:
                                 await self._update_request_log_progress(
                                     request_log_state,
@@ -2549,56 +2574,88 @@ class GenerationHandler:
                             )
                             return
 
-                    # Generated videos must be cached before they are returned to clients.
-                    await self._update_request_log_progress(request_log_state, token_id=token.id, status_text="caching_video", progress=92)
-                    try:
+                    source_video_url = source_video_url or ""
+                    source_video_is_safe = (
+                        source_video_url.startswith(("http://", "https://"))
+                        and (
+                            "flow-content.google" in source_video_url
+                            or "Signature=" in source_video_url
+                        )
+                    )
+                    if not config.cache_enabled:
+                        if not source_video_is_safe:
+                            error_msg = (
+                                "Video generated successfully, but file cache is disabled "
+                                "and this video URL requires backend-authenticated delivery"
+                            )
+                            await self._fail_video_task(checked_operations, error_msg)
+                            self._mark_generation_failed(
+                                generation_result,
+                                error_msg,
+                                status_code=502,
+                                error_extra={"video_cache_status": "cache_required"},
+                            )
+                            if stream:
+                                yield self._create_stream_chunk(f"Error: {error_msg}\n")
+                            yield self._create_error_response(
+                                error_msg,
+                                status_code=502,
+                                error_code="cache_required",
+                                extra_fields={"video_cache_status": "cache_required"},
+                            )
+                            return
+                        local_url = source_video_url
                         if stream:
-                            yield self._create_stream_chunk("Caching generated video file...\n")
-                        cache_auth_token = None
-                        if not (
-                            "flow-content.google" in (source_video_url or "")
-                            or (source_video_url or "").find("Signature=") >= 0
-                        ):
-                            cache_auth_token = token.at
-                        cached_filename = await self.file_cache.download_and_cache(
-                            source_video_url,
-                            "video",
-                            api_key_id=api_key_id,
-                            token_id=token.id,
-                            flow_project_id=project_id,
-                            auth_token=cache_auth_token,
-                            session_token=token.st if "getMediaUrlRedirect" in (source_video_url or "") else None,
-                        )
-                        local_url = self._build_cache_url(
-                            cached_filename, response_state, flow_project_id=project_id
-                        )
-                        if stream:
-                            yield self._create_stream_chunk("Video cached successfully, returning local cache URL...\n")
-                    except Exception as e:
-                        cache_error = self._normalize_error_message(e, max_length=240)
-                        error_msg = f"Video generated successfully, but caching the video failed: {cache_error}"
-                        debug_logger.log_error(f"Failed to cache video: {str(e)}")
-                        if "flow-content.google" in cache_error:
-                            video_cache_status = "cdn_download_rejected"
-                        elif "not valid media" in cache_error.lower():
-                            video_cache_status = "cdn_invalid_body"
-                        else:
-                            video_cache_status = "failed"
-                        await self._fail_video_task(checked_operations, error_msg)
-                        self._mark_generation_failed(
-                            generation_result,
-                            error_msg,
-                            status_code=502,
-                            error_extra={"video_cache_status": video_cache_status},
-                        )
-                        if stream:
-                            yield self._create_stream_chunk(f"Error: {error_msg}\n")
-                        yield self._create_error_response(
-                            error_msg,
-                            status_code=502,
-                            extra_fields={"video_cache_status": video_cache_status},
-                        )
-                        return
+                            yield self._create_stream_chunk("Cache disabled, returning source video URL...\n")
+                    else:
+                        # Generated videos are cached when file cache is enabled so
+                        # clients receive a stable Flow2API-owned delivery URL.
+                        await self._update_request_log_progress(request_log_state, token_id=token.id, status_text="caching_video", progress=92)
+                        try:
+                            if stream:
+                                yield self._create_stream_chunk("Caching generated video file...\n")
+                            cache_auth_token = None
+                            if not source_video_is_safe:
+                                cache_auth_token = token.at
+                            cached_filename = await self.file_cache.download_and_cache(
+                                source_video_url,
+                                "video",
+                                api_key_id=api_key_id,
+                                token_id=token.id,
+                                flow_project_id=project_id,
+                                auth_token=cache_auth_token,
+                                session_token=token.st if "getMediaUrlRedirect" in source_video_url else None,
+                            )
+                            local_url = self._build_cache_url(
+                                cached_filename, response_state, flow_project_id=project_id
+                            )
+                            if stream:
+                                yield self._create_stream_chunk("Video cached successfully, returning local cache URL...\n")
+                        except Exception as e:
+                            cache_error = self._normalize_error_message(e, max_length=240)
+                            error_msg = f"Video generated successfully, but caching the video failed: {cache_error}"
+                            debug_logger.log_error(f"Failed to cache video: {str(e)}")
+                            if "flow-content.google" in cache_error:
+                                video_cache_status = "cdn_download_rejected"
+                            elif "not valid media" in cache_error.lower():
+                                video_cache_status = "cdn_invalid_body"
+                            else:
+                                video_cache_status = "failed"
+                            await self._fail_video_task(checked_operations, error_msg)
+                            self._mark_generation_failed(
+                                generation_result,
+                                error_msg,
+                                status_code=502,
+                                error_extra={"video_cache_status": video_cache_status},
+                            )
+                            if stream:
+                                yield self._create_stream_chunk(f"Error: {error_msg}\n")
+                            yield self._create_error_response(
+                                error_msg,
+                                status_code=502,
+                                extra_fields={"video_cache_status": video_cache_status},
+                            )
+                            return
 
                     # 更新数据库
                     task_id = operation["operation"]["name"]
@@ -2849,6 +2906,7 @@ class GenerationHandler:
         self,
         error_message: str,
         status_code: int = 500,
+        error_code: str = "generation_failed",
         extra_fields: Optional[Dict[str, Any]] = None,
     ) -> str:
         """创建错误响应"""
@@ -2858,7 +2916,7 @@ class GenerationHandler:
             "error": {
                 "message": error_message,
                 "type": "server_error" if status_code >= 500 else "invalid_request_error",
-                "code": "generation_failed",
+                "code": error_code,
                 "status_code": status_code,
             }
         }

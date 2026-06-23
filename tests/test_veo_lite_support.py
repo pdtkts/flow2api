@@ -212,7 +212,7 @@ class ImageUpscaleFailureHandlerTests(unittest.IsolatedAsyncioTestCase):
         handler._execute_with_extension_fallback = execute_with_extension_fallback
         return handler
 
-    async def _run_image_generation(self, handler):
+    async def _run_image_generation(self, handler, *, cache_enabled=True):
         token = SimpleNamespace(
             id=7,
             at="at-token",
@@ -222,22 +222,27 @@ class ImageUpscaleFailureHandlerTests(unittest.IsolatedAsyncioTestCase):
         generation_result = handler._create_generation_result()
         response_state = handler._create_response_state()
         chunks = []
-        async for chunk in handler._handle_image_generation(
-            token=token,
-            project_id="project-1",
-            model_config=MODEL_CONFIG["gemini-3.1-flash-image-landscape-4k"],
-            prompt="prompt",
-            images=None,
-            stream=False,
-            api_key_id=1,
-            perf_trace={},
-            generation_result=generation_result,
-            response_state=response_state,
-            request_log_state={"id": None, "progress": 0, "api_key_id": 1},
-            pending_token_state={"active": False},
-            poll_task_id="job-1",
-        ):
-            chunks.append(json.loads(chunk))
+        original_cache_enabled = config.cache_enabled
+        try:
+            config.set_cache_enabled(cache_enabled)
+            async for chunk in handler._handle_image_generation(
+                token=token,
+                project_id="project-1",
+                model_config=MODEL_CONFIG["gemini-3.1-flash-image-landscape-4k"],
+                prompt="prompt",
+                images=None,
+                stream=False,
+                api_key_id=1,
+                perf_trace={},
+                generation_result=generation_result,
+                response_state=response_state,
+                request_log_state={"id": None, "progress": 0, "api_key_id": 1},
+                pending_token_state={"active": False},
+                poll_task_id="job-1",
+            ):
+                chunks.append(json.loads(chunk))
+        finally:
+            config.set_cache_enabled(original_cache_enabled)
         return generation_result, chunks, handler
 
     async def test_upscale_exception_fails_without_1k_fallback(self):
@@ -271,6 +276,19 @@ class ImageUpscaleFailureHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(chunks[-1]["upscale_status"], "failed")
         self.assertIn("could not cache high-resolution image", chunks[-1]["error"]["message"])
         handler.file_cache.download_and_cache.assert_not_awaited()
+
+    async def test_upscale_cache_disabled_returns_inline_data_url(self):
+        handler = self._build_handler(upsample_result="base64-image")
+
+        generation_result, chunks, handler = await self._run_image_generation(handler, cache_enabled=False)
+
+        self.assertTrue(generation_result["success"])
+        handler.file_cache.cache_base64_image.assert_not_awaited()
+        handler.file_cache.download_and_cache.assert_not_awaited()
+        self.assertEqual(
+            chunks[-1]["generated_assets"]["upscaled_image"]["url"],
+            "data:image/png;base64,base64-image",
+        )
 
 
 class VeoLiteModelResolverTests(unittest.TestCase):
@@ -408,7 +426,7 @@ class VideoCacheDeliveryTests(unittest.IsolatedAsyncioTestCase):
         handler._maybe_update_poll_task = AsyncMock()
         return handler
 
-    async def _run_poll(self, handler):
+    async def _run_poll(self, handler, *, cache_enabled=True):
         token = SimpleNamespace(id=7, at="at-token", st="st-token", video_concurrency=1)
         generation_result = handler._create_generation_result()
         response_state = handler._create_response_state()
@@ -417,9 +435,11 @@ class VideoCacheDeliveryTests(unittest.IsolatedAsyncioTestCase):
 
         original_poll_interval = config._config["flow"]["poll_interval"]
         original_max_attempts = config._config["flow"]["max_poll_attempts"]
+        original_cache_enabled = config.cache_enabled
         try:
             config._config["flow"]["poll_interval"] = 0
             config._config["flow"]["max_poll_attempts"] = 1
+            config.set_cache_enabled(cache_enabled)
             async for chunk in handler._poll_video_result(
                 token=token,
                 project_id="project-1",
@@ -434,6 +454,7 @@ class VideoCacheDeliveryTests(unittest.IsolatedAsyncioTestCase):
         finally:
             config._config["flow"]["poll_interval"] = original_poll_interval
             config._config["flow"]["max_poll_attempts"] = original_max_attempts
+            config.set_cache_enabled(original_cache_enabled)
 
         return generation_result, chunks
 
@@ -493,27 +514,42 @@ class VideoCacheDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("flow-content.google", chunks[-1]["choices"][0]["message"]["content"])
         self.assertEqual(self.db_updates[-1]["result_urls"], [returned_url])
 
-    async def test_video_cache_is_required_even_when_global_cache_disabled(self):
+    async def test_video_cache_disabled_returns_safe_source_url_without_cache_write(self):
         source_url = "https://flow-content.google/video/source"
-        original_cache_enabled = config.cache_enabled
-        config.set_cache_enabled(False)
-        try:
-            handler = self._build_handler(
-                self._successful_status(
-                    {
-                        "fifeUrl": source_url,
-                        "mediaGenerationId": "media-1",
-                    }
-                )
+        handler = self._build_handler(
+            self._successful_status(
+                {
+                    "fifeUrl": source_url,
+                    "mediaGenerationId": "media-1",
+                }
             )
+        )
 
-            generation_result, chunks = await self._run_poll(handler)
-        finally:
-            config.set_cache_enabled(original_cache_enabled)
+        generation_result, chunks = await self._run_poll(handler, cache_enabled=False)
 
         self.assertTrue(generation_result["success"])
-        handler.file_cache.download_and_cache.assert_awaited_once()
-        self.assertIn("/api/cache/blob/cached.mp4", chunks[-1]["generated_assets"]["final_video_url"])
+        handler.file_cache.download_and_cache.assert_not_awaited()
+        self.assertEqual(chunks[-1]["generated_assets"]["final_video_url"], source_url)
+        self.assertEqual(self.db_updates[-1]["result_urls"], [source_url])
+
+    async def test_video_cache_disabled_fails_when_source_requires_backend_auth(self):
+        source_url = "https://labs.google/fx/api/media/private-video"
+        handler = self._build_handler(
+            self._successful_status(
+                {
+                    "fifeUrl": source_url,
+                    "mediaGenerationId": None,
+                }
+            )
+        )
+
+        generation_result, chunks = await self._run_poll(handler, cache_enabled=False)
+
+        self.assertFalse(generation_result["success"])
+        self.assertEqual(generation_result["error_status_code"], 502)
+        handler.file_cache.download_and_cache.assert_not_awaited()
+        self.assertEqual(chunks[-1]["error"]["code"], "cache_required")
+        self.assertEqual(chunks[-1]["video_cache_status"], "cache_required")
 
     async def test_video_cache_failure_fails_without_returning_source_url(self):
         source_url = "https://flow-content.google/video/source"

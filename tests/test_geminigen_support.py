@@ -8,16 +8,19 @@ import time
 from contextlib import asynccontextmanager
 from datetime import datetime, time as datetime_time, timedelta, timezone
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 from src.core.database import Database
+from src.core.config import config
 from src.services.geminigen_service import (
     GEMINIGEN_CAPACITY_ERROR_CODE,
     GeminiGenService,
     GeminiGenUpstreamError,
 )
+from src.services.runway_service import RunwayService
 from src.api import routes
 from src.core.geminigen_manifest import GEMINIGEN_MODEL_BY_ID, GEMINIGEN_MODEL_MANIFEST
-from src.core.models import GeminiGenAccount, GeminiGenTask, Token
+from src.core.models import GeminiGenAccount, GeminiGenTask, RunwayAccount, RunwayModel, RunwayTask, Token
 from src.core.storage_errors import (
     is_sqlite_storage_full_error,
     sqlite_operational_error_handler,
@@ -35,6 +38,40 @@ def test_extract_artifact_urls_prefers_final_download_url_over_preview():
 
     assert GeminiGenService.extract_artifact_urls(payload, "image") == [
         "https://cdn.example/final.png"
+    ]
+
+
+def test_extract_artifact_urls_dedupes_signed_urls_for_same_artifact():
+    payload = {
+        "generated_image": {
+            "image_url": "https://cdn.example/preview.jpg",
+        },
+        "result": {
+            "file_download_url": "https://cdn.example/final.png?Expires=1&Signature=abc",
+        },
+        "data": [
+            {
+                "download_url": "https://cdn.example/final.png?Expires=2&Signature=def",
+            }
+        ],
+    }
+
+    assert GeminiGenService.extract_artifact_urls(payload, "image") == [
+        "https://cdn.example/final.png?Expires=1&Signature=abc"
+    ]
+
+
+def test_extract_artifact_urls_preserves_distinct_multi_outputs():
+    payload = {
+        "data": [
+            {"file_download_url": "https://cdn.example/result-1.png?Signature=abc"},
+            {"file_download_url": "https://cdn.example/result-2.png?Signature=def"},
+        ],
+    }
+
+    assert GeminiGenService.extract_artifact_urls(payload, "image") == [
+        "https://cdn.example/result-1.png?Signature=abc",
+        "https://cdn.example/result-2.png?Signature=def",
     ]
 
 
@@ -382,6 +419,7 @@ class FakeGeminiGenDatabase:
             base_url="https://api.geminigen.ai",
             timeout_image_sec=timeout_image_sec,
             timeout_video_sec=3.0,
+            cache_outputs=True,
         )
         self.releases = 0
         self.acquire_exclusions = []
@@ -424,6 +462,7 @@ def build_capacity_test_service(db):
     service._capacity_cooldowns = {}
     service._capacity_cooldown_attempts = {}
     service._token_refresh_locks = {}
+    service._finalize_locks = {}
     service._guard_skew_ms = 0
     service._guard_skew_synced_at = 0.0
     service._guard_skew_lock = asyncio.Lock()
@@ -613,6 +652,228 @@ def test_geminigen_poll_does_not_query_history_while_submission_is_in_flight():
 
     assert result.status == "processing"
     assert result.upstream_uuid is None
+
+
+def test_geminigen_poll_respects_global_cache_kill_switch():
+    db = FakeGeminiGenDatabase()
+    db.task = db.task.model_copy(update={"status": "processing", "account_id": 1, "upstream_uuid": "upstream-uuid"})
+    service = build_capacity_test_service(db)
+    service.file_cache = SimpleNamespace(download_and_cache=AsyncMock(return_value="cached.png"))
+    log_updates = []
+
+    async def get_history(**kwargs):
+        return {"status": "SUCCESSFUL", "file_download_url": "https://cdn.example/result.png"}
+
+    async def update_request_log(*args, **kwargs):
+        log_updates.append(kwargs)
+
+    service._get_history = get_history
+    service._update_request_log = update_request_log
+    original_cache_enabled = config.cache_enabled
+    config.set_cache_enabled(False)
+    try:
+        result = asyncio.run(service.poll_task("geminigen-test", api_key_id=None, base_url="https://flow.example"))
+    finally:
+        config.set_cache_enabled(original_cache_enabled)
+
+    assert result.status == "completed"
+    assert result.raw_artifact_urls == ["https://cdn.example/result.png"]
+    assert result.cached_artifact_urls == []
+    assert GeminiGenService.task_to_public_dict(result)["result_urls"] == ["https://cdn.example/result.png"]
+    assert GeminiGenService.task_to_openai_payload(result)["result_urls"] == ["https://cdn.example/result.png"]
+    assert "https://cdn.example/result.png" in GeminiGenService.task_to_openai_payload(result)["choices"][0]["message"]["content"]
+    assert log_updates[-1]["response"]["result_urls"] == ["https://cdn.example/result.png"]
+    service.file_cache.download_and_cache.assert_not_awaited()
+
+
+def test_geminigen_poll_returns_cached_url_when_global_and_provider_cache_enabled():
+    db = FakeGeminiGenDatabase()
+    db.task = db.task.model_copy(update={"status": "processing", "account_id": 1, "upstream_uuid": "upstream-uuid"})
+    service = build_capacity_test_service(db)
+    service.file_cache = SimpleNamespace(download_and_cache=AsyncMock(return_value="cached.png"))
+
+    async def get_history(**kwargs):
+        return {"status": "SUCCESSFUL", "file_download_url": "https://cdn.example/result.png"}
+
+    service._get_history = get_history
+    original_cache_enabled = config.cache_enabled
+    config.set_cache_enabled(True)
+    try:
+        result = asyncio.run(service.poll_task("geminigen-test", api_key_id=None, base_url="https://flow.example"))
+    finally:
+        config.set_cache_enabled(original_cache_enabled)
+
+    cached_url = "https://flow.example/api/cache/blob/cached.png"
+    assert result.status == "completed"
+    assert result.raw_artifact_urls == ["https://cdn.example/result.png"]
+    assert result.cached_artifact_urls == [cached_url]
+    assert GeminiGenService.task_to_public_dict(result)["result_urls"] == [cached_url]
+    assert GeminiGenService.task_to_openai_payload(result)["result_urls"] == [cached_url]
+    service.file_cache.download_and_cache.assert_awaited_once_with(
+        "https://cdn.example/result.png",
+        media_type="image",
+        api_key_id=None,
+        token_id=None,
+        flow_project_id=None,
+    )
+
+
+def test_geminigen_poll_returns_direct_url_when_provider_cache_disabled():
+    db = FakeGeminiGenDatabase()
+    db.config.cache_outputs = False
+    db.task = db.task.model_copy(update={"status": "processing", "account_id": 1, "upstream_uuid": "upstream-uuid"})
+    service = build_capacity_test_service(db)
+    service.file_cache = SimpleNamespace(download_and_cache=AsyncMock(return_value="cached.png"))
+
+    async def get_history(**kwargs):
+        return {"status": "SUCCESSFUL", "file_download_url": "https://cdn.example/result.png"}
+
+    service._get_history = get_history
+    original_cache_enabled = config.cache_enabled
+    config.set_cache_enabled(True)
+    try:
+        result = asyncio.run(service.poll_task("geminigen-test", api_key_id=None, base_url="https://flow.example"))
+    finally:
+        config.set_cache_enabled(original_cache_enabled)
+
+    assert result.status == "completed"
+    assert result.raw_artifact_urls == ["https://cdn.example/result.png"]
+    assert result.cached_artifact_urls == []
+    assert GeminiGenService.task_to_public_dict(result)["result_urls"] == ["https://cdn.example/result.png"]
+    assert GeminiGenService.task_to_openai_payload(result)["result_urls"] == ["https://cdn.example/result.png"]
+    service.file_cache.download_and_cache.assert_not_awaited()
+
+
+def test_geminigen_concurrent_completion_caches_once():
+    db = FakeGeminiGenDatabase()
+    db.task = db.task.model_copy(update={"status": "processing", "account_id": 1, "upstream_uuid": "upstream-uuid"})
+    service = build_capacity_test_service(db)
+    history_calls = 0
+
+    async def download_and_cache(*args, **kwargs):
+        await asyncio.sleep(0.01)
+        return "cached.png"
+
+    async def get_history(**kwargs):
+        nonlocal history_calls
+        history_calls += 1
+        await asyncio.sleep(0)
+        return {
+            "status": "SUCCESSFUL",
+            "file_download_url": f"https://cdn.example/result.png?Signature={history_calls}",
+        }
+
+    async def run():
+        original_cache_enabled = config.cache_enabled
+        config.set_cache_enabled(True)
+        try:
+            return await asyncio.gather(
+                service.poll_task("geminigen-test", api_key_id=None, base_url="https://flow.example"),
+                service.poll_task("geminigen-test", api_key_id=None, base_url="https://flow.example"),
+            )
+        finally:
+            config.set_cache_enabled(original_cache_enabled)
+
+    service.file_cache = SimpleNamespace(download_and_cache=AsyncMock(side_effect=download_and_cache))
+    service._get_history = get_history
+
+    results = asyncio.run(run())
+
+    cached_url = "https://flow.example/api/cache/blob/cached.png"
+    assert all(result.status == "completed" for result in results)
+    assert all(result.cached_artifact_urls == [cached_url] for result in results)
+    service.file_cache.download_and_cache.assert_awaited_once()
+    assert db.releases == 1
+
+
+def test_geminigen_completed_without_artifact_urls_fails_clearly():
+    db = FakeGeminiGenDatabase()
+    db.task = db.task.model_copy(update={"status": "processing", "account_id": 1, "upstream_uuid": "upstream-uuid"})
+    service = build_capacity_test_service(db)
+    service.file_cache = SimpleNamespace(download_and_cache=AsyncMock(return_value="cached.png"))
+    log_updates = []
+
+    async def get_history(**kwargs):
+        return {"status": "SUCCESSFUL"}
+
+    async def update_request_log(*args, **kwargs):
+        log_updates.append(kwargs)
+
+    service._get_history = get_history
+    service._update_request_log = update_request_log
+
+    result = asyncio.run(service.poll_task("geminigen-test", api_key_id=None, base_url="https://flow.example"))
+
+    assert result.status == "failed"
+    assert result.error_message == "GeminiGen completed but did not return any artifact URLs"
+    assert GeminiGenService.task_to_public_dict(result)["result_urls"] == []
+    assert GeminiGenService.task_to_openai_payload(result)["result_urls"] == []
+    assert log_updates[-1]["status_code"] == 502
+    assert log_updates[-1]["response"]["result_urls"] == []
+    service.file_cache.download_and_cache.assert_not_awaited()
+
+
+class FakeRunwayDatabase:
+    def __init__(self):
+        self.task = RunwayTask(
+            job_id="runway-test",
+            upstream_task_id="upstream-task",
+            account_id=1,
+            api_key_id=5,
+            public_model_id="runway-video",
+            status="processing",
+        )
+        self.account = RunwayAccount(id=1, label="primary", raw_credential="token")
+        self.model = RunwayModel(public_model_id="runway-video", display_name="Runway Video", kind="video", task_type="video")
+        self.config = SimpleNamespace(base_url="https://api.runwayml.com/v1", cache_outputs=True)
+        self.releases = 0
+
+    async def get_runway_task(self, job_id):
+        return self.task
+
+    async def get_runway_config(self):
+        return self.config
+
+    async def get_runway_account(self, account_id):
+        return self.account
+
+    async def get_runway_model(self, public_model_id):
+        return self.model
+
+    async def update_runway_task(self, job_id, **kwargs):
+        self.task = self.task.model_copy(update=kwargs)
+
+    async def release_runway_account(self, account_id):
+        self.releases += 1
+
+
+def test_runway_poll_respects_global_cache_kill_switch():
+    db = FakeRunwayDatabase()
+    service = object.__new__(RunwayService)
+    service.db = db
+    service.file_cache = SimpleNamespace(download_and_cache=AsyncMock(return_value="cached.mp4"))
+    service.proxy_manager = None
+
+    async def get_upstream_task(**kwargs):
+        return {"task": {"status": "SUCCEEDED", "artifacts": [{"url": "https://cdn.example/result.mp4"}]}}
+
+    async def get_upstream_task_generation(**kwargs):
+        return {}
+
+    service.get_upstream_task = get_upstream_task
+    service.get_upstream_task_generation = get_upstream_task_generation
+
+    original_cache_enabled = config.cache_enabled
+    config.set_cache_enabled(False)
+    try:
+        result = asyncio.run(service.poll_task("runway-test", api_key_id=5, base_url="https://flow.example"))
+    finally:
+        config.set_cache_enabled(original_cache_enabled)
+
+    assert result.status == "completed"
+    assert result.raw_artifact_urls == ["https://cdn.example/result.mp4"]
+    assert result.cached_artifact_urls is None
+    service.file_cache.download_and_cache.assert_not_awaited()
 
 
 def test_geminigen_wait_for_task_exits_on_cancelled():
