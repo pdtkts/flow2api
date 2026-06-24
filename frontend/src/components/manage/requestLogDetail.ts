@@ -97,6 +97,33 @@ export function extractLogPrimaryUrl(responseBodyObj: unknown): string | null {
   )
 }
 
+function hasMeaningfulCloningPrompt(prompt: unknown): boolean {
+  if (!prompt || typeof prompt !== "object") return typeof prompt === "string" && prompt.trim().length > 0
+  const p = prompt as Record<string, unknown>
+  const shot = p.shot && typeof p.shot === "object" ? (p.shot as Record<string, unknown>) : {}
+  const lighting = p.lighting && typeof p.lighting === "object" ? (p.lighting as Record<string, unknown>) : {}
+  const metadata = p.metadata && typeof p.metadata === "object" ? (p.metadata as Record<string, unknown>) : {}
+  const tags = Array.isArray(metadata.tags) ? metadata.tags : []
+  return [
+    p.scene,
+    p.style,
+    shot.composition,
+    lighting.primary,
+    ...tags,
+  ].some((value) => typeof value === "string" && value.trim().length > 0)
+}
+
+function cloningPromptSuccessWarning(responseBodyObj: unknown): string {
+  if (!responseBodyObj || typeof responseBodyObj !== "object") return ""
+  const prompts = (responseBodyObj as Record<string, unknown>).prompts
+  if (!Array.isArray(prompts)) return ""
+  if (prompts.length === 0) return "Generation completed, but no cloning prompts were returned."
+  if (!prompts.some(hasMeaningfulCloningPrompt)) {
+    return "Generation completed, but the returned cloning prompt fields were blank."
+  }
+  return ""
+}
+
 /** English copy for the log details template (list/detail UI). */
 export function extractLogSuccessSummaryEn(
   log: LogListItem | null | undefined,
@@ -107,6 +134,8 @@ export function extractLogSuccessSummaryEn(
     return "Generation successful, results have been returned."
   }
   const o = responseBodyObj as Record<string, unknown>
+  const promptWarning = cloningPromptSuccessWarning(responseBodyObj)
+  if (promptWarning) return promptWarning
   const assets = o.generated_assets as Record<string, unknown> | undefined
   if (assets && typeof assets === "object" && assets.upscaled_image && typeof assets.upscaled_image === "object") {
     const up = assets.upscaled_image as { resolution?: string }

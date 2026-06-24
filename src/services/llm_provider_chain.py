@@ -47,6 +47,12 @@ def extract_json_object(raw: str) -> Dict[str, Any]:
     return parsed
 
 
+def extract_non_empty_json_object(raw: str, service: str = "Model") -> Dict[str, Any]:
+    if not str(raw or "").strip():
+        raise HTTPException(status_code=500, detail=f"{service} returned empty JSON content")
+    return extract_json_object(raw)
+
+
 def get_csv(raw: str) -> List[str]:
     return [x.strip() for x in str(raw or "").split(",") if x.strip()]
 
@@ -262,8 +268,8 @@ class LlmProviderChain:
                     last_snippet = getattr(resp, "text", None) or ""
                     continue
                 data = resp.json()
-                text = (((data or {}).get("choices") or [{}])[0].get("message") or {}).get("content") or "{}"
-                return extract_json_object(text)
+                text = (((data or {}).get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+                return extract_non_empty_json_object(text, "OpenAI")
         raise _http_fail_exc("OpenAI", last_upstream, last_snippet)
 
     async def _invoke_openrouter(
@@ -317,8 +323,8 @@ class LlmProviderChain:
                     last_snippet = getattr(resp, "text", None) or ""
                     continue
                 data = resp.json()
-                text = (((data or {}).get("choices") or [{}])[0].get("message") or {}).get("content") or "{}"
-                return extract_json_object(text)
+                text = (((data or {}).get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+                return extract_non_empty_json_object(text, "OpenRouter")
         raise _http_fail_exc("OpenRouter", last_upstream, last_snippet)
 
     async def _invoke_gemini(
@@ -354,7 +360,7 @@ class LlmProviderChain:
                 data = resp.json()
                 text_parts = (((((data or {}).get("candidates") or [{}])[0].get("content") or {}).get("parts")) or [])
                 text = "\n".join([str(p.get("text") or "") for p in text_parts if not p.get("thought")]).strip()
-                return extract_json_object(text or "{}")
+                return extract_non_empty_json_object(text, "Gemini")
         raise _http_fail_exc("Gemini", last_upstream, last_snippet)
 
     async def _invoke_third_party(
@@ -403,8 +409,8 @@ class LlmProviderChain:
                     last_snippet = getattr(resp, "text", None) or ""
                     continue
                 data = resp.json()
-                text = (((data or {}).get("choices") or [{}])[0].get("message") or {}).get("content") or "{}"
-                return extract_json_object(text)
+                text = (((data or {}).get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+                return extract_non_empty_json_object(text, "Third-party Gemini")
         raise _http_fail_exc("Third-party Gemini", last_upstream, last_snippet)
 
     async def _invoke_cloudflare(
@@ -460,5 +466,5 @@ class LlmProviderChain:
                 raise HTTPException(status_code=502, detail=f"Cloudflare API error: {snippet}")
             text = (((data or {}).get("result") or {}).get("response") or "")
             if not text:
-                text = (((data or {}).get("choices") or [{}])[0].get("message") or {}).get("content") or "{}"
-            return extract_json_object(text)
+                text = (((data or {}).get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+            return extract_non_empty_json_object(text, "Cloudflare Workers AI")

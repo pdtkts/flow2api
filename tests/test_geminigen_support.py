@@ -10,13 +10,20 @@ from datetime import datetime, time as datetime_time, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+from fastapi import HTTPException
+
 from src.core.database import Database
 from src.core.config import config
+from src.services.cloning_metadata_service import (
+    _ensure_meaningful_image_prompt,
+    _normalize_image_prompt,
+)
 from src.services.geminigen_service import (
     GEMINIGEN_CAPACITY_ERROR_CODE,
     GeminiGenService,
     GeminiGenUpstreamError,
 )
+from src.services.llm_provider_chain import extract_non_empty_json_object
 from src.services.runway_service import RunwayService
 from src.api import routes
 from src.core.geminigen_manifest import GEMINIGEN_MODEL_BY_ID, GEMINIGEN_MODEL_MANIFEST
@@ -26,6 +33,37 @@ from src.core.storage_errors import (
     sqlite_operational_error_handler,
 )
 from src.core.studio_model_catalog import geminigen_studio_metadata, native_studio_metadata
+
+
+def test_blank_cloning_prompt_is_rejected():
+    blank = _normalize_image_prompt({})
+    try:
+        _ensure_meaningful_image_prompt(blank)
+    except HTTPException as exc:
+        assert exc.status_code == 502
+        assert "blank cloning prompt" in str(exc.detail)
+    else:
+        raise AssertionError("blank cloning prompt was accepted")
+
+
+def test_meaningful_cloning_prompt_is_preserved():
+    prompt = _normalize_image_prompt({"scene": "Clinician closing a hyperbaric oxygen chamber door"})
+    out = _ensure_meaningful_image_prompt(prompt)
+    assert out["scene"] == "Clinician closing a hyperbaric oxygen chamber door"
+
+
+def test_empty_provider_json_content_is_rejected():
+    try:
+        extract_non_empty_json_object("", "Gemini")
+    except HTTPException as exc:
+        assert exc.status_code == 500
+        assert "Gemini returned empty JSON content" in str(exc.detail)
+    else:
+        raise AssertionError("empty provider JSON content was accepted")
+
+
+def test_non_empty_provider_json_content_still_parses():
+    assert extract_non_empty_json_object('{"scene":"x"}') == {"scene": "x"}
 
 
 def test_extract_artifact_urls_prefers_final_download_url_over_preview():

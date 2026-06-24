@@ -197,6 +197,38 @@ def _normalize_image_prompt(p: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _non_empty_str(value: Any) -> str:
+    return str(value or "").strip() if value is not None else ""
+
+
+def _has_meaningful_image_prompt_content(prompt: Dict[str, Any]) -> bool:
+    shot = prompt.get("shot") if isinstance(prompt.get("shot"), dict) else {}
+    lighting = prompt.get("lighting") if isinstance(prompt.get("lighting"), dict) else {}
+    metadata = prompt.get("metadata") if isinstance(prompt.get("metadata"), dict) else {}
+    tags = metadata.get("tags") if isinstance(metadata.get("tags"), list) else []
+    return any(
+        [
+            _non_empty_str(prompt.get("scene")),
+            _non_empty_str(prompt.get("style")),
+            _non_empty_str(shot.get("composition")),
+            _non_empty_str(lighting.get("primary")),
+            any(_non_empty_str(tag) for tag in tags),
+        ]
+    )
+
+
+def _ensure_meaningful_image_prompt(prompt: Dict[str, Any]) -> Dict[str, Any]:
+    if not _has_meaningful_image_prompt_content(prompt):
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "Model returned a blank cloning prompt. Expected at least one descriptive field "
+                "(scene, style, shot.composition, lighting.primary, or metadata.tags)."
+            ),
+        )
+    return prompt
+
+
 class CloningMetadataService:
     def __init__(self, llm_chain: Optional[LlmProviderChain] = None) -> None:
         self._llm = llm_chain or LlmProviderChain()
@@ -385,7 +417,7 @@ class CloningMetadataService:
                 mime_type=str(image.get("mimeType") or mime_type),
                 use_cloning_credentials=True,
             )
-            out.append(_normalize_image_prompt(response_json))
+            out.append(_ensure_meaningful_image_prompt(_normalize_image_prompt(response_json)))
         return {"prompts": out}
 
     async def generate_cloning_video_prompt(
