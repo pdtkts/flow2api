@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import time
 from typing import Any, Dict, List, Optional
 
 from curl_cffi.requests import AsyncSession
@@ -30,6 +31,8 @@ METADATA_PROVIDERS = [
 
 # OpenAI-compatible providers default to very high max_tokens; cap completion budget for JSON extraction calls.
 _JSON_CHAT_MAX_TOKENS = 8192
+_DEFAULT_JSON_HTTP_TIMEOUT_SECONDS = 120.0
+_MIN_JSON_HTTP_TIMEOUT_SECONDS = 1.0
 
 
 def extract_json_object(raw: str) -> Dict[str, Any]:
@@ -37,20 +40,29 @@ def extract_json_object(raw: str) -> Dict[str, Any]:
     start = cleaned.find("{")
     end = cleaned.rfind("}")
     if start < 0 or end <= start:
-        raise HTTPException(status_code=500, detail="Model response did not contain a JSON object")
+        raise HTTPException(status_code=422, detail="Model response did not contain a JSON object")
     try:
         parsed = json.loads(cleaned[start : end + 1])
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Model response JSON parse failed: {exc}") from exc
+        raise HTTPException(status_code=422, detail=f"Model response JSON parse failed: {exc}") from exc
     if not isinstance(parsed, dict):
-        raise HTTPException(status_code=500, detail="Model response JSON root must be an object")
+        raise HTTPException(status_code=422, detail="Model response JSON root must be an object")
     return parsed
 
 
 def extract_non_empty_json_object(raw: str, service: str = "Model") -> Dict[str, Any]:
     if not str(raw or "").strip():
-        raise HTTPException(status_code=500, detail=f"{service} returned empty JSON content")
+        raise HTTPException(status_code=422, detail=f"{service} returned empty JSON content")
     return extract_json_object(raw)
+
+
+def _json_http_timeout(deadline_at: Optional[float], default_timeout: float = _DEFAULT_JSON_HTTP_TIMEOUT_SECONDS) -> float:
+    if deadline_at is None:
+        return default_timeout
+    remaining = float(deadline_at) - time.monotonic()
+    if remaining <= _MIN_JSON_HTTP_TIMEOUT_SECONDS:
+        raise HTTPException(status_code=504, detail="Cloning prompt generation deadline exceeded before provider response")
+    return max(_MIN_JSON_HTTP_TIMEOUT_SECONDS, min(default_timeout, remaining))
 
 
 def get_csv(raw: str) -> List[str]:
@@ -145,6 +157,7 @@ class LlmProviderChain:
         image_bytes: Optional[bytes],
         mime_type: str,
         use_cloning_credentials: bool = False,
+        deadline_at: Optional[float] = None,
     ) -> Dict[str, Any]:
         if not providers:
             raise HTTPException(status_code=400, detail="No enabled providers configured")
@@ -164,6 +177,7 @@ class LlmProviderChain:
                         image_bytes=image_bytes,
                         mime_type=mime_type,
                         use_cloning_credentials=use_cloning_credentials,
+                        deadline_at=deadline_at,
                     )
                 except Exception as exc:
                     last_err = exc
@@ -190,6 +204,7 @@ class LlmProviderChain:
         image_bytes: Optional[bytes] = None,
         mime_type: str = "image/jpeg",
         use_cloning_credentials: bool = False,
+        deadline_at: Optional[float] = None,
     ) -> Dict[str, Any]:
         models = [model] + [m for m in (fallback_models or []) if m and m != model]
         last_err: Optional[Exception] = None
@@ -197,25 +212,27 @@ class LlmProviderChain:
             try:
                 if provider == "openai":
                     return await self._invoke_openai(
-                        candidate, prompt_text, image_bytes, mime_type, use_cloning_credentials
+                        candidate, prompt_text, image_bytes, mime_type, use_cloning_credentials, deadline_at
                     )
                 if provider == "openrouter":
                     return await self._invoke_openrouter(
-                        candidate, prompt_text, image_bytes, mime_type, use_cloning_credentials
+                        candidate, prompt_text, image_bytes, mime_type, use_cloning_credentials, deadline_at
                     )
                 if provider == "third_party_gemini":
                     return await self._invoke_third_party(
-                        candidate, prompt_text, image_bytes, mime_type, use_cloning_credentials
+                        candidate, prompt_text, image_bytes, mime_type, use_cloning_credentials, deadline_at
                     )
                 if provider == "cloudflare":
                     return await self._invoke_cloudflare(
-                        candidate, prompt_text, image_bytes, mime_type, use_cloning_credentials
+                        candidate, prompt_text, image_bytes, mime_type, use_cloning_credentials, deadline_at
                     )
                 return await self._invoke_gemini(
-                    candidate, prompt_text, image_bytes, mime_type, use_cloning_credentials
+                    candidate, prompt_text, image_bytes, mime_type, use_cloning_credentials, deadline_at
                 )
             except Exception as exc:
                 last_err = exc
+                if not is_retryable_error(exc):
+                    raise
                 continue
         if last_err is None:
             raise HTTPException(status_code=500, detail="Model invocation failed")
@@ -233,6 +250,7 @@ class LlmProviderChain:
         image_bytes: Optional[bytes],
         mime_type: str,
         use_cloning_credentials: bool = False,
+        deadline_at: Optional[float] = None,
     ) -> Dict[str, Any]:
         keys = get_csv(app_config.flow2api_openai_api_keys)
         if use_cloning_credentials:
@@ -261,7 +279,7 @@ class LlmProviderChain:
                         "response_format": {"type": "json_object"},
                         "messages": [{"role": "user", "content": content}],
                     },
-                    timeout=120,
+                    timeout=_json_http_timeout(deadline_at),
                 )
                 if resp.status_code >= 400:
                     last_upstream = int(resp.status_code)
@@ -279,6 +297,7 @@ class LlmProviderChain:
         image_bytes: Optional[bytes],
         mime_type: str,
         use_cloning_credentials: bool = False,
+        deadline_at: Optional[float] = None,
     ) -> Dict[str, Any]:
         keys = get_csv(app_config.flow2api_openrouter_api_keys)
         if use_cloning_credentials:
@@ -316,7 +335,7 @@ class LlmProviderChain:
                         "response_format": {"type": "json_object"},
                         "messages": [{"role": "user", "content": content}],
                     },
-                    timeout=120,
+                    timeout=_json_http_timeout(deadline_at),
                 )
                 if resp.status_code >= 400:
                     last_upstream = int(resp.status_code)
@@ -334,6 +353,7 @@ class LlmProviderChain:
         image_bytes: Optional[bytes],
         mime_type: str,
         use_cloning_credentials: bool = False,
+        deadline_at: Optional[float] = None,
     ) -> Dict[str, Any]:
         keys = get_csv(app_config.flow2api_gemini_api_keys)
         if use_cloning_credentials:
@@ -352,7 +372,7 @@ class LlmProviderChain:
             body = {"contents": [{"parts": parts}], "generationConfig": {"responseMimeType": "application/json"}}
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
             async with AsyncSession() as session:
-                resp = await session.post(url, json=body, timeout=120)
+                resp = await session.post(url, json=body, timeout=_json_http_timeout(deadline_at))
                 if resp.status_code >= 400:
                     last_upstream = int(resp.status_code)
                     last_snippet = getattr(resp, "text", None) or ""
@@ -370,6 +390,7 @@ class LlmProviderChain:
         image_bytes: Optional[bytes],
         mime_type: str,
         use_cloning_credentials: bool = False,
+        deadline_at: Optional[float] = None,
     ) -> Dict[str, Any]:
         endpoint = str(app_config.flow2api_third_party_gemini_base_url or "").strip().rstrip("/")
         keys = get_csv(app_config.flow2api_third_party_gemini_api_keys)
@@ -402,7 +423,7 @@ class LlmProviderChain:
                         "response_format": {"type": "json_object"},
                         "messages": [{"role": "user", "content": content}],
                     },
-                    timeout=120,
+                    timeout=_json_http_timeout(deadline_at),
                 )
                 if resp.status_code >= 400:
                     last_upstream = int(resp.status_code)
@@ -420,6 +441,7 @@ class LlmProviderChain:
         image_bytes: Optional[bytes],
         mime_type: str,
         use_cloning_credentials: bool = False,
+        deadline_at: Optional[float] = None,
     ) -> Dict[str, Any]:
         account_id = str(app_config.cloudflare_account_id or "").strip()
         api_token = str(app_config.cloudflare_api_token or "").strip()
@@ -450,7 +472,7 @@ class LlmProviderChain:
                     "response_format": {"type": "json_object"},
                     "messages": [{"role": "user", "content": content}],
                 },
-                timeout=120,
+                timeout=_json_http_timeout(deadline_at),
             )
             if resp.status_code >= 400:
                 snippet = (resp.text or "").replace("\r\n", "\n").strip()

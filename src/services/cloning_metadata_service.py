@@ -2,6 +2,7 @@
 
 import base64
 import json
+import time
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -155,6 +156,18 @@ DEFAULT_TEMPLATE: Dict[str, Any] = {
     "metadata": {"series": "", "task": "", "scene_number": "", "tags": []},
 }
 
+CLONING_PROMPTS_DEADLINE_SECONDS = 105.0
+_MIN_CLONING_IO_TIMEOUT_SECONDS = 1.0
+
+
+def _cloning_remaining_timeout(deadline_at: Optional[float], default_timeout: float) -> float:
+    if deadline_at is None:
+        return default_timeout
+    remaining = float(deadline_at) - time.monotonic()
+    if remaining <= _MIN_CLONING_IO_TIMEOUT_SECONDS:
+        raise HTTPException(status_code=504, detail="Cloning prompt generation deadline exceeded")
+    return max(_MIN_CLONING_IO_TIMEOUT_SECONDS, min(default_timeout, remaining))
+
 
 def _template_text() -> str:
     return json.dumps(DEFAULT_TEMPLATE, ensure_ascii=False, indent=2)
@@ -220,7 +233,7 @@ def _has_meaningful_image_prompt_content(prompt: Dict[str, Any]) -> bool:
 def _ensure_meaningful_image_prompt(prompt: Dict[str, Any]) -> Dict[str, Any]:
     if not _has_meaningful_image_prompt_content(prompt):
         raise HTTPException(
-            status_code=502,
+            status_code=422,
             detail=(
                 "Model returned a blank cloning prompt. Expected at least one descriptive field "
                 "(scene, style, shot.composition, lighting.primary, or metadata.tags)."
@@ -233,10 +246,15 @@ class CloningMetadataService:
     def __init__(self, llm_chain: Optional[LlmProviderChain] = None) -> None:
         self._llm = llm_chain or LlmProviderChain()
 
-    async def _fetch_image(self, image_url: Optional[str], image_base64: Optional[str]) -> Tuple[bytes, str]:
+    async def _fetch_image(
+        self,
+        image_url: Optional[str],
+        image_base64: Optional[str],
+        deadline_at: Optional[float] = None,
+    ) -> Tuple[bytes, str]:
         if image_url:
             async with AsyncSession() as session:
-                resp = await session.get(image_url, timeout=60, verify=False)
+                resp = await session.get(image_url, timeout=_cloning_remaining_timeout(deadline_at, 60.0), verify=False)
                 if resp.status_code != 200 or not resp.content:
                     raise HTTPException(status_code=400, detail=f"Failed to fetch image: HTTP {resp.status_code}")
                 mime = resp.headers.get("content-type") or "image/jpeg"
@@ -404,8 +422,13 @@ class CloningMetadataService:
         selected_model = (model or app_config.flow2api_cloning_model or "gemini-2.5-flash").strip()
         retry_count = normalized_retry_count(app_config.flow2api_cloning_provider_retry_count)
         out: List[Dict[str, Any]] = []
+        deadline_at = time.monotonic() + CLONING_PROMPTS_DEADLINE_SECONDS
         for image in images:
-            image_bytes, mime_type = await self._fetch_image(image.get("image_url"), image.get("image_base64"))
+            image_bytes, mime_type = await self._fetch_image(
+                image.get("image_url"),
+                image.get("image_base64"),
+                deadline_at,
+            )
             prompt = self._build_clone_instruction(image)
             response_json = await self._llm.invoke_with_provider_chain(
                 providers=provider_chain,
@@ -416,6 +439,7 @@ class CloningMetadataService:
                 image_bytes=image_bytes,
                 mime_type=str(image.get("mimeType") or mime_type),
                 use_cloning_credentials=True,
+                deadline_at=deadline_at,
             )
             out.append(_ensure_meaningful_image_prompt(_normalize_image_prompt(response_json)))
         return {"prompts": out}
