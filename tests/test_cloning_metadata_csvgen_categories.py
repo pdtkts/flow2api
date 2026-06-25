@@ -229,5 +229,58 @@ class TestMetadataImageMimeHandling(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Do not say solid black background", prompt)
 
 
+class TestMetadataProviderRouting(unittest.IsolatedAsyncioTestCase):
+    def _cfg(self):
+        return SimpleNamespace(
+            flow2api_metadata_backend="gemini_native",
+            flow2api_metadata_provider_order="openrouter,cloudflare,gemini_native",
+            flow2api_metadata_enabled_providers="openrouter",
+            flow2api_metadata_provider_retry_count=0,
+            flow2api_metadata_primary_model="openrouter/auto",
+            flow2api_metadata_model="openrouter/auto",
+            flow2api_metadata_enabled_models="",
+            flow2api_metadata_fallback_models="",
+        )
+
+    async def test_without_explicit_backend_uses_enabled_provider_order(self):
+        llm = MagicMock()
+        llm.resolve_provider_chain.side_effect = cms.LlmProviderChain.resolve_provider_chain
+        llm.invoke_model_json = AsyncMock(
+            return_value={"metadataSets": [{"title": "Yellow tray cutout", "keywords": ["tray"], "description": ""}]}
+        )
+
+        with patch.object(cms, "app_config", self._cfg()):
+            svc = cms.CloningMetadataService(llm_chain=llm)
+            await svc.generate_metadata(
+                {
+                    "image_base64": base64.b64encode(b"\xff\xd8\xff").decode("ascii"),
+                    "mimeType": "image/jpeg",
+                    "metadataSettings": {"transparentBackground": True},
+                }
+            )
+
+        self.assertEqual(llm.invoke_model_json.await_args.kwargs["provider"], "openrouter")
+
+    async def test_explicit_backend_still_overrides_provider_order(self):
+        llm = MagicMock()
+        llm.resolve_provider_chain.side_effect = cms.LlmProviderChain.resolve_provider_chain
+        llm.invoke_model_json = AsyncMock(
+            return_value={"metadataSets": [{"title": "Yellow tray cutout", "keywords": ["tray"], "description": ""}]}
+        )
+
+        with patch.object(cms, "app_config", self._cfg()):
+            svc = cms.CloningMetadataService(llm_chain=llm)
+            await svc.generate_metadata(
+                {
+                    "backend": "cloudflare",
+                    "image_base64": base64.b64encode(b"\xff\xd8\xff").decode("ascii"),
+                    "mimeType": "image/jpeg",
+                    "metadataSettings": {"transparentBackground": True},
+                }
+            )
+
+        self.assertEqual(llm.invoke_model_json.await_args.kwargs["provider"], "cloudflare")
+
+
 if __name__ == "__main__":
     unittest.main()
