@@ -1,11 +1,59 @@
 """CSVGEN metadata: Adobe categories injection in outbound settings."""
 
 import base64
+import json
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from src.core.route_log_sanitize import dumps_for_request_log, sanitize_for_request_log
 from src.services import cloning_metadata_service as cms
+
+
+class TestRouteLogImagePreviewSanitize(unittest.TestCase):
+    def test_image_base64_is_redacted_but_preview_is_available(self):
+        payload = {
+            "image_base64": "iVBORw0KGgo=",
+            "mimeType": "image/png",
+            "metadataSettings": {"transparentBackground": True},
+        }
+
+        sanitized = sanitize_for_request_log(payload)
+
+        self.assertEqual(sanitized["image_base64"], "<redacted>")
+        self.assertEqual(sanitized["imagePreview"]["source"], "image_base64")
+        self.assertEqual(sanitized["imagePreview"]["mimeType"], "image/png")
+        self.assertEqual(sanitized["imagePreview"]["dataUrl"], "data:image/png;base64,iVBORw0KGgo=")
+        self.assertEqual(sanitized["imagePreview"]["base64Length"], len("iVBORw0KGgo="))
+
+    def test_image_data_url_uses_embedded_mime_for_preview(self):
+        payload = {
+            "image_base64": "data:image/webp;base64, AAAA ",
+            "metadataSettings": {},
+        }
+
+        sanitized = sanitize_for_request_log(payload)
+
+        self.assertEqual(sanitized["image_base64"], "<redacted>")
+        self.assertEqual(sanitized["imagePreview"]["mimeType"], "image/webp")
+        self.assertEqual(sanitized["imagePreview"]["dataUrl"], "data:image/webp;base64,AAAA")
+
+    def test_image_url_gets_preview_without_exposing_sensitive_fields(self):
+        payload = {"image_url": "https://example.test/image.png", "access_token": "secret"}
+
+        dumped = json.loads(dumps_for_request_log(payload))
+
+        self.assertEqual(dumped["access_token"], "<redacted>")
+        self.assertEqual(dumped["imagePreview"], {"source": "image_url", "url": "https://example.test/image.png"})
+
+    def test_non_image_sensitive_fields_remain_redacted(self):
+        payload = {"embedding": [1, 2, 3], "session_token": "abc", "text": "ok"}
+
+        sanitized = sanitize_for_request_log(payload)
+
+        self.assertEqual(sanitized["embedding"], "<redacted>")
+        self.assertEqual(sanitized["session_token"], "<redacted>")
+        self.assertEqual(sanitized["text"], "ok")
 
 
 class TestAdobeCategoriesForCsvgenSettings(unittest.TestCase):
