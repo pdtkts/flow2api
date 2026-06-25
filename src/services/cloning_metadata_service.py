@@ -35,6 +35,34 @@ ADOBE_STOCK_METADATA_CATEGORIES: Tuple[Tuple[int, str], ...] = (
 )
 
 
+def _normalize_image_mime_type(value: Optional[str]) -> Optional[str]:
+    mime = str(value or "").split(";", 1)[0].strip().lower()
+    if not mime or "/" not in mime:
+        return None
+    if mime in {"image/jpg", "image/pjpeg"}:
+        return "image/jpeg"
+    if mime.startswith("image/"):
+        return mime
+    return None
+
+
+def _detect_image_mime_type(image_bytes: bytes, fallback: Optional[str] = None) -> str:
+    hinted = _normalize_image_mime_type(fallback)
+    if hinted:
+        return hinted
+    if image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if image_bytes.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if image_bytes[:4] == b"RIFF" and image_bytes[8:12] == b"WEBP":
+        return "image/webp"
+    if image_bytes.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if image_bytes.startswith(b"<svg") or b"<svg" in image_bytes[:512].lower():
+        return "image/svg+xml"
+    return "image/jpeg"
+
+
 def _adobe_stock_category_table_prompt_lines() -> str:
     return "\n".join(f"{cid} — {name}" for cid, name in ADOBE_STOCK_METADATA_CATEGORIES)
 
@@ -251,20 +279,28 @@ class CloningMetadataService:
         image_url: Optional[str],
         image_base64: Optional[str],
         deadline_at: Optional[float] = None,
+        mime_type_hint: Optional[str] = None,
     ) -> Tuple[bytes, str]:
         if image_url:
             async with AsyncSession() as session:
                 resp = await session.get(image_url, timeout=_cloning_remaining_timeout(deadline_at, 60.0), verify=False)
                 if resp.status_code != 200 or not resp.content:
                     raise HTTPException(status_code=400, detail=f"Failed to fetch image: HTTP {resp.status_code}")
-                mime = resp.headers.get("content-type") or "image/jpeg"
-                return bytes(resp.content), mime
+                content = bytes(resp.content)
+                mime = _detect_image_mime_type(content, resp.headers.get("content-type") or mime_type_hint)
+                return content, mime
         if image_base64:
             raw = image_base64.strip()
+            data_url_mime: Optional[str] = None
+            if raw.lower().startswith("data:"):
+                header = raw.split(",", 1)[0]
+                if ";base64" in header.lower():
+                    data_url_mime = header[5:].split(";", 1)[0]
             if "base64," in raw:
                 raw = raw.split("base64,", 1)[1]
             try:
-                return base64.b64decode(raw), "image/jpeg"
+                content = base64.b64decode(raw)
+                return content, _detect_image_mime_type(content, mime_type_hint or data_url_mime)
             except Exception as exc:
                 raise HTTPException(status_code=400, detail=f"Invalid base64 image: {exc}") from exc
         raise HTTPException(status_code=400, detail="One image source is required")
@@ -345,8 +381,8 @@ class CloningMetadataService:
             else ""
         )
         bg_line = (
-            "When the asset is clearly subject on transparency (cutout), you may use isolated on transparent style wording in title."
-            if bool(meta.get("transparentBackground")) and dna_no_bg
+            "When the asset is clearly subject on transparency (cutout), you may use isolated on transparent background or cutout wording in title. Do not say solid black background, black background, white background, or any other background color unless those pixels are truly visible in the attached image."
+            if bool(meta.get("transparentBackground")) or dna_no_bg
             else "Do not suggest transparent cutout language unless the image is clearly transparent."
         )
         custom_cfg = meta.get("customPrompt") or {}
@@ -428,6 +464,7 @@ class CloningMetadataService:
                 image.get("image_url"),
                 image.get("image_base64"),
                 deadline_at,
+                image.get("mimeType") or image.get("mime_type"),
             )
             prompt = self._build_clone_instruction(image)
             response_json = await self._llm.invoke_with_provider_chain(
@@ -475,7 +512,11 @@ class CloningMetadataService:
         image_bytes = None
         mime_type = "image/jpeg"
         if payload.get("image_base64"):
-            image_bytes, mime_type = await self._fetch_image(None, payload.get("image_base64"))
+            image_bytes, mime_type = await self._fetch_image(
+                None,
+                payload.get("image_base64"),
+                mime_type_hint=payload.get("mimeType") or payload.get("mime_type"),
+            )
         response_json = await self._llm.invoke_with_provider_chain(
             providers=provider_chain,
             retry_count=retry_count,
@@ -552,7 +593,11 @@ class CloningMetadataService:
 
         model = str(payload.get("model") or configured_primary).strip()
         fallback_models = payload.get("fallbackModels") or default_fallback_chain
-        image_bytes, mime_type = await self._fetch_image(payload.get("image_url"), payload.get("image_base64"))
+        image_bytes, mime_type = await self._fetch_image(
+            payload.get("image_url"),
+            payload.get("image_base64"),
+            mime_type_hint=payload.get("mimeType") or payload.get("mime_type"),
+        )
         metadata_settings = payload.get("metadataSettings") or {}
         include_category = bool(metadata_settings.get("includeCategory"))
         prompt = self._build_metadata_prompt(metadata_settings, bool(payload.get("dnaNoBgWorkflowActive")))
