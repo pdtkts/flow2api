@@ -48,6 +48,7 @@ logs.txt
 # Environment
 .env
 .env.local
+.env.agent-gateway
 
 # Config (optional)
 # config/setting.toml
@@ -77,3 +78,4 @@ tests/
 /static/
 
 extension.zip
+extension/flow2api_mod.zip
