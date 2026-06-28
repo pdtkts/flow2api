@@ -1,4 +1,4 @@
-import type { GeneratedMetadata, ProcessingMode } from "../types";
+import type { GeneratedMetadata, Preferences, ProcessingMode } from "../types";
 
 export const UPLOAD_IMAGES = ".upload-tile__thumbnail.upload-tile__thumbnail--portrait, .upload-tile__thumbnail.upload-tile__thumbnail--landscape";
 export const PORTFOLIO_IMAGES = ".content-thumbnail__img";
@@ -36,6 +36,80 @@ function enter(element: HTMLElement): void {
   element.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", keyCode: 13, bubbles: true }));
 }
 
+function normalizedText(value: string | null | undefined): string {
+  return (value || "").replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+function checkboxLabel(input: HTMLInputElement): string {
+  const explicit = input.id
+    ? Array.from(document.querySelectorAll<HTMLLabelElement>("label[for]")).find((label) => label.htmlFor === input.id) ?? null
+    : null;
+  return normalizedText([
+    input.getAttribute("aria-label"),
+    explicit?.textContent,
+    input.closest("label")?.textContent,
+    input.parentElement?.textContent,
+  ].filter(Boolean).join(" "));
+}
+
+function findCheckbox(pattern: RegExp): HTMLInputElement | null {
+  return Array.from(document.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'))
+    .find((input) => pattern.test(checkboxLabel(input))) ?? null;
+}
+
+async function waitForCheckbox(pattern: RegExp, timeout = 5_000): Promise<HTMLInputElement | null> {
+  const started = Date.now();
+  while (Date.now() - started < timeout) {
+    const input = findCheckbox(pattern);
+    if (input) return input;
+    await delay(100);
+  }
+  return null;
+}
+
+async function setCheckboxState(input: HTMLInputElement, checked: boolean, name: string): Promise<void> {
+  if (input.checked !== checked) input.click();
+  await delay(100);
+  if (input.checked !== checked) throw new Error(`Adobe did not apply the ${name} declaration.`);
+}
+
+async function chooseNoRecognizablePeopleOrProperty(): Promise<boolean> {
+  const candidates = Array.from(document.querySelectorAll<HTMLElement>("fieldset, section, div"))
+    .filter((element) => normalizedText(element.textContent).includes("recognizable people or property"))
+    .sort((a, b) => (a.textContent?.length || 0) - (b.textContent?.length || 0));
+  const container = candidates[0];
+  if (!container) return false;
+  const noInput = Array.from(container.querySelectorAll<HTMLInputElement>('input[type="radio"], input[type="checkbox"]'))
+    .find((input) => normalizedText(input.value) === "no" || normalizedText(input.getAttribute("aria-label")) === "no");
+  if (noInput) {
+    if (!noInput.checked) noInput.click();
+    await delay(100);
+    return noInput.checked;
+  }
+  const noButton = Array.from(container.querySelectorAll<HTMLButtonElement>("button"))
+    .find((button) => normalizedText(button.textContent) === "no" || normalizedText(button.getAttribute("aria-label")) === "no");
+  if (!noButton) return false;
+  noButton.click();
+  await delay(100);
+  return true;
+}
+
+export async function applyAdobeAiDeclarations(preferences: Preferences): Promise<void> {
+  const ai = await waitForCheckbox(/created using generative ai tools?/i, 5_000);
+  if (!ai) throw new Error('Adobe checkbox "Created using generative AI tools" was not found.');
+  await setCheckboxState(ai, preferences.markGenerativeAi, "generative AI");
+  if (!preferences.markGenerativeAi) return;
+
+  const fictional = await waitForCheckbox(/people and property are fictional/i, 2_500);
+  if (fictional) {
+    await setCheckboxState(fictional, preferences.confirmFictionalPeopleProperty, "fictional people and property");
+    return;
+  }
+  if (preferences.confirmFictionalPeopleProperty && !(await chooseNoRecognizablePeopleOrProperty())) {
+    throw new Error("Adobe fictional people/property control was not found.");
+  }
+}
+
 export function detectAssetType(mode: ProcessingMode): string {
   if (mode === "portfolio") {
     return document.querySelector<HTMLElement>('[data-t="portfolio-detail-panel-format"]')?.textContent?.trim().toLowerCase() || "photo";
@@ -62,16 +136,49 @@ async function chooseCategory(category: string): Promise<void> {
   if (select) setNativeValue(select, category);
 }
 
-async function saveAdobeForm(): Promise<void> {
-  const button = document.querySelector<HTMLButtonElement>('.button--action[type="submit"], button[type="submit"][data-test="save-metadata"], button.button--action');
-  if (!button) throw new Error("Adobe save button was not found.");
-  button.click();
-  await delay(500);
-  const confirm = document.querySelector<HTMLButtonElement>('button[data-variant="accent"][data-style="fill"], .dialog .button--action[type="submit"]');
-  if (confirm) {
-    confirm.click();
-    await delay(600);
+function saveControlText(control: HTMLButtonElement | HTMLInputElement): string {
+  return normalizedText(control instanceof HTMLInputElement ? control.value || control.getAttribute("aria-label") : control.textContent || control.getAttribute("aria-label"));
+}
+
+function findSaveWorkControl(): HTMLButtonElement | HTMLInputElement | null {
+  const controls = Array.from(document.querySelectorAll<HTMLButtonElement | HTMLInputElement>('button, input[type="submit"], input[type="button"]'));
+  return controls.find((control) => saveControlText(control) === "save work")
+    ?? document.querySelector<HTMLButtonElement>('button[type="submit"][data-test="save-metadata"], .button--action[type="submit"], button.button--action');
+}
+
+function hasSavedConfirmation(): boolean {
+  return Array.from(document.querySelectorAll<HTMLElement>('[role="status"], [role="alert"], [class*="toast"], [class*="notification"]'))
+    .some((element) => /(?:work|changes|metadata) saved|saved successfully/i.test(normalizedText(element.textContent)));
+}
+
+export async function saveAdobeForm(): Promise<void> {
+  const started = Date.now();
+  let button = findSaveWorkControl();
+  while ((!button || button.disabled || button.getAttribute("aria-disabled") === "true") && Date.now() - started < 8_000) {
+    await delay(100);
+    button = findSaveWorkControl();
   }
+  if (!button) throw new Error('Adobe "Save work" button was not found.');
+  if (button.disabled || button.getAttribute("aria-disabled") === "true") throw new Error('Adobe "Save work" button did not become available.');
+
+  button.click();
+  const clickedAt = Date.now();
+  let sawSavingState = false;
+  while (Date.now() - clickedAt < 10_000) {
+    if (hasSavedConfirmation()) return;
+    const current = findSaveWorkControl() ?? button;
+    const busy = current.disabled
+      || current.getAttribute("aria-disabled") === "true"
+      || current.getAttribute("aria-busy") === "true"
+      || /saving|saved/.test(saveControlText(current));
+    if (busy) sawSavingState = true;
+    if (sawSavingState && Date.now() - clickedAt >= 500) {
+      if (current.disabled || current.getAttribute("aria-disabled") === "true") return;
+      if (current.getAttribute("aria-busy") !== "true" && !/saving/.test(saveControlText(current))) return;
+    }
+    await delay(100);
+  }
+  throw new Error('Adobe did not confirm "Save work" completion.');
 }
 
 export async function openAsset(image: HTMLImageElement, mode: ProcessingMode): Promise<void> {
@@ -81,7 +188,7 @@ export async function openAsset(image: HTMLImageElement, mode: ProcessingMode): 
   else await waitFor(".editable__content, .keywords-section, .editable__pencil, .content-detail", 10_000);
 }
 
-export async function applyUploadMetadata(metadata: GeneratedMetadata): Promise<void> {
+export async function applyUploadMetadata(metadata: GeneratedMetadata, preferences: Preferences, onSaving?: () => void | Promise<void>): Promise<void> {
   const title = await waitFor<HTMLTextAreaElement>(TITLE_INPUTS);
   const keywords = await waitFor<HTMLTextAreaElement>(KEYWORD_INPUTS);
   setNativeValue(title, metadata.title);
@@ -90,10 +197,12 @@ export async function applyUploadMetadata(metadata: GeneratedMetadata): Promise<
   enter(keywords);
   await delay(250);
   await chooseCategory(metadata.category);
+  await applyAdobeAiDeclarations(preferences);
+  await onSaving?.();
   await saveAdobeForm();
 }
 
-export async function applyPortfolioMetadata(metadata: GeneratedMetadata): Promise<void> {
+export async function applyPortfolioMetadata(metadata: GeneratedMetadata, onSaving?: () => void | Promise<void>): Promise<void> {
   const titlePencil = await waitFor<HTMLElement>(".editable__pencil");
   titlePencil.click();
   const titleInput = await waitFor<HTMLInputElement>(".input--full");
@@ -118,6 +227,7 @@ export async function applyPortfolioMetadata(metadata: GeneratedMetadata): Promi
   document.querySelector<HTMLElement>(".button.button--dialog")?.click();
   await delay(250);
   await chooseCategory(metadata.category);
+  await onSaving?.();
   await saveAdobeForm();
 }
 

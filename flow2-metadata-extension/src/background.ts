@@ -1,6 +1,7 @@
 import { Flow2ApiError, generateMetadata, validateSession } from "./api";
+import { ADOBE_UPLOADS_URL } from "./adobe-url";
 import { applyTitleRules } from "./title";
-import { clearConnection, getConnection, getPreferences, invalidateConnection, saveConnection } from "./storage";
+import { clearConnection, DEFAULT_RUNTIME, getConnection, getPreferences, invalidateConnection, saveConnection, saveRuntimeState } from "./storage";
 import { normalizeBaseUrl } from "./url-policy";
 
 interface ExtensionMessage {
@@ -19,11 +20,17 @@ chrome.action.onClicked.addListener((tab) => {
 });
 
 chrome.runtime.onInstalled.addListener(() => {
+  const uploadsUrl = new URL(ADOBE_UPLOADS_URL);
   chrome.declarativeContent.onPageChanged.removeRules(undefined, () => {
     chrome.declarativeContent.onPageChanged.addRules([
       {
         conditions: [
-          new chrome.declarativeContent.PageStateMatcher({ pageUrl: { hostSuffix: "contributor.stock.adobe.com", schemes: ["https"] } }),
+          new chrome.declarativeContent.PageStateMatcher({
+            pageUrl: { hostEquals: uploadsUrl.hostname, pathEquals: uploadsUrl.pathname, schemes: ["https"] },
+          }),
+          new chrome.declarativeContent.PageStateMatcher({
+            pageUrl: { hostEquals: uploadsUrl.hostname, pathEquals: `${uploadsUrl.pathname}/`, schemes: ["https"] },
+          }),
         ],
         actions: [new chrome.declarativeContent.ShowAction()],
       },
@@ -66,6 +73,7 @@ async function handleMessage(message: ExtensionMessage): Promise<unknown> {
   if (message.type === "GET_CONNECTION_STATUS") return connectionStatus(Boolean(message.action === "revalidate"));
   if (message.type === "DISCONNECT") {
     await clearConnection();
+    await saveRuntimeState({ ...DEFAULT_RUNTIME, activities: [] });
     return { success: true };
   }
 

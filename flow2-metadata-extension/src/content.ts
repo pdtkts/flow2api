@@ -1,4 +1,5 @@
 import { imageCount, recoverAfterNavigation, startProcessing, stopProcessing } from "./adobe/automation";
+import { isSupportedAdobeUrl } from "./adobe-url";
 import type { ProcessingMode } from "./types";
 
 interface ContentMessage {
@@ -8,7 +9,7 @@ interface ContentMessage {
   endIndex?: number;
 }
 
-chrome.runtime.onMessage.addListener((message: ContentMessage, _sender, sendResponse) => {
+if (isSupportedAdobeUrl(location.href)) chrome.runtime.onMessage.addListener((message: ContentMessage, _sender, sendResponse) => {
   if (message.action === "ping") {
     sendResponse({ success: true, status: "alive" });
     return false;
@@ -38,4 +39,4 @@ chrome.runtime.onMessage.addListener((message: ContentMessage, _sender, sendResp
   return false;
 });
 
-void recoverAfterNavigation();
+if (isSupportedAdobeUrl(location.href)) void recoverAfterNavigation();

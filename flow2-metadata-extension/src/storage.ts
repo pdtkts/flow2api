@@ -1,4 +1,6 @@
 import type { Connection, Preferences, RuntimeState } from "./types";
+import { DEFAULT_PREFERENCES, migratePreferences } from "./preferences";
+export { DEFAULT_PREFERENCES } from "./preferences";
 
 const CONNECTION_KEY = "flow2MetadataConnection";
 const PREFERENCES_KEY = "flow2MetadataPreferences";
@@ -6,28 +8,17 @@ const RUNTIME_KEY = "flow2MetadataRuntime";
 
 export const DEFAULT_BASE_URL = "https://flow-api.prismacreative.online";
 
-export const DEFAULT_PREFERENCES: Preferences = {
-  mode: "upload",
-  autoCategory: false,
-  language: "en",
-  titleSuffix: "none",
-  titlePrefix: "",
-  customTitleSuffix: "",
-  limitsEnabled: false,
-  titleMin: 80,
-  titleMax: 150,
-  keywordMin: 30,
-  keywordMax: 40,
-  customPromptEnabled: false,
-  customPrompt: "",
-};
-
 export const DEFAULT_RUNTIME: RuntimeState = {
   processing: false,
   stopped: false,
+  phase: "idle",
   processed: 0,
   successes: 0,
   currentPage: 1,
+  currentIndex: 0,
+  pageTotal: 0,
+  targetTotal: null,
+  activities: [],
   message: "Ready to start",
 };
 
@@ -51,7 +42,7 @@ export async function clearConnection(): Promise<void> {
 
 export async function getPreferences(): Promise<Preferences> {
   const result = await chrome.storage.local.get(PREFERENCES_KEY);
-  return { ...DEFAULT_PREFERENCES, ...(result[PREFERENCES_KEY] as Partial<Preferences> | undefined) };
+  return migratePreferences(result[PREFERENCES_KEY]);
 }
 
 export async function savePreferences(preferences: Preferences): Promise<void> {
@@ -60,7 +51,11 @@ export async function savePreferences(preferences: Preferences): Promise<void> {
 
 export async function getRuntimeState(): Promise<RuntimeState> {
   const result = await chrome.storage.local.get(RUNTIME_KEY);
-  return { ...DEFAULT_RUNTIME, ...(result[RUNTIME_KEY] as Partial<RuntimeState> | undefined) };
+  const stored = result[RUNTIME_KEY] as Partial<RuntimeState> | undefined;
+  const state = { ...DEFAULT_RUNTIME, ...stored };
+  if (!stored?.phase) state.phase = state.processing ? "running" : state.stopped ? "paused" : "idle";
+  if (!Array.isArray(state.activities)) state.activities = [];
+  return state;
 }
 
 export async function saveRuntimeState(state: RuntimeState): Promise<void> {

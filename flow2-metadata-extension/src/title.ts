@@ -41,5 +41,5 @@ export function expandCustomPrompt(text: string, preferences: Preferences, asset
   return text
     .replaceAll("{language}", languageNames[preferences.language])
     .replaceAll("{fileType}", assetType || "photo")
-    .replaceAll("{category}", preferences.autoCategory ? categoryInstruction : "");
+    .replaceAll("{category}", preferences.includeCategory ? categoryInstruction : "");
 }

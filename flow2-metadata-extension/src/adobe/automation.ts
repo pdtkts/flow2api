@@ -1,5 +1,6 @@
-import { getRuntimeState, saveRuntimeState } from "../storage";
-import type { GeneratedMetadata, ProcessingMode, RuntimeState } from "../types";
+import { activityFor, upsertActivity } from "../runtime";
+import { getPreferences, getRuntimeState, saveRuntimeState } from "../storage";
+import type { ActivityPhase, GeneratedMetadata, ProcessingMode, RuntimeState } from "../types";
 import { addProcessingOverlay, applyPortfolioMetadata, applyUploadMetadata, assetImages, delay, detectAssetType, nextPageButton, openAsset } from "./dom";
 
 const JOB_KEY = "flow2MetadataJob";
@@ -15,6 +16,8 @@ interface JobState {
 
 let running = false;
 let stopRequested = false;
+let stopAsError = false;
+let stopMessage = "";
 
 async function updateRuntime(patch: Partial<RuntimeState>): Promise<RuntimeState> {
   const state = { ...await getRuntimeState(), ...patch };
@@ -30,6 +33,17 @@ async function saveJob(job: JobState): Promise<void> {
 async function getJob(): Promise<JobState | null> {
   const value = await chrome.storage.local.get(JOB_KEY);
   return (value[JOB_KEY] as JobState | undefined) ?? null;
+}
+
+async function updateActivity(
+  assetNumber: number,
+  phase: ActivityPhase,
+  message: string,
+  patch: Partial<RuntimeState> = {},
+): Promise<RuntimeState> {
+  const current = await getRuntimeState();
+  const activity = activityFor(current, assetNumber, phase, message);
+  return updateRuntime({ ...patch, activities: upsertActivity(current.activities, activity) });
 }
 
 async function generate(image: HTMLImageElement, mode: ProcessingMode): Promise<GeneratedMetadata> {
@@ -51,28 +65,56 @@ async function processPage(job: JobState): Promise<void> {
 
   for (let index = first; index < limit && !stopRequested; index += 1) {
     const image = images[index];
+    const assetNumber = index + 1;
     const removeOverlay = addProcessingOverlay(image, index, limit);
-    await updateRuntime({ processing: true, message: `Processing image ${index + 1} of ${limit}` });
+    await updateActivity(assetNumber, "generating", "Generating metadata", {
+      processing: true,
+      stopped: false,
+      phase: "running",
+      currentIndex: assetNumber,
+      pageTotal: limit,
+      message: `Generating metadata for asset ${assetNumber} of ${limit}`,
+    });
     try {
       await openAsset(image, job.mode);
       const metadata = await generate(image, job.mode);
-      if (stopRequested) break;
-      if (job.mode === "upload") await applyUploadMetadata(metadata);
-      else await applyPortfolioMetadata(metadata);
+      if (stopRequested) {
+        await updateActivity(assetNumber, "error", "Paused before Adobe was updated");
+        break;
+      }
+      await updateActivity(assetNumber, "applying", "Applying metadata to Adobe", {
+        message: `Applying metadata to asset ${assetNumber} of ${limit}`,
+      });
+      const preferences = await getPreferences();
+      const onSaving = () => updateActivity(assetNumber, "saving", "Saving work in Adobe", {
+        message: `Saving asset ${assetNumber} of ${limit} in Adobe`,
+      });
+      if (job.mode === "upload") await applyUploadMetadata(metadata, preferences, onSaving);
+      else await applyPortfolioMetadata(metadata, onSaving);
       consecutiveFailures = 0;
       const current = await getRuntimeState();
-      await updateRuntime({ processed: current.processed + 1, successes: current.successes + 1 });
+      await updateActivity(assetNumber, "success", "Metadata applied", {
+        processed: current.processed + 1,
+        successes: current.successes + 1,
+      });
     } catch (error) {
       consecutiveFailures += 1;
       const current = await getRuntimeState();
-      const message = error instanceof Error ? error.message : "Image processing failed.";
-      await updateRuntime({ processed: current.processed + 1, message: `Image ${index + 1} failed: ${message}` });
+      const message = error instanceof Error ? error.message : "Asset processing failed.";
+      await updateActivity(assetNumber, "error", message, {
+        processed: current.processed + 1,
+        message: `Asset ${assetNumber} failed: ${message}`,
+      });
       if ((error as Error & { fatal?: boolean }).fatal) {
         void chrome.runtime.sendMessage({ type: "CONNECTION_INVALID" });
         stopRequested = true;
+        stopAsError = true;
+        stopMessage = message;
       } else if (consecutiveFailures >= 3) {
         stopRequested = true;
-        await updateRuntime({ message: "Stopped after three consecutive image failures." });
+        stopAsError = true;
+        stopMessage = "Stopped after three consecutive asset failures.";
+        await updateRuntime({ message: stopMessage });
       }
     } finally {
       removeOverlay();
@@ -89,7 +131,12 @@ async function processPage(job: JobState): Promise<void> {
   job.nextIndex = 0;
   job.startIndex = 1;
   await saveJob(job);
-  await updateRuntime({ currentPage: (await getRuntimeState()).currentPage + 1, message: "Moving to the next page…" });
+  await updateRuntime({
+    currentPage: (await getRuntimeState()).currentPage + 1,
+    currentIndex: 0,
+    pageTotal: 0,
+    message: "Moving to the next page…",
+  });
   const previous = images[0]?.src;
   next.click();
   for (let attempt = 0; attempt < 40; attempt += 1) {
@@ -108,20 +155,43 @@ export async function startProcessing(mode: ProcessingMode, startIndex: number, 
   if (running) throw new Error("Processing is already running.");
   running = true;
   stopRequested = false;
+  stopAsError = false;
+  stopMessage = "";
   const existing = recovered ? await getJob() : null;
   const job: JobState = existing ?? { active: true, navigating: false, mode, startIndex, endIndex, nextIndex: Math.max(0, startIndex - 1) };
   job.active = true;
   job.navigating = false;
   await saveJob(job);
-  if (!recovered) await updateRuntime({ processing: true, stopped: false, processed: 0, successes: 0, currentPage: 1, message: "Starting processing…" });
+  if (!recovered) {
+    await updateRuntime({
+      processing: true,
+      stopped: false,
+      phase: "starting",
+      processed: 0,
+      successes: 0,
+      currentPage: 1,
+      currentIndex: 0,
+      pageTotal: 0,
+      targetTotal: endIndex > 0 ? Math.max(0, endIndex - startIndex + 1) : null,
+      activities: [],
+      message: "Preparing the run…",
+    });
+  } else {
+    await updateRuntime({ processing: true, stopped: false, phase: "starting", message: "Resuming the run…" });
+  }
   try {
     await processPage(job);
     const state = await getRuntimeState();
     const stopped = stopRequested;
-    await updateRuntime({ processing: false, stopped, message: stopped ? "Processing stopped." : `Complete: ${state.successes} of ${state.processed} images updated.` });
+    await updateRuntime({
+      processing: false,
+      stopped,
+      phase: stopped ? (stopAsError ? "error" : "paused") : "completed",
+      message: stopped ? (stopMessage || "Run paused.") : `Complete: ${state.successes} of ${state.processed} assets updated.`,
+    });
     if (!stopped) void chrome.runtime.sendMessage({ type: "NOTIFY", title: "Flow2 Metadata", message: `Completed ${state.successes} of ${state.processed} images.` });
   } catch (error) {
-    await updateRuntime({ processing: false, stopped: true, message: error instanceof Error ? error.message : "Processing failed." });
+    await updateRuntime({ processing: false, stopped: true, phase: "error", message: error instanceof Error ? error.message : "Processing failed." });
   } finally {
     job.active = false;
     job.navigating = false;
@@ -132,9 +202,11 @@ export async function startProcessing(mode: ProcessingMode, startIndex: number, 
 
 export async function stopProcessing(): Promise<void> {
   stopRequested = true;
+  stopAsError = false;
+  stopMessage = "Run paused.";
   const job = await getJob();
   if (job) await saveJob({ ...job, active: false, navigating: false });
-  await updateRuntime({ processing: false, stopped: true, message: "Stopping processing…" });
+  await updateRuntime({ processing: true, stopped: false, phase: "pausing", message: "Finishing the current step before pausing…" });
 }
 
 export async function recoverAfterNavigation(): Promise<void> {
@@ -144,7 +216,7 @@ export async function recoverAfterNavigation(): Promise<void> {
     await delay(700);
     void startProcessing(job.mode, 1, job.endIndex, true);
   } else if (runtime.processing) {
-    await updateRuntime({ processing: false, stopped: true, message: "Page refresh detected. Processing stopped safely." });
+    await updateRuntime({ processing: false, stopped: true, phase: "paused", message: "Page refresh detected. Processing paused safely." });
   }
 }
 

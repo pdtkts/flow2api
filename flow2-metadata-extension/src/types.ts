@@ -1,6 +1,19 @@
 export type ProcessingMode = "upload" | "portfolio";
 export type LanguageCode = "en" | "fr" | "de" | "es" | "it" | "pt" | "ja" | "pl" | "ko";
 export type TitleSuffix = "none" | "transparent" | "white" | "png_transparent";
+export type TitleStyle = "seo-optimized" | "descriptive" | "creative" | "commercial";
+export type KeywordStyle = "single-word" | "double-word" | "mixed";
+export type RunPhase = "idle" | "starting" | "running" | "pausing" | "paused" | "completed" | "error";
+export type ActivityPhase = "generating" | "applying" | "saving" | "success" | "error";
+
+export interface RunActivity {
+  id: string;
+  assetNumber: number;
+  page: number;
+  phase: ActivityPhase;
+  message: string;
+  updatedAt: number;
+}
 
 export interface Connection {
   baseUrl: string;
@@ -11,16 +24,25 @@ export interface Connection {
 
 export interface Preferences {
   mode: ProcessingMode;
-  autoCategory: boolean;
+  includeCategory: boolean;
   language: LanguageCode;
   titleSuffix: TitleSuffix;
   titlePrefix: string;
   customTitleSuffix: string;
-  limitsEnabled: boolean;
   titleMin: number;
   titleMax: number;
   keywordMin: number;
   keywordMax: number;
+  descriptionMin: number;
+  descriptionMax: number;
+  platforms: string[];
+  customPlatforms: string;
+  includeReleases: boolean;
+  titleStyle: TitleStyle;
+  keywordStyle: KeywordStyle;
+  transparentBackground: boolean;
+  markGenerativeAi: boolean;
+  confirmFictionalPeopleProperty: boolean;
   customPromptEnabled: boolean;
   customPrompt: string;
 }
@@ -28,9 +50,14 @@ export interface Preferences {
 export interface RuntimeState {
   processing: boolean;
   stopped: boolean;
+  phase: RunPhase;
   processed: number;
   successes: number;
   currentPage: number;
+  currentIndex: number;
+  pageTotal: number;
+  targetTotal: number | null;
+  activities: RunActivity[];
   message: string;
 }
 

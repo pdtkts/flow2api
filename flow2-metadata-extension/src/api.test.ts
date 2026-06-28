@@ -42,4 +42,25 @@ describe("Flow2 API client", () => {
       .rejects.toMatchObject({ status: 401, message: "Invalid API key" });
     expect(fetchMock).toHaveBeenCalledOnce();
   });
+
+  it("downloads public Adobe CDN images without credentials", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(new Blob([new Uint8Array([255, 216, 255])], { type: "image/jpeg" }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        optionA: { title: "Public asset", keywords: "asset, stock" },
+      }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await generateMetadata(
+      { baseUrl: "https://api.example.test", apiKey: "secret", keyLabel: "team", validatedAt: 1 },
+      "https://as1.ftcdn.net/example.jpg",
+      "photo",
+      DEFAULT_PREFERENCES,
+    );
+
+    expect(fetchMock.mock.calls[0]).toEqual([
+      "https://as1.ftcdn.net/example.jpg",
+      { credentials: "omit", mode: "cors" },
+    ]);
+  });
 });

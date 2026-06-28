@@ -1,4 +1,5 @@
 import { normalizeMetadataResponse } from "./adapter";
+import { keywordTypesFor, normalizePlatforms } from "./preferences";
 import { expandCustomPrompt } from "./title";
 import type { Connection, Flow2MetadataResponse, GeneratedMetadata, Preferences, SessionResponse } from "./types";
 
@@ -69,7 +70,10 @@ export async function imageUrlToBase64(imageUrl: string): Promise<{ base64: stri
     if (!match) throw new Error("Unsupported image data URL.");
     return { mimeType: match[1], base64: match[2] };
   }
-  const response = await fetch(imageUrl, { credentials: "include" });
+  // Adobe's public ftcdn.net thumbnails allow cross-origin reads with `*`.
+  // Sending cookies makes that response invalid under CORS, and these public
+  // asset URLs do not need contributor-session credentials.
+  const response = await fetch(imageUrl, { credentials: "omit", mode: "cors" });
   if (!response.ok) throw new Error(`Unable to download Adobe image (HTTP ${response.status}).`);
   const blob = await response.blob();
   if (!blob.size) throw new Error("Adobe image is empty.");
@@ -88,28 +92,28 @@ export async function generateMetadata(
   preferences: Preferences,
 ): Promise<GeneratedMetadata> {
   const image = await imageUrlToBase64(imageUrl);
-  const titleMin = preferences.limitsEnabled ? preferences.titleMin : 80;
-  const titleMax = preferences.limitsEnabled ? preferences.titleMax : 150;
-  const keywordMin = preferences.limitsEnabled ? preferences.keywordMin : 30;
-  const keywordMax = preferences.limitsEnabled ? preferences.keywordMax : 40;
+  const { titleMin, titleMax, keywordMin, keywordMax, descriptionMin, descriptionMax } = preferences;
   const customText = expandCustomPrompt(preferences.customPrompt, preferences, assetType);
+  const transparentBackground = preferences.transparentBackground
+    || preferences.titleSuffix === "transparent"
+    || preferences.titleSuffix === "png_transparent";
   const body = {
     image_base64: image.base64,
     mimeType: image.mimeType,
     metadataSettings: {
       titleMin, titleMax, keywordMin, keywordMax,
-      descriptionMin: 0, descriptionMax: 0,
-      platforms: ["adobe-stock"],
-      includeCategory: preferences.autoCategory,
-      includeReleases: false,
-      titleStyle: "seo-optimized",
-      keywordTypes: { singleWord: false, doubleWord: false, mixed: true },
-      transparentBackground: preferences.titleSuffix === "transparent" || preferences.titleSuffix === "png_transparent",
+      descriptionMin, descriptionMax,
+      platforms: normalizePlatforms(preferences.platforms, preferences.customPlatforms),
+      includeCategory: preferences.includeCategory,
+      includeReleases: preferences.includeReleases,
+      titleStyle: preferences.titleStyle,
+      keywordTypes: keywordTypesFor(preferences.keywordStyle),
+      transparentBackground,
       language: preferences.language,
       assetType: assetType || "photo",
       customPrompt: { enabled: preferences.customPromptEnabled && Boolean(customText.trim()), text: customText },
     },
-    dnaNoBgWorkflowActive: preferences.titleSuffix === "transparent" || preferences.titleSuffix === "png_transparent",
+    dnaNoBgWorkflowActive: transparentBackground,
   };
   const response = await requestJson<Flow2MetadataResponse>(
     `${connection.baseUrl}/api/generate-metadata`,

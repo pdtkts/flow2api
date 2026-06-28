@@ -7,12 +7,12 @@
     "activeTab",
     "declarativeContent",
     "notifications",
+    "scripting",
     "sidePanel",
     "storage"
   ],
   "host_permissions": [
-    "https://contributor.stock.adobe.com/*",
-    "https://*.contributor.stock.adobe.com/*"
+    "https://contributor.stock.adobe.com/ca/uploads*"
   ],
   "optional_host_permissions": ["https://*/*", "http://*/*"],
   "action": {
@@ -34,8 +34,7 @@
   "content_scripts": [
     {
       "matches": [
-        "https://contributor.stock.adobe.com/*",
-        "https://*.contributor.stock.adobe.com/*"
+        "https://contributor.stock.adobe.com/ca/uploads*"
       ],
       "js": ["content.js"],
       "run_at": "document_idle"

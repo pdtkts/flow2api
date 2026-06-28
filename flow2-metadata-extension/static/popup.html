@@ -7,69 +7,263 @@
     <link rel="stylesheet" href="popup.css" />
   </head>
   <body>
-    <header class="brand">
-      <img src="icons/icon48.png" alt="" />
-      <div><h1>Flow2 Metadata</h1><p>Adobe Stock metadata automation</p></div>
-    </header>
+    <div class="shell">
+      <header class="app-header">
+        <div class="brand-mark" aria-hidden="true"><img src="icons/icon48.png" alt="" /></div>
+        <div class="brand-copy">
+          <h1>Flow2 Metadata</h1>
+          <p>Adobe Stock control desk</p>
+        </div>
+        <div id="headerConnection" class="header-connection" hidden>
+          <span class="connection-dot" aria-hidden="true"></span>
+          <span id="connectionLabel"></span>
+        </div>
+      </header>
 
-    <main>
-      <section id="connectionView" class="card">
-        <h2>Connect to Flow2 API</h2>
-        <p class="muted">Processing stays locked until this managed key is validated with the <code>adobe:metadata</code> scope.</p>
-        <label>Base URL<input id="baseUrl" type="url" autocomplete="url" /></label>
-        <label>API key<input id="apiKey" type="password" autocomplete="off" placeholder="f2a_live_…" /></label>
-        <button id="connectButton" class="primary">Connect</button>
-        <p id="connectionError" class="message error" hidden></p>
-      </section>
-
-      <section id="notAdobeView" class="card" hidden>
-        <h2>Open Adobe Stock Contributor</h2>
-        <p class="muted">Flow2 Metadata works on the Uploads and Portfolio pages.</p>
-        <button id="openAdobeButton" class="primary">Open Adobe Stock</button>
-      </section>
-
-      <section id="appView" hidden>
-        <div class="connection-pill"><span id="connectionLabel"></span><button id="editConnection" class="link">Edit</button><button id="disconnectButton" class="link danger">Disconnect</button></div>
-
-        <section class="card">
-          <div class="segmented" role="group" aria-label="Processing mode">
-            <button id="uploadMode" data-mode="upload">New Uploads</button>
-            <button id="portfolioMode" data-mode="portfolio">Portfolio</button>
+      <main>
+        <section id="connectionView" class="view connection-view" aria-labelledby="connectionTitle">
+          <div class="connection-signal" aria-hidden="true">
+            <span></span><span></span><span></span><i></i>
           </div>
-          <label class="check"><input id="autoCategory" type="checkbox" /> Auto-select category</label>
-          <div class="grid two">
-            <label>Start index<input id="startIndex" type="number" min="1" placeholder="1" /></label>
-            <label>End index<input id="endIndex" type="number" min="1" placeholder="All" /></label>
-          </div>
-          <div class="progress-row"><strong id="processedCount">0</strong> processed <span id="successRate">0%</span></div>
-          <div class="actions"><button id="startButton" class="primary">Start Processing</button><button id="resumeButton" disabled>Resume</button><button id="stopButton" class="danger-button" disabled>Stop</button></div>
-          <p id="status" class="message">Ready to start</p>
+          <p class="eyebrow">Secure connection</p>
+          <h2 id="connectionTitle">Connect your Flow2 workspace</h2>
+          <p class="lede">Validate a managed API key before metadata can leave this extension.</p>
+
+          <form id="connectionForm" class="connection-form">
+            <label for="baseUrl">Base URL</label>
+            <input id="baseUrl" type="url" autocomplete="url" spellcheck="false" />
+
+            <label for="apiKey">Managed API key</label>
+            <div class="password-field">
+              <input id="apiKey" type="password" autocomplete="off" placeholder="f2a_live_…" />
+              <button id="toggleApiKey" type="button" class="icon-button" aria-label="Show API key" aria-pressed="false">
+                <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="2.5"/></svg>
+              </button>
+            </div>
+
+            <button id="connectButton" type="submit" class="button primary-button">Connect workspace</button>
+          </form>
+          <p id="connectionError" class="inline-message error-message" role="alert" hidden></p>
+          <p class="security-note"><span aria-hidden="true">◆</span> Requires the <code>adobe:metadata</code> scope. Your key stays inside extension storage.</p>
         </section>
 
-        <details class="card" open>
-          <summary>Metadata settings</summary>
-          <label>Language<select id="language">
-            <option value="en">English</option><option value="fr">French</option><option value="de">German</option>
-            <option value="es">Spanish</option><option value="it">Italian</option><option value="pt">Portuguese</option>
-            <option value="ja">Japanese</option><option value="pl">Polish</option><option value="ko">Korean</option>
-          </select></label>
-          <label>Background title suffix<select id="titleSuffix">
-            <option value="none">None</option><option value="transparent">Transparent background</option>
-            <option value="white">White background</option><option value="png_transparent">Transparent PNG</option>
-          </select></label>
-          <div class="grid two"><label>Title prefix<input id="titlePrefix" type="text" /></label><label>Title suffix<input id="customTitleSuffix" type="text" /></label></div>
-          <label class="check"><input id="limitsEnabled" type="checkbox" /> Use custom limits</label>
-          <div id="limits" class="grid two">
-            <label>Title min<input id="titleMin" type="number" min="1" max="195" /></label>
-            <label>Title max<input id="titleMax" type="number" min="1" max="195" /></label>
-            <label>Keywords min<input id="keywordMin" type="number" min="1" max="50" /></label>
-            <label>Keywords max<input id="keywordMax" type="number" min="1" max="50" /></label>
+        <section id="notAdobeView" class="view context-view" aria-labelledby="contextTitle" hidden>
+          <div class="context-orbit" aria-hidden="true"><span></span><i></i></div>
+          <p class="eyebrow">Workspace unavailable</p>
+          <h2 id="contextTitle">Open Adobe Stock Contributor</h2>
+          <p class="lede">This control desk activates only on the Canadian Uploads page.</p>
+          <button id="openAdobeButton" class="button primary-button">Open Canadian Uploads</button>
+          <button id="editConnectionFromContext" class="button quiet-button">Edit connection</button>
+        </section>
+
+        <section id="appView" class="workspace" hidden>
+          <div class="connection-strip">
+            <span>Flow2 connected</span>
+            <div>
+              <button id="editConnection" class="text-button">Edit</button>
+              <button id="disconnectButton" class="text-button danger-text">Disconnect</button>
+            </div>
           </div>
-          <label class="check"><input id="customPromptEnabled" type="checkbox" /> Add custom AI instructions</label>
-          <label id="customPromptWrap">Instructions<textarea id="customPrompt" rows="5" placeholder="Use {language}, {fileType}, and {category} placeholders if needed."></textarea></label>
-        </details>
-      </section>
-    </main>
+
+          <section class="console-panel" aria-labelledby="consoleTitle">
+            <div class="section-heading console-heading">
+              <div>
+                <p class="eyebrow">Run console</p>
+                <h2 id="consoleTitle">Metadata current</h2>
+              </div>
+              <span id="phaseBadge" class="phase-badge" data-tone="neutral">Ready</span>
+            </div>
+
+            <div class="metric-grid" aria-label="Run metrics">
+              <div><span id="processedCount" class="metric-value">0</span><span class="metric-label">Processed</span></div>
+              <div><span id="successCount" class="metric-value success-value">0</span><span class="metric-label">Succeeded</span></div>
+              <div><span id="failureCount" class="metric-value">0</span><span class="metric-label">Failed</span></div>
+              <div><span id="pageCount" class="metric-value">01</span><span class="metric-label">Page</span></div>
+            </div>
+
+            <div id="progressTrack" class="progress-track" data-mode="idle" aria-label="Run progress" role="progressbar" aria-valuemin="0" aria-valuemax="100">
+              <span id="progressValue" class="progress-value"></span>
+              <i id="progressNode" class="progress-node" aria-hidden="true"></i>
+            </div>
+            <div class="current-row">
+              <p id="status" class="status-message" aria-live="polite">Ready to start</p>
+              <span id="currentAsset" class="current-asset">Awaiting run</span>
+            </div>
+
+            <div id="activityRegion" class="activity-region">
+              <div class="activity-header">
+                <h3>Current-run activity</h3>
+                <span id="successRate">0% success</span>
+              </div>
+              <ol id="activityList" class="activity-list" aria-label="Asset processing activity"></ol>
+              <p id="activityEmpty" class="activity-empty">Asset requests will appear here as the run moves through Flow2.</p>
+            </div>
+          </section>
+
+          <section class="setup-panel" aria-labelledby="setupTitle">
+            <div class="section-heading">
+              <div>
+                <p class="eyebrow">Input</p>
+                <h2 id="setupTitle">Run setup</h2>
+              </div>
+              <span id="modeSummary" class="section-meta">New uploads</span>
+            </div>
+
+            <fieldset class="plain-fieldset">
+              <legend class="field-label">Adobe workspace</legend>
+              <div id="uploadMode" class="workspace-lock">
+                <span aria-hidden="true"></span>
+                <strong>New uploads</strong>
+                <small>/ca/uploads</small>
+              </div>
+            </fieldset>
+
+            <div class="field-grid">
+              <label for="startIndex">Start index<input id="startIndex" type="number" min="1" inputmode="numeric" placeholder="1" /></label>
+              <label for="endIndex">End index<input id="endIndex" type="number" min="1" inputmode="numeric" placeholder="All" /></label>
+            </div>
+
+          </section>
+
+          <details id="metadataDetails" class="recipe-panel">
+            <summary>
+              <span>
+                <span class="eyebrow">Output</span>
+                <strong>Metadata recipe</strong>
+                <span id="recipeSummary" class="recipe-summary">English · Standard limits</span>
+              </span>
+              <svg aria-hidden="true" viewBox="0 0 24 24"><path d="m7 9 5 5 5-5"/></svg>
+            </summary>
+            <div class="recipe-content">
+              <section class="settings-group" aria-labelledby="lengthSettingsTitle">
+                <div class="group-heading">
+                  <span class="eyebrow">Constraints</span>
+                  <h3 id="lengthSettingsTitle">Output length</h3>
+                </div>
+                <div class="range-setting" data-range="title">
+                  <div class="range-setting-head"><strong>Title length</strong><span id="titleRangeValue">70–140</span></div>
+                  <div class="range-fields">
+                    <label for="titleMin">Minimum<input id="titleMin" type="number" min="1" max="195" inputmode="numeric" /></label>
+                    <label for="titleMax">Maximum<input id="titleMax" type="number" min="1" max="195" inputmode="numeric" /></label>
+                  </div>
+                  <div id="titleRangeRail" class="range-rail" aria-hidden="true"><i></i><i></i></div>
+                </div>
+                <div class="range-setting" data-range="keyword">
+                  <div class="range-setting-head"><strong>Keyword count</strong><span id="keywordRangeValue">25–45</span></div>
+                  <div class="range-fields">
+                    <label for="keywordMin">Minimum<input id="keywordMin" type="number" min="1" max="50" inputmode="numeric" /></label>
+                    <label for="keywordMax">Maximum<input id="keywordMax" type="number" min="1" max="50" inputmode="numeric" /></label>
+                  </div>
+                  <div id="keywordRangeRail" class="range-rail" aria-hidden="true"><i></i><i></i></div>
+                </div>
+                <div class="range-setting" data-range="description">
+                  <div class="range-setting-head"><strong>Description length</strong><span id="descriptionRangeValue">0–0</span></div>
+                  <div class="range-fields">
+                    <label for="descriptionMin">Minimum<input id="descriptionMin" type="number" min="0" max="500" inputmode="numeric" /></label>
+                    <label for="descriptionMax">Maximum<input id="descriptionMax" type="number" min="0" max="500" inputmode="numeric" /></label>
+                  </div>
+                  <div id="descriptionRangeRail" class="range-rail" aria-hidden="true"><i></i><i></i></div>
+                  <p class="field-hint">Forwarded to Flow2; Adobe Uploads has no description field.</p>
+                </div>
+              </section>
+
+              <section class="settings-group" aria-labelledby="targetSettingsTitle">
+                <div class="group-heading"><span class="eyebrow">Targets</span><h3 id="targetSettingsTitle">Platforms</h3></div>
+                <div class="choice-grid platform-grid">
+                  <label class="choice-chip locked"><input id="platformAdobe" type="checkbox" value="adobe-stock" checked disabled /><span>Adobe Stock</span></label>
+                  <label class="choice-chip"><input id="platformShutterstock" type="checkbox" value="shutterstock" /><span>Shutterstock</span></label>
+                  <label class="choice-chip"><input id="platformGetty" type="checkbox" value="getty-images" /><span>Getty Images</span></label>
+                  <label class="choice-chip"><input id="platformIstock" type="checkbox" value="istock" /><span>iStock</span></label>
+                  <label class="choice-chip"><input id="platformPond5" type="checkbox" value="pond5" /><span>Pond5</span></label>
+                </div>
+                <label for="customPlatforms">Other platforms<input id="customPlatforms" type="text" placeholder="Comma-separated, e.g. custom-market" /></label>
+              </section>
+
+              <section class="settings-group" aria-labelledby="styleSettingsTitle">
+                <div class="group-heading"><span class="eyebrow">Voice</span><h3 id="styleSettingsTitle">Title style</h3></div>
+                <div class="choice-grid two-up" role="radiogroup" aria-label="Title style">
+                  <label class="choice-chip"><input type="radio" name="titleStyle" value="seo-optimized" /><span>SEO optimized</span></label>
+                  <label class="choice-chip"><input type="radio" name="titleStyle" value="descriptive" /><span>Descriptive</span></label>
+                  <label class="choice-chip"><input type="radio" name="titleStyle" value="creative" /><span>Creative</span></label>
+                  <label class="choice-chip"><input type="radio" name="titleStyle" value="commercial" /><span>Commercial</span></label>
+                </div>
+              </section>
+
+              <section class="settings-group" aria-labelledby="keywordSettingsTitle">
+                <div class="group-heading"><span class="eyebrow">Shape</span><h3 id="keywordSettingsTitle">Keyword style</h3></div>
+                <div class="choice-grid" role="radiogroup" aria-label="Keyword style">
+                  <label class="choice-chip"><input type="radio" name="keywordStyle" value="single-word" /><span>Single word</span></label>
+                  <label class="choice-chip"><input type="radio" name="keywordStyle" value="double-word" /><span>Double word</span></label>
+                  <label class="choice-chip"><input type="radio" name="keywordStyle" value="mixed" /><span>Mixed</span></label>
+                </div>
+              </section>
+
+              <section class="settings-group" aria-labelledby="generationOptionsTitle">
+                <div class="group-heading"><span class="eyebrow">Generation</span><h3 id="generationOptionsTitle">Options</h3></div>
+                <label class="switch-row compact" for="includeCategory">
+                  <span><strong>Include category</strong><small>Generate and apply the best Adobe category.</small></span>
+                  <input id="includeCategory" type="checkbox" /><i aria-hidden="true"></i>
+                </label>
+                <label class="switch-row compact" for="includeReleases">
+                  <span><strong>Include release guidance</strong><small>Ask Flow2 to consider model and property releases.</small></span>
+                  <input id="includeReleases" type="checkbox" /><i aria-hidden="true"></i>
+                </label>
+                <label class="switch-row compact" for="transparentBackground">
+                  <span><strong>Transparent background</strong><small>Generate metadata for an isolated transparent asset.</small></span>
+                  <input id="transparentBackground" type="checkbox" /><i aria-hidden="true"></i>
+                </label>
+              </section>
+
+              <section class="settings-group" aria-labelledby="submissionSettingsTitle">
+                <div class="group-heading"><span class="eyebrow">Adobe submission</span><h3 id="submissionSettingsTitle">AI declarations</h3></div>
+                <label class="switch-row compact" for="markGenerativeAi">
+                  <span><strong>Created using generative AI tools</strong><small>Set Adobe’s generative AI declaration.</small></span>
+                  <input id="markGenerativeAi" type="checkbox" /><i aria-hidden="true"></i>
+                </label>
+                <label class="switch-row compact" for="confirmFictionalPeopleProperty">
+                  <span><strong>People and Property are fictional</strong><small>Certify that recognizable subjects are not real.</small></span>
+                  <input id="confirmFictionalPeopleProperty" type="checkbox" /><i aria-hidden="true"></i>
+                </label>
+                <p class="compliance-note">Disable the fictional certification for assets based on a recognizable real person or property.</p>
+              </section>
+
+              <section class="settings-group" aria-labelledby="textSettingsTitle">
+                <div class="group-heading"><span class="eyebrow">Language and title</span><h3 id="textSettingsTitle">Text treatment</h3></div>
+              <label for="language">Language<select id="language">
+                <option value="en">English</option><option value="fr">French</option><option value="de">German</option>
+                <option value="es">Spanish</option><option value="it">Italian</option><option value="pt">Portuguese</option>
+                <option value="ja">Japanese</option><option value="pl">Polish</option><option value="ko">Korean</option>
+              </select></label>
+
+              <label for="titleSuffix">Background title suffix<select id="titleSuffix">
+                <option value="none">None</option><option value="transparent">Transparent background</option>
+                <option value="white">White background</option><option value="png_transparent">Transparent PNG</option>
+              </select></label>
+
+              <div class="field-grid">
+                <label for="titlePrefix">Title prefix<input id="titlePrefix" type="text" /></label>
+                <label for="customTitleSuffix">Title suffix<input id="customTitleSuffix" type="text" /></label>
+              </div>
+              </section>
+
+              <section class="settings-group" aria-labelledby="promptSettingsTitle">
+                <div class="group-heading"><span class="eyebrow">Override</span><h3 id="promptSettingsTitle">Custom instructions</h3></div>
+              <label class="switch-row compact" for="customPromptEnabled">
+                <span><strong>Custom AI instructions</strong><small>Add guidance for this metadata recipe.</small></span>
+                <input id="customPromptEnabled" type="checkbox" /><i aria-hidden="true"></i>
+              </label>
+              <label id="customPromptWrap" for="customPrompt" hidden>Instructions<textarea id="customPrompt" rows="5" placeholder="Use {language}, {fileType}, and {category} placeholders if needed."></textarea></label>
+              </section>
+            </div>
+          </details>
+
+          <div class="action-dock" aria-label="Run actions">
+            <button id="runActionButton" class="button primary-button">Start run</button>
+            <button id="startNewButton" class="button quiet-button" hidden>Start new</button>
+          </div>
+        </section>
+      </main>
+    </div>
     <script src="popup.js"></script>
   </body>
 </html>
