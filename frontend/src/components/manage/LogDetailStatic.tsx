@@ -23,6 +23,12 @@ const cardBox = "rounded-lg border border-border bg-muted/40 p-3.5"
 const kLabel = "text-muted-foreground"
 
 type PayloadVariant = "default" | "fullResponse"
+type InputImagePreview = {
+  url: string
+  source: string
+  mimeType?: string
+  base64Length?: number
+}
 
 function cacheAdminPreviewPathFromMediaUrl(url: string): string | null {
   const text = String(url || "").trim()
@@ -204,6 +210,88 @@ function LogMediaPreview({ label, url, withUrl = true }: { label: string; url: s
   )
 }
 
+function extractInputImagePreview(requestBodyObj: unknown): InputImagePreview | null {
+  if (!requestBodyObj || typeof requestBodyObj !== "object") return null
+  const payload = requestBodyObj as Record<string, unknown>
+  const preview = payload.imagePreview
+  if (preview && typeof preview === "object") {
+    const p = preview as Record<string, unknown>
+    const dataUrl = typeof p.dataUrl === "string" ? p.dataUrl : ""
+    const url = dataUrl || (typeof p.url === "string" ? p.url : "")
+    if (url) {
+      return {
+        url,
+        source: typeof p.source === "string" ? p.source : dataUrl ? "image_base64" : "image_url",
+        mimeType: typeof p.mimeType === "string" ? p.mimeType : undefined,
+        base64Length: typeof p.base64Length === "number" ? p.base64Length : undefined,
+      }
+    }
+  }
+  if (typeof payload.image_url === "string" && payload.image_url.trim()) {
+    return { url: payload.image_url.trim(), source: "image_url" }
+  }
+  return null
+}
+
+function InputImagePreviewCard({ preview }: { preview: InputImagePreview }) {
+  const [failed, setFailed] = useState(false)
+  const isDataUrl = /^data:/i.test(preview.url)
+  const checkerboardStyle = {
+    backgroundColor: "hsl(var(--muted))",
+    backgroundImage:
+      "linear-gradient(45deg, rgba(148,163,184,0.28) 25%, transparent 25%), linear-gradient(-45deg, rgba(148,163,184,0.28) 25%, transparent 25%), linear-gradient(45deg, transparent 75%, rgba(148,163,184,0.28) 75%), linear-gradient(-45deg, transparent 75%, rgba(148,163,184,0.28) 75%)",
+    backgroundPosition: "0 0, 0 8px, 8px -8px, -8px 0px",
+    backgroundSize: "16px 16px",
+  }
+
+  return (
+    <div className="space-y-2.5">
+      <h4 className={sectionTitle}>Input image</h4>
+      <div className={cn(cardBox, "space-y-3")}>
+        <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+          <span>
+            Source: <span className="text-foreground">{preview.source}</span>
+          </span>
+          {preview.mimeType ? (
+            <span>
+              MIME: <span className="text-foreground">{preview.mimeType}</span>
+            </span>
+          ) : null}
+          {preview.base64Length ? (
+            <span>
+              Base64 length: <span className="text-foreground">{preview.base64Length}</span>
+            </span>
+          ) : null}
+        </div>
+        {!isDataUrl ? (
+          <p className="text-xs text-foreground leading-relaxed">
+            <span className="font-medium text-muted-foreground">URL:</span>{" "}
+            <a href={preview.url} target="_blank" rel="noreferrer" className="text-primary hover:underline break-all">
+              {preview.url}
+            </a>
+          </p>
+        ) : null}
+        {failed ? (
+          <div className="rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-xs text-destructive">
+            Input image preview could not be loaded.
+          </div>
+        ) : (
+          <div className="flex max-h-96 min-h-36 items-center justify-center overflow-hidden rounded-lg border border-border p-3" style={checkerboardStyle}>
+            <img
+              src={preview.url}
+              alt="Input image from request log"
+              loading="lazy"
+              decoding="async"
+              className="max-h-80 max-w-full object-contain"
+              onError={() => setFailed(true)}
+            />
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 function BasicInfoRow({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div className="text-sm text-foreground">
@@ -213,13 +301,14 @@ function BasicInfoRow({ label, children }: { label: string; children: ReactNode 
 }
 
 export function LogDetailStatic({ log }: { log: LogDetail }) {
-  const { responseBodyObj, requestPayloadText, responsePayloadText, errorSummary, successSummary } = useMemo(() => {
+  const { responseBodyObj, requestBodyObj, requestPayloadText, responsePayloadText, errorSummary, successSummary } = useMemo(() => {
     const responseBodyObj = parseLogJson(log.response_body) as Record<string, unknown> | null
+    const requestBodyObj = parseLogJson(log.request_body) as Record<string, unknown> | null
     const requestPayloadText = formatLogPayload(log.request_body)
     const responsePayloadText = formatLogPayload(log.response_body)
     const errorSummary = extractLogErrorSummary(log, responseBodyObj)
     const successSummary = extractLogSuccessSummaryEn(log, responseBodyObj)
-    return { responseBodyObj, requestPayloadText, responsePayloadText, errorSummary, successSummary }
+    return { responseBodyObj, requestBodyObj, requestPayloadText, responsePayloadText, errorSummary, successSummary }
   }, [log])
 
   const code = log.status_code
@@ -233,6 +322,7 @@ export function LogDetailStatic({ log }: { log: LogDetail }) {
     responseBodyObj && typeof responseBodyObj === "object"
       ? (responseBodyObj.generated_assets as Record<string, unknown> | undefined)
       : undefined
+  const inputPreview = extractInputImagePreview(requestBodyObj)
 
   let assetsBlock: ReactNode = null
   if (code === 200 && responseBodyObj) {
@@ -289,6 +379,8 @@ export function LogDetailStatic({ log }: { log: LogDetail }) {
 
   return (
     <div className="space-y-5 text-foreground">
+      {inputPreview ? <InputImagePreviewCard preview={inputPreview} /> : null}
+
       <div className="space-y-2.5">
         <h4 className={sectionTitle}>Request data</h4>
         <LogPayloadPre>{requestPayloadText}</LogPayloadPre>

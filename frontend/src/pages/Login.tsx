@@ -31,13 +31,13 @@ export default function Login() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ username, password, remember_me: rememberMe }),
       })
-      const d = await r.json()
-      if (d.success) {
+      const d = await r.json().catch(() => ({}))
+      if (r.ok && d.success) {
         login(d.token)
         toast.success("Login successful")
         navigate("/manage", { replace: true })
       } else {
-        toast.error(d.message || "Login failed")
+        toast.error(d.detail || d.message || "Login failed")
       }
     } catch (err) {
       toast.error("Network error, please try again later")

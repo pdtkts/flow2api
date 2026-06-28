@@ -1,5 +1,6 @@
 """FastAPI application initialization"""
 import os
+import sqlite3
 import sys
 from datetime import datetime, timezone
 
@@ -14,6 +15,7 @@ from pathlib import Path
 
 from .core.config import config
 from .core.database import Database
+from .core.storage_errors import is_sqlite_storage_full_error, sqlite_operational_error_handler
 from .core.monitoring import CONTENT_TYPE_LATEST, render_main_metrics
 from .services.flow_client import FlowClient
 from .services.proxy_manager import ProxyManager
@@ -21,6 +23,7 @@ from .services.token_manager import TokenManager
 from .services.load_balancer import LoadBalancer
 from .services.concurrency_manager import ConcurrencyManager
 from .services.generation_handler import GenerationHandler
+from .services.geminigen_service import GeminiGenService
 from .services.runway_service import RunwayService
 from .services.st_refresh_reasons import describe_st_refresh_reason
 from .api import routes, admin
@@ -130,6 +133,42 @@ class ApiOnlyHostMiddleware(BaseHTTPMiddleware):
         return JSONResponse({"detail": "Not Found"}, status_code=404)
 
 
+def _storage_recovery_diagnostic(stats: dict) -> str:
+    return (
+        "Flow2API startup blocked: volume remains full after cache recovery "
+        f"(free={int(stats.get('free_after', 0))} bytes, "
+        f"reclaimed={int(stats.get('reclaimed_bytes', 0))} bytes, "
+        f"target={int(stats.get('target_free', 0))} bytes)."
+    )
+
+
+async def _init_database_with_storage_recovery(database, file_cache) -> None:
+    """Initialize SQLite, evicting generated cache files on SQLITE_FULL once."""
+    await file_cache._cleanup_expired_files()
+    try:
+        await database.init_db()
+        return
+    except Exception as exc:
+        if not is_sqlite_storage_full_error(exc):
+            raise
+        first_error = exc
+
+    stats = await file_cache.reclaim_cache_space()
+    if stats["free_after"] < stats["target_free"]:
+        raise RuntimeError(_storage_recovery_diagnostic(stats)) from first_error
+
+    print(
+        "WARN SQLite reported a full volume; cache recovery reclaimed "
+        f"{stats['reclaimed_bytes']} bytes. Retrying database initialization once."
+    )
+    try:
+        await database.init_db()
+    except Exception as exc:
+        if is_sqlite_storage_full_error(exc):
+            raise RuntimeError(_storage_recovery_diagnostic(stats)) from exc
+        raise
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager"""
@@ -150,7 +189,7 @@ async def lifespan(app: FastAPI):
     is_first_startup = not db.db_exists()
 
     # Initialize database tables structure
-    await db.init_db()
+    await _init_database_with_storage_recovery(db, generation_handler.file_cache)
 
     # Handle database initialization based on startup type
     if is_first_startup:
@@ -356,6 +395,7 @@ async def lifespan(app: FastAPI):
                 debug_logger.log_error(f"[ST_SCHEDULER] task error: {e}")
 
     scheduled_st_only_refresh_handle = asyncio.create_task(scheduled_st_only_refresh_task())
+    resumed_geminigen_tasks = await geminigen_service.resume_active_tasks()
 
     print("OK Database initialized")
     print(f"OK Total tokens: {len(tokens)}")
@@ -365,10 +405,12 @@ async def lifespan(app: FastAPI):
     if cache_cleanup_enabled:
         print("OK File cache cleanup task started")
     else:
-        print("OK File cache cleanup task disabled (timeout <= 0)")
+        print("WARN File cache cleanup task failed to start")
     print("OK 429 auto-unban task started (runs every hour)")
     print("OK Scheduled token refresh task started")
     print("OK Scheduled ST-only refresh task started")
+    if resumed_geminigen_tasks:
+        print(f"OK GeminiGen active task resume started ({resumed_geminigen_tasks} task(s))")
     print(f"OK Server running on http://{config.server_host}:{config.server_port}")
     print("=" * 60)
 
@@ -422,12 +464,14 @@ generation_handler = GenerationHandler(
     proxy_manager  # 添加 proxy_manager 参数
 )
 runway_service = RunwayService(db, generation_handler.file_cache, proxy_manager)
+geminigen_service = GeminiGenService(db, generation_handler.file_cache, proxy_manager)
 managed_api_key_manager = ApiKeyManager(db, legacy_api_key_provider=lambda: config.api_key)
 
 # Set dependencies
 routes.set_generation_handler(generation_handler)
 routes.set_runway_service(runway_service)
-admin.set_dependencies(token_manager, proxy_manager, db, concurrency_manager, managed_api_key_manager, runway_service)
+routes.set_geminigen_service(geminigen_service)
+admin.set_dependencies(token_manager, proxy_manager, db, concurrency_manager, managed_api_key_manager, runway_service, geminigen_service)
 set_api_key_manager(managed_api_key_manager)
 
 # Create FastAPI app
@@ -437,6 +481,7 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan
 )
+app.add_exception_handler(sqlite3.OperationalError, sqlite_operational_error_handler)
 
 # CORS is added after this block so CORS is outer and still applies to 404s
 app.add_middleware(ApiOnlyHostMiddleware)

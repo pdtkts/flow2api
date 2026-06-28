@@ -68,8 +68,14 @@ export function extractLogPrimaryUrl(responseBodyObj: unknown): string | null {
   const o = responseBodyObj as Record<string, unknown>
   const data = o.data as unknown[] | undefined
   const assets = o.generated_assets as Record<string, unknown> | undefined
+  const resultUrls = o.result_urls as unknown[] | undefined
+  const cachedUrls = o.cached_artifact_urls as unknown[] | undefined
+  const rawUrls = o.raw_artifact_urls as unknown[] | undefined
   return (
     (typeof o.url === "string" ? o.url : null) ||
+    (typeof resultUrls?.[0] === "string" ? resultUrls[0] : null) ||
+    (typeof cachedUrls?.[0] === "string" ? cachedUrls[0] : null) ||
+    (typeof rawUrls?.[0] === "string" ? rawUrls[0] : null) ||
     (data?.[0] && typeof data[0] === "object" && data[0] !== null && typeof (data[0] as { url?: string }).url === "string"
       ? (data[0] as { url: string }).url
       : null) ||
@@ -91,6 +97,33 @@ export function extractLogPrimaryUrl(responseBodyObj: unknown): string | null {
   )
 }
 
+function hasMeaningfulCloningPrompt(prompt: unknown): boolean {
+  if (!prompt || typeof prompt !== "object") return typeof prompt === "string" && prompt.trim().length > 0
+  const p = prompt as Record<string, unknown>
+  const shot = p.shot && typeof p.shot === "object" ? (p.shot as Record<string, unknown>) : {}
+  const lighting = p.lighting && typeof p.lighting === "object" ? (p.lighting as Record<string, unknown>) : {}
+  const metadata = p.metadata && typeof p.metadata === "object" ? (p.metadata as Record<string, unknown>) : {}
+  const tags = Array.isArray(metadata.tags) ? metadata.tags : []
+  return [
+    p.scene,
+    p.style,
+    shot.composition,
+    lighting.primary,
+    ...tags,
+  ].some((value) => typeof value === "string" && value.trim().length > 0)
+}
+
+function cloningPromptSuccessWarning(responseBodyObj: unknown): string {
+  if (!responseBodyObj || typeof responseBodyObj !== "object") return ""
+  const prompts = (responseBodyObj as Record<string, unknown>).prompts
+  if (!Array.isArray(prompts)) return ""
+  if (prompts.length === 0) return "Generation completed, but no cloning prompts were returned."
+  if (!prompts.some(hasMeaningfulCloningPrompt)) {
+    return "Generation completed, but the returned cloning prompt fields were blank."
+  }
+  return ""
+}
+
 /** English copy for the log details template (list/detail UI). */
 export function extractLogSuccessSummaryEn(
   log: LogListItem | null | undefined,
@@ -101,6 +134,8 @@ export function extractLogSuccessSummaryEn(
     return "Generation successful, results have been returned."
   }
   const o = responseBodyObj as Record<string, unknown>
+  const promptWarning = cloningPromptSuccessWarning(responseBodyObj)
+  if (promptWarning) return promptWarning
   const assets = o.generated_assets as Record<string, unknown> | undefined
   if (assets && typeof assets === "object" && assets.upscaled_image && typeof assets.upscaled_image === "object") {
     const up = assets.upscaled_image as { resolution?: string }
@@ -131,8 +166,8 @@ export function formatLogPayload(raw: string | null | undefined): string {
       parsed,
       (_, value: unknown) => {
         if (typeof value !== "string") return value
-        if (value.length <= 4096) return value
         if (/^data:(image|video)\//i.test(value)) return `[data URL omitted, length=${value.length}]`
+        if (value.length <= 4096) return value
         const sample = value.slice(0, 256)
         if (/^[A-Za-z0-9+/=\r\n]+$/.test(sample)) return `[large base64 omitted, length=${value.length}]`
         return `${value.slice(0, 800)}... [truncated, length=${value.length}]`

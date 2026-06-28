@@ -10,11 +10,12 @@ import { AgentGateway } from "../components/manage/AgentGateway"
 import { ApiKeyManagement } from "../components/manage/ApiKeyManagement"
 import { AdobeSettings } from "../components/manage/AdobeSettings"
 import { RunwaySettings } from "../components/manage/RunwaySettings"
+import { GeminiGenSettings } from "../components/manage/GeminiGenSettings"
 import { cn } from "@/lib/utils"
 import { useAuth } from "../contexts/AuthContext"
 import { adminJson } from "../lib/adminApi"
 
-const MANAGE_TABS = ["tokens", "apikeys", "settings", "logs", "adobe", "runway", "cache", "agent"] as const
+const MANAGE_TABS = ["tokens", "apikeys", "settings", "logs", "adobe", "runway", "geminigen", "cache", "agent"] as const
 type ManageTab = (typeof MANAGE_TABS)[number]
 
 function parseManageTab(raw: string | null): ManageTab {
@@ -118,6 +119,14 @@ export default function Manage() {
               Runway
             </TabsTrigger>
             <TabsTrigger
+              value="geminigen"
+              className={cn(
+                "rounded-none border-b-2 border-transparent px-1 py-3 data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:shadow-none"
+              )}
+            >
+              GeminiGen
+            </TabsTrigger>
+            <TabsTrigger
               value="cache"
               className={cn(
                 "rounded-none border-b-2 border-transparent px-1 py-3 data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:shadow-none"
@@ -174,6 +183,11 @@ export default function Manage() {
         <TabsContent value="runway" className="mt-0 outline-none focus-visible:ring-0">
           <div className="animate-in fade-in duration-300">
             <RunwaySettings active={tab === "runway"} />
+          </div>
+        </TabsContent>
+        <TabsContent value="geminigen" className="mt-0 outline-none focus-visible:ring-0">
+          <div className="animate-in fade-in duration-300">
+            <GeminiGenSettings active={tab === "geminigen"} />
           </div>
         </TabsContent>
         <TabsContent value="cache" className="mt-0 outline-none focus-visible:ring-0">

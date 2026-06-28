@@ -3,6 +3,7 @@
 from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Set, Tuple
+import asyncio
 import base64
 import hashlib
 import json
@@ -27,6 +28,12 @@ from ..core.logger import debug_logger
 from ..core.route_log_sanitize import dumps_for_request_log
 from ..core.account_tiers import normalize_user_paygate_tier, supports_model_for_tier
 from ..core.model_resolver import get_base_model_aliases, resolve_model_name
+from ..core.geminigen_manifest import GEMINIGEN_MODEL_MANIFEST
+from ..core.studio_model_catalog import (
+    geminigen_studio_metadata,
+    native_studio_metadata,
+    runway_studio_metadata,
+)
 from ..core.models import (
     ChatCompletionRequest,
     ChatMessage,
@@ -38,6 +45,7 @@ from ..core.models import (
     GeminiGenerateContentRequest,
     Project,
     RunwayTask,
+    GeminiGenTask,
     Task,
     TaskTrackerContributorFetchRequest,
     TaskTrackerKeywordSearchRequest,
@@ -46,6 +54,7 @@ from ..core.config import config as app_config
 from ..services.browser_captcha_extension import ExtensionCaptchaService
 from ..services.cloning_metadata_service import CloningMetadataService
 from ..services.generation_handler import MODEL_CONFIG, GenerationHandler
+from ..services.geminigen_service import GeminiGenService
 from ..services.llm_provider_chain import LlmProviderChain
 from ..services.runway_service import RunwayService
 from ..services.tas_tracker_service import TaskTrackerService
@@ -96,6 +105,7 @@ GEMINI_STATUS_MAP = {
 # Dependency injection will be set up in main.py
 generation_handler: GenerationHandler = None
 runway_service: RunwayService = None
+geminigen_service: GeminiGenService = None
 _llm_chain = LlmProviderChain()
 cloning_metadata_service = CloningMetadataService(_llm_chain)
 task_tracker_service = TaskTrackerService()
@@ -169,6 +179,12 @@ def set_runway_service(service: RunwayService):
     runway_service = service
 
 
+def set_geminigen_service(service: GeminiGenService):
+    """Set GeminiGen service instance."""
+    global geminigen_service
+    geminigen_service = service
+
+
 def _ensure_generation_handler() -> GenerationHandler:
     if generation_handler is None:
         raise HTTPException(status_code=500, detail="Generation handler not initialized")
@@ -179,6 +195,12 @@ def _ensure_runway_service() -> RunwayService:
     if runway_service is None:
         raise HTTPException(status_code=500, detail="Runway service not initialized")
     return runway_service
+
+
+def _ensure_geminigen_service() -> GeminiGenService:
+    if geminigen_service is None:
+        raise HTTPException(status_code=500, detail="GeminiGen service not initialized")
+    return geminigen_service
 
 
 LOG_OP_ADOBE_CLONING_PROMPTS = "adobe:cloning_prompts"
@@ -206,6 +228,12 @@ def _require_runway_scope(auth_ctx: AuthContext) -> None:
     _require_managed_scope(auth_ctx, "runway:generate")
 
 
+def _require_geminigen_scope(auth_ctx: AuthContext) -> None:
+    if auth_ctx.key_id is None:
+        raise HTTPException(status_code=403, detail="Managed API key required for GeminiGen")
+    _require_managed_scope(auth_ctx, "geminigen:generate")
+
+
 async def _logged_managed_adobe_call(
     auth_ctx: AuthContext,
     operation: str,
@@ -225,6 +253,10 @@ async def _logged_managed_adobe_call(
         status_code = he.status_code
         response_payload = {"detail": he.detail}
         raise
+    except asyncio.CancelledError:
+        status_code = 499
+        response_payload = {"detail": "Client disconnected before the Adobe request completed"}
+        raise
     except Exception as exc:
         status_code = 500
         response_payload = {"error": str(exc)}
@@ -233,7 +265,7 @@ async def _logged_managed_adobe_call(
         duration = max(0.0, time.perf_counter() - started)
         if auth_ctx.key_id is not None:
             try:
-                status_text = "completed" if status_code == 200 else f"http_{status_code}"
+                status_text = "completed" if status_code == 200 else "failed"
                 await ldb.insert_managed_route_request_log(
                     api_key_id=int(auth_ctx.key_id),
                     operation=operation,
@@ -257,12 +289,44 @@ def _build_model_description(model_config: Dict[str, Any]) -> str:
     return description
 
 
-def _get_openai_model_catalog() -> List[Dict[str, str]]:
+async def _has_native_flow_accounts() -> bool:
+    if generation_handler is None:
+        return False
+    db = getattr(generation_handler, "db", None)
+    if db is None:
+        return False
+    return bool(await db.get_active_tokens())
+
+
+async def _has_runway_accounts() -> bool:
+    if runway_service is None:
+        return False
+    accounts = await runway_service.db.list_runway_accounts()
+    return any(
+        bool(account.is_active) and bool((account.raw_credential or "").strip())
+        for account in accounts
+    )
+
+
+async def _has_geminigen_accounts() -> bool:
+    if geminigen_service is None:
+        return False
+    accounts = await geminigen_service.db.list_geminigen_accounts()
+    return any(
+        bool(account.is_active) and bool((account.bearer_token or "").strip())
+        for account in accounts
+    )
+
+
+async def _get_openai_model_catalog() -> List[Dict[str, str]]:
     """Collect OpenAI-compatible model list entries."""
+    if not await _has_native_flow_accounts():
+        return []
     return [
         {
             "id": model_id,
             "description": _build_model_description(model_config),
+            "studio": native_studio_metadata(model_id, model_config),
         }
         for model_id, model_config in MODEL_CONFIG.items()
     ]
@@ -274,25 +338,51 @@ async def _get_runway_openai_model_catalog() -> List[Dict[str, str]]:
     cfg = await runway_service.db.get_runway_config()
     if not cfg.enabled:
         return []
+    if not await _has_runway_accounts():
+        return []
     models = await runway_service.db.list_runway_models(enabled_only=True)
     return [
         {
             "id": model.public_model_id,
             "description": f"Runway {model.kind} generation - {model.task_type}",
+            "studio": runway_studio_metadata(model),
         }
         for model in models
+        if bool(model.live_available)
     ]
 
 
-def _get_gemini_model_catalog() -> Dict[str, str]:
+async def _get_geminigen_openai_model_catalog() -> List[Dict[str, str]]:
+    if geminigen_service is None:
+        return []
+    cfg = await geminigen_service.db.get_geminigen_config()
+    if not cfg.enabled:
+        return []
+    if not await _has_geminigen_accounts():
+        return []
+    return [
+        {
+            "id": item["id"],
+            "description": f"GeminiGen {item['kind']} generation - {item['endpoint_type']}",
+            "studio": geminigen_studio_metadata(item),
+        }
+        for item in GEMINIGEN_MODEL_MANIFEST
+    ]
+
+
+async def _get_gemini_model_catalog() -> Dict[str, str]:
     """Collect Gemini-compatible model metadata for /models endpoints."""
     catalog: Dict[str, str] = {}
 
-    for alias_id, description in get_base_model_aliases().items():
-        catalog[alias_id] = description
+    if await _has_native_flow_accounts():
+        for alias_id, description in get_base_model_aliases().items():
+            catalog[alias_id] = description
 
-    for model_id, model_config in MODEL_CONFIG.items():
-        catalog.setdefault(model_id, _build_model_description(model_config))
+        for model_id, model_config in MODEL_CONFIG.items():
+            catalog.setdefault(model_id, _build_model_description(model_config))
+
+    for model in await _get_geminigen_openai_model_catalog():
+        catalog.setdefault(model["id"], model["description"])
 
     return catalog
 
@@ -656,6 +746,8 @@ async def _extract_prompt_and_images_from_gemini_contents(
 
 
 def _resolve_request_model(model: str, request: Any) -> str:
+    if RunwayService.is_runway_model(model) or GeminiGenService.is_geminigen_model(model):
+        return model
     resolved_model = resolve_model_name(model=model, request=request, model_config=MODEL_CONFIG)
     if resolved_model != model:
         debug_logger.log_info(f"[ROUTE] 模型名已转换: {model} → {resolved_model}")
@@ -803,6 +895,10 @@ def _is_runway_model(model: str) -> bool:
     return RunwayService.is_runway_model(model)
 
 
+def _is_geminigen_model(model: str) -> bool:
+    return GeminiGenService.is_geminigen_model(model)
+
+
 def _request_extra_dict(request: Any) -> Dict[str, Any]:
     extra = getattr(request, "model_extra", None)
     data = dict(extra) if isinstance(extra, dict) else {}
@@ -888,6 +984,76 @@ def _runway_request_params_from_openai(
     }
 
 
+def _geminigen_options_from_request(request: Any) -> Dict[str, Any]:
+    extras = _request_extra_dict(request)
+    gen_cfg = getattr(request, "generationConfig", None)
+    image_cfg = getattr(gen_cfg, "imageConfig", None) if gen_cfg is not None else None
+    options = extras.get("options") or extras.get("geminigen_options") or {}
+    if not isinstance(options, dict):
+        options = {}
+    for key in (
+        "aspect_ratio",
+        "aspectRatio",
+        "resolution",
+        "duration",
+        "orientation",
+        "num_result",
+        "numResult",
+        "mode",
+        "service_mode",
+        "serviceMode",
+        "output_format",
+        "outputFormat",
+    ):
+        if key in extras and extras[key] is not None:
+            snake = re.sub(r"(?<!^)(?=[A-Z])", "_", key).lower()
+            options[snake] = extras[key]
+    if gen_cfg is not None:
+        for attr, target in (("aspectRatio", "aspect_ratio"), ("imageSize", "resolution")):
+            value = getattr(gen_cfg, attr, None)
+            if value is not None:
+                options[target] = value
+    if image_cfg is not None:
+        for attr, target in (("aspectRatio", "aspect_ratio"), ("imageSize", "resolution")):
+            value = getattr(image_cfg, attr, None)
+            if value is not None:
+                options[target] = value
+    if "numResult" in options and "num_result" not in options:
+        options["num_result"] = options.pop("numResult")
+    if "serviceMode" in options and "service_mode" not in options:
+        options["service_mode"] = options.pop("serviceMode")
+    if "outputFormat" in options and "output_format" not in options:
+        options["output_format"] = options.pop("outputFormat")
+    return options
+
+
+def _geminigen_openai_chunk(content: str, *, role: Optional[str] = None) -> str:
+    delta: Dict[str, Any] = {}
+    if role:
+        delta["role"] = role
+    if content:
+        delta["content"] = content
+    payload = {
+        "id": f"chatcmpl-geminigen-{int(time.time())}",
+        "object": "chat.completion.chunk",
+        "created": int(time.time()),
+        "model": "geminigen",
+        "choices": [{"index": 0, "delta": delta, "finish_reason": None}],
+    }
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+def _geminigen_openai_done_chunk() -> str:
+    payload = {
+        "id": f"chatcmpl-geminigen-{int(time.time())}",
+        "object": "chat.completion.chunk",
+        "created": int(time.time()),
+        "model": "geminigen",
+        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+    }
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
 def _runway_openai_chunk(content: str, *, role: Optional[str] = None) -> str:
     delta: Dict[str, Any] = {}
     if role:
@@ -941,6 +1107,79 @@ async def _start_runway_from_openai_request(
         options=params["options"],
         api_key_id=api_key_id,
     )
+
+
+async def _start_geminigen_from_request(
+    request: Any,
+    normalized: NormalizedGenerationRequest,
+    api_key_id: Optional[int],
+) -> GeminiGenTask:
+    service = _ensure_geminigen_service()
+    return await service.start_task(
+        public_model_id=normalized.model,
+        prompt=normalized.prompt,
+        images=normalized.images,
+        options=_geminigen_options_from_request(request),
+        api_key_id=api_key_id,
+    )
+
+
+async def _enqueue_geminigen_from_request(
+    request: Any,
+    normalized: NormalizedGenerationRequest,
+    api_key_id: Optional[int],
+) -> GeminiGenTask:
+    service = _ensure_geminigen_service()
+    return await service.enqueue_task(
+        public_model_id=normalized.model,
+        prompt=normalized.prompt,
+        images=normalized.images,
+        options=_geminigen_options_from_request(request),
+        api_key_id=api_key_id,
+    )
+
+
+async def _geminigen_openai_non_stream(
+    request: Any,
+    normalized: NormalizedGenerationRequest,
+    *,
+    api_key_id: Optional[int],
+    base_url: Optional[str],
+) -> Dict[str, Any]:
+    service = _ensure_geminigen_service()
+    task = await _start_geminigen_from_request(request, normalized, api_key_id)
+    final = await service.wait_for_task(task.job_id, api_key_id=api_key_id, base_url=base_url)
+    return service.task_to_openai_payload(final)
+
+
+async def _iterate_geminigen_openai_stream(
+    request: Any,
+    normalized: NormalizedGenerationRequest,
+    *,
+    api_key_id: Optional[int],
+    base_url: Optional[str],
+):
+    service = _ensure_geminigen_service()
+    yield _geminigen_openai_chunk("GeminiGen task submitted.\n", role="assistant")
+    task = await _start_geminigen_from_request(request, normalized, api_key_id)
+    last_progress = -1
+    while True:
+        current = await service.poll_task(task.job_id, api_key_id=api_key_id, base_url=base_url)
+        if current.progress != last_progress and current.status == "processing":
+            last_progress = current.progress
+            yield _geminigen_openai_chunk(f"GeminiGen progress: {current.progress}%\n")
+        if service.is_geminigen_terminal_status(current.status):
+            payload = service.task_to_openai_payload(current)
+            if "error" in payload:
+                yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+            else:
+                yield _geminigen_openai_chunk(_extract_openai_message_content(payload))
+                yield _geminigen_openai_done_chunk()
+            yield "data: [DONE]\n\n"
+            return
+        cfg = await service.db.get_geminigen_config()
+        interval = cfg.poll_interval_video_sec if current.kind == "video" else cfg.poll_interval_image_sec
+        await asyncio.sleep(float(interval))
 
 
 async def _runway_openai_non_stream(
@@ -2204,8 +2443,9 @@ async def list_models(auth_ctx: AuthContext = Depends(verify_api_key_flexible)):
             "object": "model",
             "owned_by": "flow2api",
             "description": model["description"],
+            **({"studio": model["studio"]} if model.get("studio") else {}),
         }
-        for model in _get_openai_model_catalog()
+        for model in await _get_openai_model_catalog()
     ]
     models.extend(
         {
@@ -2213,8 +2453,19 @@ async def list_models(auth_ctx: AuthContext = Depends(verify_api_key_flexible)):
             "object": "model",
             "owned_by": "runway",
             "description": model["description"],
+            **({"studio": model["studio"]} if model.get("studio") else {}),
         }
         for model in await _get_runway_openai_model_catalog()
+    )
+    models.extend(
+        {
+            "id": model["id"],
+            "object": "model",
+            "owned_by": "geminigen",
+            "description": model["description"],
+            **({"studio": model["studio"]} if model.get("studio") else {}),
+        }
+        for model in await _get_geminigen_openai_model_catalog()
     )
 
     return {"object": "list", "data": models}
@@ -2223,7 +2474,7 @@ async def list_models(auth_ctx: AuthContext = Depends(verify_api_key_flexible)):
 @router.get("/v1/models/aliases")
 async def list_model_aliases(auth_ctx: AuthContext = Depends(verify_api_key_flexible)):
     """List simplified model aliases for generationConfig-based resolution."""
-    aliases = get_base_model_aliases()
+    aliases = get_base_model_aliases() if await _has_native_flow_accounts() else {}
     alias_models = []
     for alias_id, description in aliases.items():
         alias_models.append(
@@ -2242,7 +2493,7 @@ async def list_model_aliases(auth_ctx: AuthContext = Depends(verify_api_key_flex
 @router.get("/models")
 async def list_gemini_models(auth_ctx: AuthContext = Depends(verify_api_key_flexible)):
     """List available models using Gemini-compatible response shape."""
-    catalog = _get_gemini_model_catalog()
+    catalog = await _get_gemini_model_catalog()
     return {
         "models": [
             _build_gemini_model_resource(model_id, description)
@@ -2255,7 +2506,7 @@ async def list_gemini_models(auth_ctx: AuthContext = Depends(verify_api_key_flex
 @router.get("/models/{model}")
 async def get_gemini_model(model: str, auth_ctx: AuthContext = Depends(verify_api_key_flexible)):
     """Return a single model using Gemini-compatible response shape."""
-    catalog = _get_gemini_model_catalog()
+    catalog = await _get_gemini_model_catalog()
     description = catalog.get(model)
     if not description:
         return JSONResponse(
@@ -2496,6 +2747,32 @@ async def create_chat_completion(
                 )
             )
 
+        if _is_geminigen_model(normalized.model):
+            _require_geminigen_scope(auth_ctx)
+            if request.stream:
+                return StreamingResponse(
+                    _iterate_geminigen_openai_stream(
+                        request,
+                        normalized,
+                        api_key_id=auth_ctx.key_id,
+                        base_url=request_base_url,
+                    ),
+                    media_type="text/event-stream",
+                    headers={
+                        "Cache-Control": "no-cache",
+                        "Connection": "keep-alive",
+                        "X-Accel-Buffering": "no",
+                    },
+                )
+            return _build_openai_json_response(
+                await _geminigen_openai_non_stream(
+                    request,
+                    normalized,
+                    api_key_id=auth_ctx.key_id,
+                    base_url=request_base_url,
+                )
+            )
+
         allowed_token_ids, selected_project_id = await _select_random_active_project_for_api_key(
             auth_ctx,
             normalized.model,
@@ -2580,6 +2857,27 @@ async def create_chat_completion_async(
                 },
             )
 
+        if _is_geminigen_model(normalized.model):
+            _require_geminigen_scope(auth_ctx)
+            task = await _enqueue_geminigen_from_request(
+                request,
+                normalized,
+                api_key_id=auth_ctx.key_id,
+            )
+            geminigen_service = _ensure_geminigen_service()
+            background_tasks.add_task(
+                geminigen_service.start_and_complete_queued_task_in_background,
+                task.job_id,
+                images=normalized.images,
+                options=_geminigen_options_from_request(request),
+                api_key_id=auth_ctx.key_id,
+                base_url=request_base_url,
+            )
+            return JSONResponse(
+                status_code=202,
+                content=geminigen_service.task_to_public_dict(task),
+            )
+
         allowed_token_ids, selected_project_id = await _select_random_active_project_for_api_key(
             auth_ctx,
             normalized.model,
@@ -2651,6 +2949,17 @@ async def get_job_status(
                     base_url=_get_request_base_url(raw_request),
                 )
                 return runway_service.task_to_public_dict(runway_task)
+        if geminigen_service is not None:
+            geminigen_task = await geminigen_service.db.get_geminigen_task(job_id)
+            if geminigen_task:
+                if auth_ctx.key_id is None or geminigen_task.api_key_id != auth_ctx.key_id:
+                    raise HTTPException(status_code=403, detail="Not authorized to view this job")
+                geminigen_task = await geminigen_service.poll_task(
+                    job_id,
+                    api_key_id=auth_ctx.key_id,
+                    base_url=_get_request_base_url(raw_request),
+                )
+                return geminigen_service.task_to_public_dict(geminigen_task)
         raise HTTPException(status_code=404, detail="Job not found")
 
     if auth_ctx.key_id is None or task.api_key_id != auth_ctx.key_id:
@@ -2702,6 +3011,26 @@ async def generate_content(
             raise HTTPException(status_code=400, detail="Prompt cannot be empty")
 
         request_base_url = _get_request_base_url(raw_request)
+        if _is_geminigen_model(normalized.model):
+            _require_geminigen_scope(auth_ctx)
+            payload = await _geminigen_openai_non_stream(
+                request,
+                normalized,
+                api_key_id=auth_ctx.key_id,
+                base_url=request_base_url,
+            )
+            if "error" in payload:
+                return _build_gemini_error_response_from_handler(payload)
+            return JSONResponse(
+                content=await _build_gemini_success_payload(
+                    payload,
+                    normalized.model,
+                    api_key_id=auth_ctx.key_id,
+                    allowed_token_ids=set(),
+                    project_id=None,
+                )
+            )
+
         allowed_token_ids, selected_project_id = await _select_random_active_project_for_api_key(
             auth_ctx,
             normalized.model,
@@ -2770,6 +3099,23 @@ async def stream_generate_content(
             raise HTTPException(status_code=400, detail="Prompt cannot be empty")
 
         request_base_url = _get_request_base_url(raw_request)
+        if _is_geminigen_model(normalized.model):
+            _require_geminigen_scope(auth_ctx)
+            return StreamingResponse(
+                _iterate_geminigen_openai_stream(
+                    request,
+                    normalized,
+                    api_key_id=auth_ctx.key_id,
+                    base_url=request_base_url,
+                ),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    "X-Accel-Buffering": "no",
+                },
+            )
+
         allowed_token_ids, selected_project_id = await _select_random_active_project_for_api_key(
             auth_ctx,
             normalized.model,

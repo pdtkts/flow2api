@@ -8,6 +8,7 @@ from typing import Optional, List, Dict, Any, Tuple, Set
 from pathlib import Path
 from .config import DEFAULT_YESCAPTCHA_TASK_TYPE, get_runtime_data_dir, normalize_yescaptcha_task_type
 from .runway_manifest import RUNWAY_MANIFEST_VERSION, RUNWAY_MODEL_MANIFEST
+from .storage_errors import is_sqlite_storage_full_error
 from .models import (
     Token,
     TokenStats,
@@ -26,6 +27,9 @@ from .models import (
     RunwayAccount,
     RunwayModel,
     RunwayTask,
+    GeminiGenConfig,
+    GeminiGenAccount,
+    GeminiGenTask,
 )
 
 
@@ -274,7 +278,7 @@ class Database:
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 completed_at TIMESTAMP,
-                FOREIGN KEY (account_id) REFERENCES runway_accounts(id),
+                FOREIGN KEY (account_id) REFERENCES runway_accounts(id) ON DELETE SET NULL,
                 FOREIGN KEY (api_key_id) REFERENCES api_keys(id)
             )
         """)
@@ -346,6 +350,99 @@ class Database:
                     int(bool(model.get("default_enabled", True) and live_available)),
                 ),
             )
+
+    async def _ensure_geminigen_tables(self, db) -> None:
+        """Create GeminiGen integration tables."""
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS geminigen_config (
+                id INTEGER PRIMARY KEY DEFAULT 1,
+                enabled BOOLEAN DEFAULT 0,
+                base_url TEXT DEFAULT 'https://api.geminigen.ai',
+                poll_interval_image_sec REAL DEFAULT 3.0,
+                poll_interval_video_sec REAL DEFAULT 12.0,
+                timeout_image_sec REAL DEFAULT 600.0,
+                timeout_video_sec REAL DEFAULT 1800.0,
+                global_image_concurrency INTEGER DEFAULT 5,
+                global_video_concurrency INTEGER DEFAULT 5,
+                cache_outputs BOOLEAN DEFAULT 1,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS geminigen_accounts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                label TEXT DEFAULT '',
+                raw_cookie TEXT DEFAULT '',
+                bearer_token TEXT DEFAULT '',
+                refresh_token TEXT DEFAULT '',
+                guard_id TEXT DEFAULT '',
+                turnstile_token TEXT DEFAULT '',
+                is_active BOOLEAN DEFAULT 1,
+                image_concurrency INTEGER DEFAULT 5,
+                video_concurrency INTEGER DEFAULT 5,
+                image_in_flight INTEGER DEFAULT 0,
+                video_in_flight INTEGER DEFAULT 0,
+                last_status TEXT,
+                last_error TEXT,
+                last_used_at TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS geminigen_tasks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id TEXT UNIQUE NOT NULL,
+                upstream_uuid TEXT,
+                account_id INTEGER,
+                api_key_id INTEGER,
+                request_log_id INTEGER,
+                public_model_id TEXT NOT NULL,
+                kind TEXT NOT NULL DEFAULT 'image',
+                endpoint_type TEXT NOT NULL DEFAULT 'imagen',
+                prompt TEXT DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'queued',
+                progress INTEGER DEFAULT 0,
+                raw_artifact_urls TEXT,
+                cached_artifact_urls TEXT,
+                request_payload TEXT,
+                response_payload TEXT,
+                error_message TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                started_at TIMESTAMP,
+                completed_at TIMESTAMP,
+                FOREIGN KEY (account_id) REFERENCES geminigen_accounts(id),
+                FOREIGN KEY (api_key_id) REFERENCES api_keys(id)
+            )
+        """)
+        account_columns = [
+            ("bearer_token", "TEXT DEFAULT ''"),
+            ("refresh_token", "TEXT DEFAULT ''"),
+            ("guard_id", "TEXT DEFAULT ''"),
+            ("turnstile_token", "TEXT DEFAULT ''"),
+            ("image_concurrency", "INTEGER DEFAULT 5"),
+            ("video_concurrency", "INTEGER DEFAULT 5"),
+            ("image_in_flight", "INTEGER DEFAULT 0"),
+            ("video_in_flight", "INTEGER DEFAULT 0"),
+        ]
+        for column_name, column_type in account_columns:
+            if not await self._column_exists(db, "geminigen_accounts", column_name):
+                await db.execute(f"ALTER TABLE geminigen_accounts ADD COLUMN {column_name} {column_type}")
+        config_columns = [
+            ("global_image_concurrency", "INTEGER DEFAULT 5"),
+            ("global_video_concurrency", "INTEGER DEFAULT 5"),
+        ]
+        for column_name, column_type in config_columns:
+            if not await self._column_exists(db, "geminigen_config", column_name):
+                await db.execute(f"ALTER TABLE geminigen_config ADD COLUMN {column_name} {column_type}")
+        task_columns = [
+            ("request_log_id", "INTEGER"),
+        ]
+        for column_name, column_type in task_columns:
+            if not await self._column_exists(db, "geminigen_tasks", column_name):
+                await db.execute(f"ALTER TABLE geminigen_tasks ADD COLUMN {column_name} {column_type}")
+        await db.execute("INSERT OR IGNORE INTO geminigen_config (id) VALUES (1)")
 
     async def _ensure_config_rows(self, db, config_dict: dict = None):
         """Ensure all config tables have their default rows
@@ -723,6 +820,7 @@ class Database:
             await db.execute("PRAGMA journal_mode = WAL")
             await db.execute("PRAGMA synchronous = NORMAL")
             await self._ensure_runway_tables(db)
+            await self._ensure_geminigen_tables(db)
 
             # ========== Step 1: Create missing tables ==========
             # Check and create cache_config table if missing
@@ -1437,6 +1535,7 @@ class Database:
             """)
 
             await self._ensure_runway_tables(db)
+            await self._ensure_geminigen_tables(db)
 
             # Call logic config table
             await db.execute("""
@@ -1913,18 +2012,37 @@ class Database:
             """, (today, today, today))
             stats_row = await stats_cursor.fetchone()
 
+            geminigen_cursor = await db.execute("""
+                SELECT
+                    COALESCE(SUM(CASE WHEN status = 'completed' AND kind = 'image' THEN 1 ELSE 0 END), 0) AS total_images,
+                    COALESCE(SUM(CASE WHEN status = 'completed' AND kind = 'video' THEN 1 ELSE 0 END), 0) AS total_videos,
+                    COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0) AS total_errors,
+                    COALESCE(SUM(CASE
+                        WHEN status = 'completed' AND kind = 'image'
+                             AND DATE(completed_at, 'localtime') = ? THEN 1 ELSE 0 END), 0) AS today_images,
+                    COALESCE(SUM(CASE
+                        WHEN status = 'completed' AND kind = 'video'
+                             AND DATE(completed_at, 'localtime') = ? THEN 1 ELSE 0 END), 0) AS today_videos,
+                    COALESCE(SUM(CASE
+                        WHEN status = 'failed'
+                             AND DATE(completed_at, 'localtime') = ? THEN 1 ELSE 0 END), 0) AS today_errors
+                FROM geminigen_tasks
+            """, (today, today, today))
+            geminigen_row = await geminigen_cursor.fetchone()
+
             token_data = dict(token_row) if token_row else {}
             stats_data = dict(stats_row) if stats_row else {}
+            geminigen_data = dict(geminigen_row) if geminigen_row else {}
 
             return {
                 "total_tokens": int(token_data.get("total_tokens") or 0),
                 "active_tokens": int(token_data.get("active_tokens") or 0),
-                "total_images": int(stats_data.get("total_images") or 0),
-                "total_videos": int(stats_data.get("total_videos") or 0),
-                "total_errors": int(stats_data.get("total_errors") or 0),
-                "today_images": int(stats_data.get("today_images") or 0),
-                "today_videos": int(stats_data.get("today_videos") or 0),
-                "today_errors": int(stats_data.get("today_errors") or 0)
+                "total_images": int(stats_data.get("total_images") or 0) + int(geminigen_data.get("total_images") or 0),
+                "total_videos": int(stats_data.get("total_videos") or 0) + int(geminigen_data.get("total_videos") or 0),
+                "total_errors": int(stats_data.get("total_errors") or 0) + int(geminigen_data.get("total_errors") or 0),
+                "today_images": int(stats_data.get("today_images") or 0) + int(geminigen_data.get("today_images") or 0),
+                "today_videos": int(stats_data.get("today_videos") or 0) + int(geminigen_data.get("today_videos") or 0),
+                "today_errors": int(stats_data.get("today_errors") or 0) + int(geminigen_data.get("today_errors") or 0)
             }
 
     async def get_system_info_stats(self) -> Dict[str, int]:
@@ -2353,6 +2471,15 @@ class Database:
 
     async def delete_runway_account(self, account_id: int) -> None:
         async with self._connect(write=True) as db:
+            await db.execute(
+                """
+                UPDATE runway_tasks
+                SET account_id = NULL,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE account_id = ?
+                """,
+                (account_id,),
+            )
             await db.execute("DELETE FROM runway_accounts WHERE id = ?", (account_id,))
             await db.commit()
 
@@ -2667,6 +2794,507 @@ class Database:
             )
             await db.commit()
 
+    def _coerce_geminigen_task_row(self, row: Dict[str, Any]) -> GeminiGenTask:
+        for key in ("raw_artifact_urls", "cached_artifact_urls"):
+            value = row.get(key)
+            if isinstance(value, str):
+                try:
+                    parsed = json.loads(value)
+                    row[key] = parsed if isinstance(parsed, list) else []
+                except Exception:
+                    row[key] = [value] if value else []
+        return GeminiGenTask(**row)
+
+    async def get_geminigen_config(self) -> GeminiGenConfig:
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("SELECT * FROM geminigen_config WHERE id = 1")
+            row = await cursor.fetchone()
+            return GeminiGenConfig(**dict(row)) if row else GeminiGenConfig()
+
+    async def update_geminigen_config(
+        self,
+        *,
+        enabled: Optional[bool] = None,
+        base_url: Optional[str] = None,
+        poll_interval_image_sec: Optional[float] = None,
+        poll_interval_video_sec: Optional[float] = None,
+        timeout_image_sec: Optional[float] = None,
+        timeout_video_sec: Optional[float] = None,
+        global_image_concurrency: Optional[int] = None,
+        global_video_concurrency: Optional[int] = None,
+        cache_outputs: Optional[bool] = None,
+    ) -> GeminiGenConfig:
+        current = await self.get_geminigen_config()
+        values = {
+            "enabled": int(current.enabled if enabled is None else bool(enabled)),
+            "base_url": (base_url if base_url is not None else current.base_url).strip().rstrip("/") or "https://api.geminigen.ai",
+            "poll_interval_image_sec": max(1.0, float(current.poll_interval_image_sec if poll_interval_image_sec is None else poll_interval_image_sec)),
+            "poll_interval_video_sec": max(2.0, float(current.poll_interval_video_sec if poll_interval_video_sec is None else poll_interval_video_sec)),
+            "timeout_image_sec": max(30.0, float(current.timeout_image_sec if timeout_image_sec is None else timeout_image_sec)),
+            "timeout_video_sec": max(60.0, float(current.timeout_video_sec if timeout_video_sec is None else timeout_video_sec)),
+            "global_image_concurrency": max(-1, int(current.global_image_concurrency if global_image_concurrency is None else global_image_concurrency)),
+            "global_video_concurrency": max(-1, int(current.global_video_concurrency if global_video_concurrency is None else global_video_concurrency)),
+            "cache_outputs": int(current.cache_outputs if cache_outputs is None else bool(cache_outputs)),
+        }
+        async with self._connect(write=True) as db:
+            await db.execute(
+                """
+                INSERT INTO geminigen_config (
+                    id, enabled, base_url, poll_interval_image_sec, poll_interval_video_sec,
+                    timeout_image_sec, timeout_video_sec, global_image_concurrency,
+                    global_video_concurrency, cache_outputs, updated_at
+                )
+                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(id) DO UPDATE SET
+                    enabled = excluded.enabled,
+                    base_url = excluded.base_url,
+                    poll_interval_image_sec = excluded.poll_interval_image_sec,
+                    poll_interval_video_sec = excluded.poll_interval_video_sec,
+                    timeout_image_sec = excluded.timeout_image_sec,
+                    timeout_video_sec = excluded.timeout_video_sec,
+                    global_image_concurrency = excluded.global_image_concurrency,
+                    global_video_concurrency = excluded.global_video_concurrency,
+                    cache_outputs = excluded.cache_outputs,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (
+                    values["enabled"],
+                    values["base_url"],
+                    values["poll_interval_image_sec"],
+                    values["poll_interval_video_sec"],
+                    values["timeout_image_sec"],
+                    values["timeout_video_sec"],
+                    values["global_image_concurrency"],
+                    values["global_video_concurrency"],
+                    values["cache_outputs"],
+                ),
+            )
+            await db.commit()
+        return await self.get_geminigen_config()
+
+    async def list_geminigen_accounts(self) -> List[GeminiGenAccount]:
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("SELECT * FROM geminigen_accounts ORDER BY is_active DESC, id ASC")
+            return [GeminiGenAccount(**dict(row)) for row in await cursor.fetchall()]
+
+    async def get_geminigen_account(self, account_id: int) -> Optional[GeminiGenAccount]:
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("SELECT * FROM geminigen_accounts WHERE id = ?", (int(account_id),))
+            row = await cursor.fetchone()
+            return GeminiGenAccount(**dict(row)) if row else None
+
+    async def create_geminigen_account(
+        self,
+        *,
+        label: str,
+        raw_cookie: str,
+        bearer_token: str = "",
+        refresh_token: str = "",
+        guard_id: str = "",
+        turnstile_token: str = "",
+        is_active: bool = True,
+        image_concurrency: int = 5,
+        video_concurrency: int = 5,
+        last_status: Optional[str] = None,
+        last_error: Optional[str] = None,
+    ) -> int:
+        async with self._connect(write=True) as db:
+            cursor = await db.execute(
+                """
+                INSERT INTO geminigen_accounts (
+                    label, raw_cookie, bearer_token, refresh_token, guard_id, turnstile_token, is_active,
+                    image_concurrency, video_concurrency, last_status, last_error
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    (label or "").strip(),
+                    raw_cookie or "",
+                    bearer_token or "",
+                    refresh_token or "",
+                    guard_id or "",
+                    turnstile_token or "",
+                    int(bool(is_active)),
+                    int(image_concurrency or 5),
+                    int(video_concurrency or 5),
+                    last_status,
+                    last_error,
+                ),
+            )
+            await db.commit()
+            return int(cursor.lastrowid)
+
+    async def update_geminigen_account(self, account_id: int, **kwargs) -> None:
+        allowed = {
+            "label", "raw_cookie", "bearer_token", "refresh_token", "guard_id", "turnstile_token",
+            "is_active", "image_concurrency", "video_concurrency",
+            "image_in_flight", "video_in_flight", "last_status", "last_error", "last_used_at",
+        }
+        updates = []
+        params = []
+        for key, value in kwargs.items():
+            if key not in allowed:
+                continue
+            if key == "is_active":
+                value = int(bool(value))
+            if key in {"image_concurrency", "video_concurrency", "image_in_flight", "video_in_flight"} and value is not None:
+                value = int(value)
+            updates.append(f"{key} = ?")
+            params.append(value)
+        if not updates:
+            return
+        updates.append("updated_at = CURRENT_TIMESTAMP")
+        params.append(int(account_id))
+        async with self._connect(write=True) as db:
+            await db.execute(f"UPDATE geminigen_accounts SET {', '.join(updates)} WHERE id = ?", params)
+            await db.commit()
+
+    async def delete_geminigen_account(self, account_id: int) -> None:
+        async with self._connect(write=True) as db:
+            await db.execute("DELETE FROM geminigen_accounts WHERE id = ?", (int(account_id),))
+            await db.commit()
+
+    async def acquire_geminigen_account(
+        self,
+        kind: str,
+        excluded_account_ids: Optional[List[int]] = None,
+    ) -> Optional[GeminiGenAccount]:
+        is_video = str(kind or "").lower() == "video"
+        limit_col = "video_concurrency" if is_video else "image_concurrency"
+        inflight_col = "video_in_flight" if is_video else "image_in_flight"
+        global_limit_col = "global_video_concurrency" if is_video else "global_image_concurrency"
+        excluded = [int(account_id) for account_id in (excluded_account_ids or []) if account_id]
+        exclusion_clause = ""
+        params: List[Any] = []
+        if excluded:
+            placeholders = ", ".join("?" for _ in excluded)
+            exclusion_clause = f"AND id NOT IN ({placeholders})"
+            params.extend(excluded)
+        async with self._connect(write=True) as db:
+            db.row_factory = aiosqlite.Row
+            config_cursor = await db.execute(f"SELECT {global_limit_col} FROM geminigen_config WHERE id = 1")
+            config_row = await config_cursor.fetchone()
+            global_limit_raw = None if not config_row else config_row[global_limit_col]
+            global_limit = 5 if global_limit_raw is None else int(global_limit_raw)
+            if global_limit >= 0:
+                total_cursor = await db.execute(f"SELECT COALESCE(SUM({inflight_col}), 0) FROM geminigen_accounts")
+                total_in_flight = int((await total_cursor.fetchone())[0] or 0)
+                if total_in_flight >= global_limit:
+                    return None
+            cursor = await db.execute(
+                f"""
+                SELECT * FROM geminigen_accounts
+                WHERE is_active = 1
+                  AND TRIM(COALESCE(bearer_token, '')) != ''
+                  AND ({limit_col} < 0 OR {inflight_col} < {limit_col})
+                  {exclusion_clause}
+                ORDER BY COALESCE(last_used_at, '1970-01-01 00:00:00') ASC, id ASC
+                LIMIT 1
+                """,
+                params,
+            )
+            row = await cursor.fetchone()
+            if not row:
+                return None
+            account = GeminiGenAccount(**dict(row))
+            await db.execute(
+                f"""
+                UPDATE geminigen_accounts
+                SET {inflight_col} = {inflight_col} + 1,
+                    last_used_at = CURRENT_TIMESTAMP,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (account.id,),
+            )
+            await db.commit()
+            if is_video:
+                account.video_in_flight += 1
+            else:
+                account.image_in_flight += 1
+            return account
+
+    async def release_geminigen_account(self, account_id: Optional[int], kind: str) -> None:
+        if not account_id:
+            return
+        inflight_col = "video_in_flight" if str(kind or "").lower() == "video" else "image_in_flight"
+        async with self._connect(write=True) as db:
+            await db.execute(
+                f"""
+                UPDATE geminigen_accounts
+                SET {inflight_col} = CASE WHEN {inflight_col} > 0 THEN {inflight_col} - 1 ELSE 0 END,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (int(account_id),),
+            )
+            await db.commit()
+
+    async def clear_geminigen_queue(self, account_id: Optional[int] = None, reason: str = "Manually cleared by admin") -> Dict[str, int]:
+        now = datetime.utcnow()
+        response = json.dumps(
+            {"status": "manual_cleared", "reason": reason},
+            ensure_ascii=False,
+        )
+        reset_params: List[Any] = []
+        reset_where = ""
+        task_params: List[Any] = []
+        task_where = "status IN ('queued', 'processing')"
+        if account_id is not None:
+            reset_where = " WHERE id = ?"
+            reset_params.append(int(account_id))
+            task_where += " AND account_id = ?"
+            task_params.append(int(account_id))
+        async with self._connect(write=True) as db:
+            db.row_factory = aiosqlite.Row
+            account_cursor = await db.execute(
+                f"SELECT COUNT(*) FROM geminigen_accounts{reset_where}",
+                reset_params,
+            )
+            account_count = int((await account_cursor.fetchone())[0] or 0)
+            cursor = await db.execute(
+                f"SELECT job_id, request_log_id FROM geminigen_tasks WHERE {task_where}",
+                task_params,
+            )
+            rows = await cursor.fetchall()
+            await db.execute(
+                f"""
+                UPDATE geminigen_accounts
+                SET image_in_flight = 0,
+                    video_in_flight = 0,
+                    updated_at = CURRENT_TIMESTAMP
+                {reset_where}
+                """,
+                reset_params,
+            )
+            await db.execute(
+                f"""
+                UPDATE geminigen_tasks
+                SET status = 'cancelled',
+                    error_message = ?,
+                    completed_at = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE {task_where}
+                """,
+                [reason, now, *task_params],
+            )
+            log_count = 0
+            for row in rows:
+                log_id = row["request_log_id"]
+                if not log_id:
+                    continue
+                body = json.dumps(
+                    {
+                        "status": "manual_cleared",
+                        "job_id": row["job_id"],
+                        "reason": reason,
+                    },
+                    ensure_ascii=False,
+                )
+                await db.execute(
+                    """
+                    UPDATE request_logs
+                    SET response_body = ?,
+                        status_code = 499,
+                        status_text = 'manual_cleared',
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    (body or response, int(log_id)),
+                )
+                log_count += 1
+            await db.commit()
+            return {
+                "accounts_reset": account_count,
+                "tasks_cleared": len(rows),
+                "logs_updated": log_count,
+            }
+
+    async def cancel_geminigen_task_by_log_id(self, log_id: int, reason: str = "Cancelled by admin") -> Dict[str, Any]:
+        now = datetime.utcnow()
+        async with self._connect(write=True) as db:
+            db.row_factory = aiosqlite.Row
+            log_cursor = await db.execute(
+                "SELECT id, operation, request_body, status_code, status_text FROM request_logs WHERE id = ? LIMIT 1",
+                (int(log_id),),
+            )
+            log_row = await log_cursor.fetchone()
+            if not log_row:
+                return {"success": False, "error": "Request log not found", "status_code": 404}
+            operation = str(log_row["operation"] or "")
+            if operation not in {"geminigen_image", "geminigen_video"}:
+                return {"success": False, "error": "Log is not a GeminiGen generation", "status_code": 400}
+
+            task_cursor = await db.execute(
+                """
+                SELECT *
+                FROM geminigen_tasks
+                WHERE request_log_id = ?
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (int(log_id),),
+            )
+            task = await task_cursor.fetchone()
+            if not task:
+                return {"success": False, "error": "GeminiGen task not found for this log", "status_code": 404}
+
+            job_id = str(task["job_id"] or "")
+            status = str(task["status"] or "")
+            if status in {"completed", "failed", "cancelled"}:
+                return {
+                    "success": True,
+                    "job_id": job_id,
+                    "status": status,
+                    "already_terminal": True,
+                    "task_cancelled": False,
+                    "slot_released": False,
+                }
+
+            account_id = task["account_id"]
+            kind = str(task["kind"] or "image")
+            await db.execute(
+                """
+                UPDATE geminigen_tasks
+                SET status = 'cancelled',
+                    error_message = ?,
+                    completed_at = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE job_id = ?
+                """,
+                (reason, now, job_id),
+            )
+            slot_released = False
+            if account_id:
+                inflight_col = "video_in_flight" if kind.lower() == "video" else "image_in_flight"
+                await db.execute(
+                    f"""
+                    UPDATE geminigen_accounts
+                    SET {inflight_col} = CASE WHEN {inflight_col} > 0 THEN {inflight_col} - 1 ELSE 0 END,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    (int(account_id),),
+                )
+                slot_released = True
+
+            await db.execute(
+                """
+                UPDATE request_logs
+                SET response_body = ?,
+                    status_code = 499,
+                    status_text = 'cancelled',
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (
+                    json.dumps(
+                        {
+                            "status": "cancelled",
+                            "job_id": job_id,
+                            "reason": reason,
+                        },
+                        ensure_ascii=False,
+                    ),
+                    int(log_id),
+                ),
+            )
+            await db.commit()
+            return {
+                "success": True,
+                "job_id": job_id,
+                "status": "cancelled",
+                "already_terminal": False,
+                "task_cancelled": True,
+                "slot_released": slot_released,
+            }
+
+    async def create_geminigen_task(self, task: GeminiGenTask) -> int:
+        async with self._connect(write=True) as db:
+            cursor = await db.execute(
+                """
+                INSERT INTO geminigen_tasks (
+                    job_id, upstream_uuid, account_id, api_key_id, request_log_id, public_model_id, kind,
+                    endpoint_type, prompt, status, progress, raw_artifact_urls,
+                    cached_artifact_urls, request_payload, response_payload, error_message,
+                    started_at, completed_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    task.job_id,
+                    task.upstream_uuid,
+                    task.account_id,
+                    task.api_key_id,
+                    task.request_log_id,
+                    task.public_model_id,
+                    task.kind,
+                    task.endpoint_type,
+                    task.prompt,
+                    task.status,
+                    task.progress,
+                    json.dumps(task.raw_artifact_urls) if isinstance(task.raw_artifact_urls, list) else task.raw_artifact_urls,
+                    json.dumps(task.cached_artifact_urls) if isinstance(task.cached_artifact_urls, list) else task.cached_artifact_urls,
+                    task.request_payload,
+                    task.response_payload,
+                    task.error_message,
+                    task.started_at,
+                    task.completed_at,
+                ),
+            )
+            await db.commit()
+            return int(cursor.lastrowid)
+
+    async def get_geminigen_task(self, job_id: str) -> Optional[GeminiGenTask]:
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("SELECT * FROM geminigen_tasks WHERE job_id = ?", ((job_id or "").strip(),))
+            row = await cursor.fetchone()
+            return self._coerce_geminigen_task_row(dict(row)) if row else None
+
+    async def list_active_geminigen_tasks(self, limit: int = 100) -> List[GeminiGenTask]:
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT * FROM geminigen_tasks
+                WHERE status IN ('queued', 'processing')
+                  AND TRIM(COALESCE(upstream_uuid, '')) != ''
+                ORDER BY created_at ASC
+                LIMIT ?
+                """,
+                (max(1, int(limit)),),
+            )
+            rows = await cursor.fetchall()
+            return [self._coerce_geminigen_task_row(dict(row)) for row in rows]
+
+    async def update_geminigen_task(self, job_id: str, **kwargs) -> None:
+        allowed = {
+            "upstream_uuid", "account_id", "api_key_id", "request_log_id", "public_model_id", "kind",
+            "endpoint_type", "prompt", "status", "progress", "raw_artifact_urls",
+            "cached_artifact_urls", "request_payload", "response_payload",
+            "error_message", "started_at", "completed_at",
+        }
+        updates = []
+        params = []
+        for key, value in kwargs.items():
+            if key not in allowed:
+                continue
+            if key in {"raw_artifact_urls", "cached_artifact_urls"} and isinstance(value, list):
+                value = json.dumps(value)
+            updates.append(f"{key} = ?")
+            params.append(value)
+        if not updates:
+            return
+        updates.append("updated_at = CURRENT_TIMESTAMP")
+        params.append((job_id or "").strip())
+        async with self._connect(write=True) as db:
+            await db.execute(f"UPDATE geminigen_tasks SET {', '.join(updates)} WHERE job_id = ?", params)
+            await db.commit()
+
     # Token stats operations (kept for compatibility, now delegates to specific methods)
     async def increment_token_stats(self, token_id: int, stat_type: str):
         """Increment token statistics (delegates to specific methods)"""
@@ -2854,14 +3482,24 @@ class Database:
                 return False
             expires_at = int(row[0])
             if expires_at <= now:
-                await db.execute("DELETE FROM admin_sessions WHERE token = ?", (token,))
-                await db.commit()
+                try:
+                    await db.execute("DELETE FROM admin_sessions WHERE token = ?", (token,))
+                    await db.commit()
+                except Exception as exc:
+                    if not is_sqlite_storage_full_error(exc):
+                        raise
                 return False
-            await db.execute(
-                "UPDATE admin_sessions SET last_used_at = ? WHERE token = ?",
-                (now, token),
-            )
-            await db.commit()
+            try:
+                await db.execute(
+                    "UPDATE admin_sessions SET last_used_at = ? WHERE token = ?",
+                    (now, token),
+                )
+                await db.commit()
+            except Exception as exc:
+                # Activity timestamps are housekeeping. Keep an already valid
+                # session usable so the admin can reclaim cached disk space.
+                if not is_sqlite_storage_full_error(exc):
+                    raise
             return True
 
     async def delete_admin_session(self, token: str) -> None:

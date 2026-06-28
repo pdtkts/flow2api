@@ -410,6 +410,70 @@ class RunwayTask(BaseModel):
     completed_at: Optional[datetime] = None
 
 
+class GeminiGenConfig(BaseModel):
+    """Global GeminiGen web-session integration configuration."""
+
+    id: int = 1
+    enabled: bool = False
+    base_url: str = "https://api.geminigen.ai"
+    poll_interval_image_sec: float = 3.0
+    poll_interval_video_sec: float = 12.0
+    timeout_image_sec: float = 600.0
+    timeout_video_sec: float = 1800.0
+    global_image_concurrency: int = 5
+    global_video_concurrency: int = 5
+    cache_outputs: bool = True
+    updated_at: Optional[datetime] = None
+
+
+class GeminiGenAccount(BaseModel):
+    """GeminiGen Max web-account credential entry."""
+
+    id: Optional[int] = None
+    label: str = ""
+    raw_cookie: str = ""
+    bearer_token: str = ""
+    refresh_token: str = ""
+    guard_id: str = ""
+    turnstile_token: str = ""
+    is_active: bool = True
+    image_concurrency: int = 5
+    video_concurrency: int = 5
+    image_in_flight: int = 0
+    video_in_flight: int = 0
+    last_status: Optional[str] = None
+    last_error: Optional[str] = None
+    last_used_at: Optional[datetime] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+
+class GeminiGenTask(BaseModel):
+    """GeminiGen queued/upstream job state."""
+
+    id: Optional[int] = None
+    job_id: str
+    upstream_uuid: Optional[str] = None
+    account_id: Optional[int] = None
+    api_key_id: Optional[int] = None
+    request_log_id: Optional[int] = None
+    public_model_id: str
+    kind: str = "image"
+    endpoint_type: str = "imagen"
+    prompt: str = ""
+    status: str = "queued"
+    progress: int = 0
+    raw_artifact_urls: Optional[List[str]] = None
+    cached_artifact_urls: Optional[List[str]] = None
+    request_payload: Optional[str] = None
+    response_payload: Optional[str] = None
+    error_message: Optional[str] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+
+
 # OpenAI Compatible Request Models
 class ChatMessage(BaseModel):
     """Chat message"""

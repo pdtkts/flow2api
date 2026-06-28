@@ -31,6 +31,7 @@ from ..services.token_manager import TokenManager
 from ..services.proxy_manager import ProxyManager
 from ..services.concurrency_manager import ConcurrencyManager
 from ..services.runway_service import RunwayService
+from ..services.geminigen_service import GeminiGenService
 
 try:
     import httpx
@@ -46,6 +47,7 @@ db: Database = None
 concurrency_manager: Optional[ConcurrencyManager] = None
 api_key_manager: Optional[ApiKeyManager] = None
 runway_service: Optional[RunwayService] = None
+geminigen_service: Optional[GeminiGenService] = None
 
 # Admin session TTLs (seconds)
 _ADMIN_SESSION_TTL_REMEMBER = 30 * 24 * 3600  # 30 days when "remember me" is on
@@ -625,15 +627,17 @@ def set_dependencies(
     cm: Optional[ConcurrencyManager] = None,
     akm: Optional[ApiKeyManager] = None,
     rs: Optional[RunwayService] = None,
+    gs: Optional[GeminiGenService] = None,
 ):
     """Set service instances"""
-    global token_manager, proxy_manager, db, concurrency_manager, api_key_manager, runway_service
+    global token_manager, proxy_manager, db, concurrency_manager, api_key_manager, runway_service, geminigen_service
     token_manager = tm
     proxy_manager = pm
     db = database
     concurrency_manager = cm
     api_key_manager = akm
     runway_service = rs
+    geminigen_service = gs
 
 
 # ========== Request Models ==========
@@ -870,6 +874,42 @@ class RunwayModelUpdateRequest(BaseModel):
     live_available: Optional[bool] = None
     disabled_reason: Optional[str] = None
     is_enabled: Optional[bool] = None
+
+
+class GeminiGenConfigUpdateRequest(BaseModel):
+    enabled: Optional[bool] = None
+    base_url: Optional[str] = None
+    poll_interval_image_sec: Optional[float] = None
+    poll_interval_video_sec: Optional[float] = None
+    timeout_image_sec: Optional[float] = None
+    timeout_video_sec: Optional[float] = None
+    global_image_concurrency: Optional[int] = None
+    global_video_concurrency: Optional[int] = None
+    cache_outputs: Optional[bool] = None
+
+
+class GeminiGenAccountRequest(BaseModel):
+    label: str = ""
+    raw_cookie: str = ""
+    bearer_token: str = ""
+    refresh_token: str = ""
+    guard_id: str = ""
+    turnstile_token: str = ""
+    is_active: bool = True
+    image_concurrency: int = 5
+    video_concurrency: int = 5
+
+
+class GeminiGenAccountUpdateRequest(BaseModel):
+    label: Optional[str] = None
+    raw_cookie: Optional[str] = None
+    bearer_token: Optional[str] = None
+    refresh_token: Optional[str] = None
+    guard_id: Optional[str] = None
+    turnstile_token: Optional[str] = None
+    is_active: Optional[bool] = None
+    image_concurrency: Optional[int] = None
+    video_concurrency: Optional[int] = None
 
 
 class ST2ATRequest(BaseModel):
@@ -1842,6 +1882,12 @@ def _require_runway_service() -> RunwayService:
     return runway_service
 
 
+def _require_geminigen_service() -> GeminiGenService:
+    if geminigen_service is None:
+        raise HTTPException(status_code=500, detail="GeminiGen service not initialized")
+    return geminigen_service
+
+
 def _validate_json_object_text(raw: str, field_name: str) -> str:
     text = (raw or "").strip() or "{}"
     try:
@@ -1913,6 +1959,42 @@ def _runway_model_payload(model) -> Dict[str, Any]:
         "is_enabled": bool(model.is_enabled),
         "created_at": model.created_at.isoformat() if model.created_at else None,
         "updated_at": model.updated_at.isoformat() if model.updated_at else None,
+    }
+
+
+def _mask_secret(value: str) -> str:
+    text = str(value or "")
+    if not text:
+        return ""
+    if len(text) <= 12:
+        return "***"
+    return f"{text[:6]}...{text[-4:]}"
+
+
+def _geminigen_account_payload(account) -> Dict[str, Any]:
+    return {
+        "id": account.id,
+        "label": account.label,
+        "raw_cookie": "",
+        "raw_cookie_preview": _mask_secret(account.raw_cookie),
+        "bearer_token": "",
+        "bearer_token_preview": _mask_secret(account.bearer_token),
+        "refresh_token": "",
+        "refresh_token_preview": _mask_secret(getattr(account, "refresh_token", "")),
+        "guard_id": "",
+        "guard_id_preview": _mask_secret(account.guard_id),
+        "turnstile_token": "",
+        "turnstile_token_preview": _mask_secret(account.turnstile_token),
+        "is_active": bool(account.is_active),
+        "image_concurrency": account.image_concurrency,
+        "video_concurrency": account.video_concurrency,
+        "image_in_flight": account.image_in_flight,
+        "video_in_flight": account.video_in_flight,
+        "last_status": account.last_status or "",
+        "last_error": account.last_error or "",
+        "last_used_at": account.last_used_at.isoformat() if account.last_used_at else None,
+        "created_at": account.created_at.isoformat() if account.created_at else None,
+        "updated_at": account.updated_at.isoformat() if account.updated_at else None,
     }
 
 
@@ -2207,6 +2289,211 @@ async def sync_runway_models(token: str = Depends(verify_admin_token)):
     }
 
 
+@router.get("/api/admin/geminigen/config")
+async def get_geminigen_admin_config(token: str = Depends(verify_admin_token)):
+    cfg = await db.get_geminigen_config()
+    accounts = await db.list_geminigen_accounts()
+    return {
+        "success": True,
+        "config": {
+            "enabled": bool(cfg.enabled),
+            "base_url": cfg.base_url,
+            "poll_interval_image_sec": cfg.poll_interval_image_sec,
+            "poll_interval_video_sec": cfg.poll_interval_video_sec,
+            "timeout_image_sec": cfg.timeout_image_sec,
+            "timeout_video_sec": cfg.timeout_video_sec,
+            "global_image_concurrency": cfg.global_image_concurrency,
+            "global_video_concurrency": cfg.global_video_concurrency,
+            "cache_outputs": bool(cfg.cache_outputs),
+        },
+        "accounts": [_geminigen_account_payload(account) for account in accounts],
+        "models": GeminiGenService.model_catalog(),
+    }
+
+
+@router.post("/api/admin/geminigen/config")
+async def update_geminigen_admin_config(
+    request: GeminiGenConfigUpdateRequest,
+    token: str = Depends(verify_admin_token),
+):
+    cfg = await db.update_geminigen_config(
+        enabled=request.enabled,
+        base_url=request.base_url,
+        poll_interval_image_sec=request.poll_interval_image_sec,
+        poll_interval_video_sec=request.poll_interval_video_sec,
+        timeout_image_sec=request.timeout_image_sec,
+        timeout_video_sec=request.timeout_video_sec,
+        global_image_concurrency=request.global_image_concurrency,
+        global_video_concurrency=request.global_video_concurrency,
+        cache_outputs=request.cache_outputs,
+    )
+    return {
+        "success": True,
+        "config": {
+            "enabled": bool(cfg.enabled),
+            "base_url": cfg.base_url,
+            "poll_interval_image_sec": cfg.poll_interval_image_sec,
+            "poll_interval_video_sec": cfg.poll_interval_video_sec,
+            "timeout_image_sec": cfg.timeout_image_sec,
+            "timeout_video_sec": cfg.timeout_video_sec,
+            "global_image_concurrency": cfg.global_image_concurrency,
+            "global_video_concurrency": cfg.global_video_concurrency,
+            "cache_outputs": bool(cfg.cache_outputs),
+        },
+    }
+
+
+@router.get("/api/admin/geminigen/models/status")
+async def get_geminigen_model_status(
+    window: str = Query("1h"),
+    token: str = Depends(verify_admin_token),
+):
+    service = _require_geminigen_service()
+    try:
+        return await service.get_model_status(window=window)
+    except Exception as exc:
+        accounts = await db.list_geminigen_accounts()
+        cfg = await db.get_geminigen_config()
+        return {
+            "success": False,
+            "status": "unavailable",
+            "error": str(exc),
+            "window": window,
+            "generated_at": None,
+            "models": [],
+            "summary": {
+                "operational": 0,
+                "degraded": 0,
+                "outage": 0,
+                "unknown": 0,
+                "matching_model_groups": 0,
+            },
+            "geminigen": {
+                "enabled": bool(cfg.enabled),
+                "active_account_count": len([account for account in accounts if account.is_active]),
+                "image_in_flight": sum(int(account.image_in_flight or 0) for account in accounts),
+                "video_in_flight": sum(int(account.video_in_flight or 0) for account in accounts),
+            },
+        }
+
+
+@router.post("/api/admin/geminigen/accounts")
+async def create_geminigen_account(
+    request: GeminiGenAccountRequest,
+    token: str = Depends(verify_admin_token),
+):
+    if not request.bearer_token.strip():
+        raise HTTPException(status_code=400, detail="GeminiGen bearer token is required")
+    meta = GeminiGenService.describe_credential(request.raw_cookie, request.bearer_token, request.guard_id)
+    account_id = await db.create_geminigen_account(
+        label=request.label.strip() or "GeminiGen account",
+        raw_cookie="",
+        bearer_token=request.bearer_token.strip(),
+        refresh_token=request.refresh_token.strip(),
+        guard_id="",
+        turnstile_token=request.turnstile_token.strip(),
+        is_active=request.is_active,
+        image_concurrency=max(-1, int(request.image_concurrency or 5)),
+        video_concurrency=max(-1, int(request.video_concurrency or 5)),
+        last_status=str(meta.get("status") or ""),
+        last_error=str(meta.get("error") or ""),
+    )
+    account = await db.get_geminigen_account(account_id)
+    return {"success": True, "account": _geminigen_account_payload(account)}
+
+
+@router.patch("/api/admin/geminigen/accounts/{account_id}")
+async def update_geminigen_account(
+    account_id: int,
+    request: GeminiGenAccountUpdateRequest,
+    token: str = Depends(verify_admin_token),
+):
+    account = await db.get_geminigen_account(account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="GeminiGen account not found")
+    updates: Dict[str, Any] = {}
+    for field in ("label", "raw_cookie", "bearer_token", "refresh_token", "guard_id", "turnstile_token"):
+        value = getattr(request, field)
+        if value is not None:
+            stripped = value.strip()
+            if field in {"raw_cookie", "guard_id"}:
+                updates[field] = ""
+            elif field in {"bearer_token", "refresh_token"} and not stripped:
+                continue
+            else:
+                updates[field] = stripped
+    if request.is_active is not None:
+        updates["is_active"] = request.is_active
+    if request.image_concurrency is not None:
+        updates["image_concurrency"] = max(-1, int(request.image_concurrency))
+    if request.video_concurrency is not None:
+        updates["video_concurrency"] = max(-1, int(request.video_concurrency))
+    if "bearer_token" in updates:
+        meta = GeminiGenService.describe_credential(
+            "",
+            updates.get("bearer_token", account.bearer_token),
+            "",
+        )
+        updates["last_status"] = str(meta.get("status") or "")
+        updates["last_error"] = str(meta.get("error") or "")
+    await db.update_geminigen_account(account_id, **updates)
+    account = await db.get_geminigen_account(account_id)
+    return {"success": True, "account": _geminigen_account_payload(account)}
+
+
+@router.delete("/api/admin/geminigen/accounts/{account_id}")
+async def delete_geminigen_account(
+    account_id: int,
+    token: str = Depends(verify_admin_token),
+):
+    await db.delete_geminigen_account(account_id)
+    return {"success": True, "account_id": account_id}
+
+
+@router.post("/api/admin/geminigen/queue/clear")
+async def clear_geminigen_queue(token: str = Depends(verify_admin_token)):
+    result = await db.clear_geminigen_queue(reason="Manually cleared by admin")
+    accounts = await db.list_geminigen_accounts()
+    return {
+        "success": True,
+        **result,
+        "accounts": [_geminigen_account_payload(account) for account in accounts],
+    }
+
+
+@router.post("/api/admin/geminigen/accounts/{account_id}/clear-slots")
+async def clear_geminigen_account_slots(
+    account_id: int,
+    token: str = Depends(verify_admin_token),
+):
+    account = await db.get_geminigen_account(account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="GeminiGen account not found")
+    result = await db.clear_geminigen_queue(account_id=account_id, reason="Manually cleared by admin")
+    account = await db.get_geminigen_account(account_id)
+    return {
+        "success": True,
+        **result,
+        "account": _geminigen_account_payload(account) if account else None,
+    }
+
+
+@router.post("/api/admin/geminigen/accounts/{account_id}/test")
+async def test_geminigen_account(
+    account_id: int,
+    token: str = Depends(verify_admin_token),
+):
+    service = _require_geminigen_service()
+    result = await service.test_account(account_id)
+    account = await db.get_geminigen_account(account_id)
+    return {
+        "success": bool(result.get("success")),
+        "status": result.get("status"),
+        "error": result.get("error"),
+        "account": _geminigen_account_payload(account) if account else None,
+    }
+
+
 def _event_calendar_path() -> Path:
     return Path(__file__).resolve().parent.parent / "services" / "event_calendar_2026.csv"
 
@@ -2436,6 +2723,20 @@ async def get_log_detail(
     }
 
 
+@router.post("/api/logs/{log_id}/geminigen/cancel")
+async def cancel_geminigen_log_task(
+    log_id: int,
+    token: str = Depends(verify_admin_token),
+):
+    result = await db.cancel_geminigen_task_by_log_id(log_id, reason="Cancelled by admin")
+    if not result.get("success"):
+        raise HTTPException(
+            status_code=int(result.get("status_code") or 400),
+            detail=result.get("error") or "Could not cancel GeminiGen task",
+        )
+    return result
+
+
 @router.delete("/api/logs")
 async def clear_logs(token: str = Depends(verify_admin_token)):
     """Clear all logs"""
@@ -2611,8 +2912,6 @@ async def create_managed_api_key(
 ):
     if not api_key_manager:
         raise HTTPException(status_code=503, detail="API key manager not initialized")
-    if not request.account_ids:
-        raise HTTPException(status_code=400, detail="account_ids cannot be empty")
     scopes_str = (request.scopes or "").strip()
     if not scopes_str:
         raise HTTPException(status_code=400, detail="scopes cannot be empty")

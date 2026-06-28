@@ -1764,6 +1764,22 @@ class FlowClient:
                 return name.strip()
         return None
 
+    def _extract_video_media_id(self, media: Dict[str, Any]) -> Optional[str]:
+        if not isinstance(media, dict):
+            return None
+        video = media.get("video") if isinstance(media.get("video"), dict) else {}
+        for candidate in (
+            media.get("mediaGenerationId"),
+            media.get("mediaId"),
+            video.get("mediaGenerationId"),
+            video.get("mediaId"),
+            self._find_nested_string(media.get("mediaMetadata", {}), ("mediaGenerationId", "mediaId")),
+            self._extract_media_name(media),
+        ):
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip()
+        return None
+
     def _build_video_media_generation_context(self, batch_id: Optional[str] = None) -> Dict[str, Any]:
         return {
             "batchId": batch_id or str(uuid.uuid4()),
@@ -1802,15 +1818,236 @@ class FlowClient:
 
     def _extract_video_url_from_media(self, media: Dict[str, Any]) -> Optional[str]:
         video = media.get("video") if isinstance(media.get("video"), dict) else {}
+        direct_url_keys = (
+            "fifeUrl",
+            "videoUrl",
+            "outputUri",
+            "downloadUri",
+            "servingBaseUri",
+            "servingUri",
+            "mediaUrl",
+            "downloadUrl",
+        )
         candidates = [
-            self._find_nested_string(video, ("fifeUrl", "videoUrl", "outputUri", "downloadUri")),
-            self._find_nested_string(media, ("fifeUrl", "videoUrl", "outputUri", "downloadUri")),
+            self._find_nested_string(video, direct_url_keys),
+            self._find_nested_string(media, direct_url_keys),
             self._find_nested_string(video, ("uri", "url")),
+            self._find_nested_string(media, ("uri", "url")),
         ]
         for candidate in candidates:
             if candidate and (candidate.startswith("http://") or candidate.startswith("https://") or candidate.startswith("/")):
                 return candidate
+        media_id = self._extract_video_media_id(media)
+        if media_id:
+            return f"{self.labs_base_url}/trpc/media.getMediaUrlRedirect?name={quote(media_id, safe='')}"
         return None
+
+    def _build_media_url_redirect_endpoint(self, media_id: str) -> str:
+        clean_id = (media_id or "").strip()
+        if not clean_id:
+            raise ValueError("media_id is required")
+        return (
+            f"{self.labs_base_url}/trpc/media.getMediaUrlRedirect"
+            f"?name={quote(clean_id, safe='')}"
+        )
+
+    def _build_media_redirect_request_headers(self, st: str) -> Dict[str, str]:
+        fingerprint = self._request_fingerprint_ctx.get()
+        account_id = (st or "")[:16] or None
+        headers: Dict[str, str] = {
+            "Accept": "*/*",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            "Referer": "https://labs.google/fx/tools/flow",
+            "Origin": "https://labs.google",
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-origin",
+            "Cookie": f"__Secure-next-auth.session-token={(st or '').strip()}",
+        }
+        fingerprint_user_agent = None
+        if isinstance(fingerprint, dict):
+            fingerprint_user_agent = fingerprint.get("user_agent")
+            if fingerprint.get("accept_language"):
+                headers["Accept-Language"] = str(fingerprint["accept_language"])
+            if fingerprint.get("sec_ch_ua"):
+                headers["sec-ch-ua"] = str(fingerprint["sec_ch_ua"])
+            if fingerprint.get("sec_ch_ua_mobile"):
+                headers["sec-ch-ua-mobile"] = str(fingerprint["sec_ch_ua_mobile"])
+            if fingerprint.get("sec_ch_ua_platform"):
+                headers["sec-ch-ua-platform"] = str(fingerprint["sec_ch_ua_platform"])
+        headers["User-Agent"] = fingerprint_user_agent or self._generate_user_agent(account_id)
+        return headers
+
+    async def _resolve_media_redirect_proxy(self) -> Optional[str]:
+        if not self.proxy_manager:
+            return None
+        try:
+            if hasattr(self.proxy_manager, "get_media_proxy_url"):
+                return await self.proxy_manager.get_media_proxy_url()
+            if hasattr(self.proxy_manager, "get_request_proxy_url"):
+                return await self.proxy_manager.get_request_proxy_url()
+            if hasattr(self.proxy_manager, "get_proxy_url"):
+                return await self.proxy_manager.get_proxy_url()
+        except Exception as exc:
+            debug_logger.log_warning(f"[MEDIA REDIRECT] proxy resolve failed: {exc}")
+        return None
+
+    @staticmethod
+    def _extract_redirect_location(response) -> Optional[str]:
+        location = response.headers.get("location") or response.headers.get("Location")
+        if isinstance(location, str) and location.strip():
+            return location.strip()
+        return None
+
+    @staticmethod
+    def _is_allowed_flow_media_url(url: str) -> bool:
+        if not isinstance(url, str) or not url.strip():
+            return False
+        parsed = urlparse(url.strip())
+        host = (parsed.hostname or "").lower()
+        if host == "flow-content.google":
+            return True
+        if host.endswith(".googleusercontent.com"):
+            return True
+        return False
+
+    async def _fetch_media_redirect_location(
+        self,
+        redirect_url: str,
+        headers: Dict[str, str],
+        proxy_url: Optional[str],
+    ) -> str:
+        last_error: Optional[Exception] = None
+        for client_name, request_fn in (
+            ("curl_cffi", self._fetch_media_redirect_location_curl),
+            ("httpx", self._fetch_media_redirect_location_httpx),
+        ):
+            try:
+                status_code, location = await request_fn(redirect_url, headers, proxy_url)
+                if status_code in (301, 302, 303, 307, 308):
+                    if location and self._is_allowed_flow_media_url(location):
+                        return location
+                    raise Exception(
+                        f"Media redirect returned HTTP {status_code} without a valid CDN location"
+                    )
+                if status_code == 200 and location and self._is_allowed_flow_media_url(location):
+                    return location
+                if status_code in (401, 403):
+                    raise Exception(
+                        f"Media redirect rejected by Flow media endpoint (HTTP {status_code})"
+                    )
+                raise Exception(f"Media redirect failed with HTTP {status_code}")
+            except Exception as exc:
+                last_error = exc
+                debug_logger.log_warning(
+                    f"[MEDIA REDIRECT] {client_name} failed for {urlparse(redirect_url).hostname}: {exc}"
+                )
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("Media redirect resolution failed")
+
+    async def _fetch_media_redirect_location_curl(
+        self,
+        redirect_url: str,
+        headers: Dict[str, str],
+        proxy_url: Optional[str],
+    ) -> tuple[int, Optional[str]]:
+        async with AsyncSession(trust_env=False) as session:
+            response = await session.get(
+                redirect_url,
+                headers=headers,
+                proxy=proxy_url,
+                timeout=self.timeout,
+                impersonate="chrome124",
+                allow_redirects=False,
+                verify=False,
+            )
+            return response.status_code, self._extract_redirect_location(response)
+
+    async def _fetch_media_redirect_location_httpx(
+        self,
+        redirect_url: str,
+        headers: Dict[str, str],
+        proxy_url: Optional[str],
+    ) -> tuple[int, Optional[str]]:
+        if httpx is None:
+            raise RuntimeError("httpx is not installed")
+        timeout = httpx.Timeout(float(self.timeout or 60), connect=30.0)
+        async with httpx.AsyncClient(
+            follow_redirects=False,
+            timeout=timeout,
+            verify=False,
+            proxy=proxy_url,
+        ) as client:
+            response = await client.get(redirect_url, headers=headers)
+            return response.status_code, self._extract_redirect_location(response)
+
+    async def _resolve_media_redirect_via_extension(
+        self,
+        redirect_url: str,
+        st: str,
+        token_id: Optional[int],
+    ) -> str:
+        headers = self._build_media_redirect_request_headers(st)
+        managed_api_key_id = self.get_managed_api_key_id()
+        result = await self.extension_generation_service.submit_generation(
+            url=redirect_url,
+            method="GET",
+            headers=headers,
+            json_data={},
+            timeout_seconds=int(self.timeout or 60),
+            token_id=token_id,
+            managed_api_key_id=managed_api_key_id,
+        )
+        for key in ("redirect_url", "final_url", "url", "location"):
+            candidate = result.get(key)
+            if isinstance(candidate, str) and self._is_allowed_flow_media_url(candidate):
+                return candidate
+        response_headers = result.get("response_headers")
+        if isinstance(response_headers, dict):
+            location = response_headers.get("location") or response_headers.get("Location")
+            if isinstance(location, str) and self._is_allowed_flow_media_url(location):
+                return location
+        raise Exception("Extension media redirect did not return a CDN location")
+
+    async def resolve_media_download_url(
+        self,
+        media_id: str,
+        st: str,
+        at: Optional[str] = None,
+        token_id: Optional[int] = None,
+    ) -> str:
+        """Resolve a Flow media ID to a signed CDN download URL."""
+        redirect_url = self._build_media_url_redirect_endpoint(media_id)
+        headers = self._build_media_redirect_request_headers(st)
+        proxy_url = await self._resolve_media_redirect_proxy()
+        fingerprint = self._request_fingerprint_ctx.get()
+        if isinstance(fingerprint, dict) and fingerprint.get("proxy_url") is not None:
+            proxy_url = fingerprint.get("proxy_url") or None
+
+        debug_logger.log_info(
+            f"[MEDIA REDIRECT] resolving media_id={media_id} via ST cookie "
+            f"(proxy={_proxy_endpoint_for_log(proxy_url)})"
+        )
+
+        try:
+            return await self._fetch_media_redirect_location(redirect_url, headers, proxy_url)
+        except Exception as primary_error:
+            if token_id is not None and await self._token_allows_extension_generation(token_id):
+                try:
+                    debug_logger.log_warning(
+                        f"[MEDIA REDIRECT] server redirect failed, trying extension GET: {primary_error}"
+                    )
+                    return await self._resolve_media_redirect_via_extension(
+                        redirect_url,
+                        st,
+                        token_id,
+                    )
+                except Exception as ext_error:
+                    debug_logger.log_error(f"[MEDIA REDIRECT] extension fallback failed: {ext_error}")
+            raise Exception(
+                f"Failed to resolve media download URL: {primary_error}"
+            ) from primary_error
 
     def _media_to_video_operation(
         self,
@@ -1821,6 +2058,7 @@ class FlowClient:
             return None
 
         media_name = self._extract_media_name(media)
+        video_media_id = self._extract_video_media_id(media) or media_name
         video = media.get("video") if isinstance(media.get("video"), dict) else {}
         video_operation = video.get("operation") if isinstance(video.get("operation"), dict) else {}
         operation_name = (
@@ -1860,8 +2098,8 @@ class FlowClient:
         video_metadata: Dict[str, Any] = {}
         if video_url:
             video_metadata["fifeUrl"] = video_url
-        if media_name:
-            video_metadata["mediaGenerationId"] = media_name
+        if video_media_id:
+            video_metadata["mediaGenerationId"] = video_media_id
         if aspect_ratio:
             video_metadata["aspectRatio"] = aspect_ratio
         if video_metadata:

@@ -15,6 +15,14 @@ export const STATUS_MAP: Record<string, string> = {
   video_polling: "Video polling",
   caching_image: "Caching image",
   caching_video: "Caching video",
+  geminigen_queued: "GeminiGen queued",
+  geminigen_account_selected: "GeminiGen account selected",
+  geminigen_submitting: "GeminiGen submitting",
+  geminigen_submitted: "GeminiGen submitted",
+  geminigen_polling: "GeminiGen polling",
+  manual_cleared: "Manually cleared",
+  cancelled: "Cancelled",
+  waiting_for_account_slot: "Waiting for GeminiGen slot",
   completed: "Completed",
   failed: "Failed",
   processing: "Processing",
@@ -28,15 +36,22 @@ export type UITone = "success" | "processing" | "error" | "neutral"
 /** Image / video / other for operation chip */
 export function getOperationKind(operation: string | null | undefined): "image" | "video" | "other" {
   const op = String(operation || "").trim()
-  if (op === "generate_image") return "image"
-  if (op === "generate_video") return "video"
+  if (op === "generate_image" || op === "geminigen_image") return "image"
+  if (op === "generate_video" || op === "geminigen_video") return "video"
   return "other"
 }
 
 export function operationLabel(kind: ReturnType<typeof getOperationKind>, raw: string | null | undefined): string {
+  const op = String(raw || "").trim()
+  if (op === "adobe:cloning_prompts") return "Adobe Cloning Prompts"
+  if (op === "adobe:cloning_video_prompt") return "Adobe Cloning Video"
+  if (op === "adobe:metadata") return "Adobe Metadata"
+  if (op === "adobe:tracker_contributor") return "Adobe Tracker Contributor"
+  if (op === "adobe:tracker_keyword") return "Adobe Tracker Keyword"
+  if (op === "geminigen_image") return "GeminiGen Image"
+  if (op === "geminigen_video") return "GeminiGen Video"
   if (kind === "image") return "Image"
   if (kind === "video") return "Video"
-  const op = String(raw || "").trim()
   return op.length > 18 ? `${op.slice(0, 16)}…` : op || "—"
 }
 
@@ -44,7 +59,7 @@ export function operationLabel(kind: ReturnType<typeof getOperationKind>, raw: s
 export function statusTone(l: LogListItem): UITone {
   const code = l.status_code
   const st = (l.status_text || "").trim().toLowerCase()
-  if (st === "failed") return "error"
+  if (st === "failed" || st.startsWith("http_")) return "error"
   if (code != null && code >= 400) return "error"
   if (code === 102) return "processing"
   if (code === 200) return "success"
@@ -73,6 +88,7 @@ export function outcomeTone(l: LogListItem): UITone {
 
 export function formatLogStatus(l: LogListItem): string {
   const st = (l.status_text || "").trim()
+  if (st === "failed" || /^http_\d+$/i.test(st)) return "Failed"
   if (st) return STATUS_MAP[st] || st.replace(/_/g, " ")
   if (l.status_code === 102) return "Processing"
   if (l.status_code === 200) return "Completed"
@@ -94,13 +110,20 @@ export function formatProgressLabel(l: LogListItem): string {
 
 export function formatOutcome(l: LogListItem): string {
   const code = Number(l.status_code)
+  const st = String(l.status_text || "").trim()
   if (code === 200) {
     const op = String(l.operation || "").trim()
-    if (op === "generate_image") return "Image result returned"
-    if (op === "generate_video") return "Video result returned"
+    if (op === "generate_image" || op === "geminigen_image") return "Image result returned"
+    if (op === "generate_video" || op === "geminigen_video") return "Video result returned"
     return "Result returned"
   }
-  if (code === 102) return "Processing"
+  if (st === "cancelled") return "Cancelled by admin"
+  if (st === "manual_cleared") return "Manually cleared by admin"
+  if (code === 102) {
+    if (st === "geminigen_queued") return "Waiting for GeminiGen slot"
+    if (st.startsWith("geminigen_")) return "GeminiGen generation running"
+    return "Processing"
+  }
   const err = (l.error_summary || "").trim()
   if (err) return err.length > 96 ? `${err.slice(0, 93)}…` : err
   if (code >= 400) return "Request failed"

@@ -17,6 +17,7 @@ from urllib.parse import quote, urlparse
 
 from curl_cffi.requests import AsyncSession
 
+from ..core.config import config as global_config
 from ..core.database import Database
 from ..core.logger import debug_logger
 from ..core.models import RunwayAccount, RunwayModel, RunwayTask
@@ -1151,7 +1152,7 @@ class RunwayService:
                 model_kind=model_kind,
                 api_key_id=task.api_key_id,
                 base_url=base_url,
-                enabled=bool(config.cache_outputs),
+                enabled=bool(global_config.cache_enabled and getattr(config, "cache_outputs", True)),
             ) if raw_urls else []
             error_message = ""
             if status == "failed":

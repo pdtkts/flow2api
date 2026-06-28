@@ -2,6 +2,7 @@
 
 import base64
 import json
+import time
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -32,6 +33,34 @@ ADOBE_STOCK_METADATA_CATEGORIES: Tuple[Tuple[int, str], ...] = (
     (20, "Transport"),
     (21, "Travel"),
 )
+
+
+def _normalize_image_mime_type(value: Optional[str]) -> Optional[str]:
+    mime = str(value or "").split(";", 1)[0].strip().lower()
+    if not mime or "/" not in mime:
+        return None
+    if mime in {"image/jpg", "image/pjpeg"}:
+        return "image/jpeg"
+    if mime.startswith("image/"):
+        return mime
+    return None
+
+
+def _detect_image_mime_type(image_bytes: bytes, fallback: Optional[str] = None) -> str:
+    hinted = _normalize_image_mime_type(fallback)
+    if hinted:
+        return hinted
+    if image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if image_bytes.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if image_bytes[:4] == b"RIFF" and image_bytes[8:12] == b"WEBP":
+        return "image/webp"
+    if image_bytes.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if image_bytes.startswith(b"<svg") or b"<svg" in image_bytes[:512].lower():
+        return "image/svg+xml"
+    return "image/jpeg"
 
 
 def _adobe_stock_category_table_prompt_lines() -> str:
@@ -155,6 +184,18 @@ DEFAULT_TEMPLATE: Dict[str, Any] = {
     "metadata": {"series": "", "task": "", "scene_number": "", "tags": []},
 }
 
+CLONING_PROMPTS_DEADLINE_SECONDS = 105.0
+_MIN_CLONING_IO_TIMEOUT_SECONDS = 1.0
+
+
+def _cloning_remaining_timeout(deadline_at: Optional[float], default_timeout: float) -> float:
+    if deadline_at is None:
+        return default_timeout
+    remaining = float(deadline_at) - time.monotonic()
+    if remaining <= _MIN_CLONING_IO_TIMEOUT_SECONDS:
+        raise HTTPException(status_code=504, detail="Cloning prompt generation deadline exceeded")
+    return max(_MIN_CLONING_IO_TIMEOUT_SECONDS, min(default_timeout, remaining))
+
 
 def _template_text() -> str:
     return json.dumps(DEFAULT_TEMPLATE, ensure_ascii=False, indent=2)
@@ -197,24 +238,69 @@ def _normalize_image_prompt(p: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _non_empty_str(value: Any) -> str:
+    return str(value or "").strip() if value is not None else ""
+
+
+def _has_meaningful_image_prompt_content(prompt: Dict[str, Any]) -> bool:
+    shot = prompt.get("shot") if isinstance(prompt.get("shot"), dict) else {}
+    lighting = prompt.get("lighting") if isinstance(prompt.get("lighting"), dict) else {}
+    metadata = prompt.get("metadata") if isinstance(prompt.get("metadata"), dict) else {}
+    tags = metadata.get("tags") if isinstance(metadata.get("tags"), list) else []
+    return any(
+        [
+            _non_empty_str(prompt.get("scene")),
+            _non_empty_str(prompt.get("style")),
+            _non_empty_str(shot.get("composition")),
+            _non_empty_str(lighting.get("primary")),
+            any(_non_empty_str(tag) for tag in tags),
+        ]
+    )
+
+
+def _ensure_meaningful_image_prompt(prompt: Dict[str, Any]) -> Dict[str, Any]:
+    if not _has_meaningful_image_prompt_content(prompt):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Model returned a blank cloning prompt. Expected at least one descriptive field "
+                "(scene, style, shot.composition, lighting.primary, or metadata.tags)."
+            ),
+        )
+    return prompt
+
+
 class CloningMetadataService:
     def __init__(self, llm_chain: Optional[LlmProviderChain] = None) -> None:
         self._llm = llm_chain or LlmProviderChain()
 
-    async def _fetch_image(self, image_url: Optional[str], image_base64: Optional[str]) -> Tuple[bytes, str]:
+    async def _fetch_image(
+        self,
+        image_url: Optional[str],
+        image_base64: Optional[str],
+        deadline_at: Optional[float] = None,
+        mime_type_hint: Optional[str] = None,
+    ) -> Tuple[bytes, str]:
         if image_url:
             async with AsyncSession() as session:
-                resp = await session.get(image_url, timeout=60, verify=False)
+                resp = await session.get(image_url, timeout=_cloning_remaining_timeout(deadline_at, 60.0), verify=False)
                 if resp.status_code != 200 or not resp.content:
                     raise HTTPException(status_code=400, detail=f"Failed to fetch image: HTTP {resp.status_code}")
-                mime = resp.headers.get("content-type") or "image/jpeg"
-                return bytes(resp.content), mime
+                content = bytes(resp.content)
+                mime = _detect_image_mime_type(content, resp.headers.get("content-type") or mime_type_hint)
+                return content, mime
         if image_base64:
             raw = image_base64.strip()
+            data_url_mime: Optional[str] = None
+            if raw.lower().startswith("data:"):
+                header = raw.split(",", 1)[0]
+                if ";base64" in header.lower():
+                    data_url_mime = header[5:].split(";", 1)[0]
             if "base64," in raw:
                 raw = raw.split("base64,", 1)[1]
             try:
-                return base64.b64decode(raw), "image/jpeg"
+                content = base64.b64decode(raw)
+                return content, _detect_image_mime_type(content, mime_type_hint or data_url_mime)
             except Exception as exc:
                 raise HTTPException(status_code=400, detail=f"Invalid base64 image: {exc}") from exc
         raise HTTPException(status_code=400, detail="One image source is required")
@@ -295,8 +381,11 @@ class CloningMetadataService:
             else ""
         )
         bg_line = (
-            "When the asset is clearly subject on transparency (cutout), you may use isolated on transparent style wording in title."
-            if bool(meta.get("transparentBackground")) and dna_no_bg
+            "Transparent-background contract: this request is for a transparent PNG/cutout asset. "
+            "Transparent alpha may appear black, dark, white, gray, or checkerboard in some viewers or provider previews; that viewer surface is NOT part of the asset. "
+            "Describe the asset as isolated on transparent background, transparent background, cutout, or isolated transparent PNG. "
+            "Do not say solid black background, black background, dark background, white background, gray background, studio background, or any other background color."
+            if bool(meta.get("transparentBackground")) or dna_no_bg
             else "Do not suggest transparent cutout language unless the image is clearly transparent."
         )
         custom_cfg = meta.get("customPrompt") or {}
@@ -372,8 +461,14 @@ class CloningMetadataService:
         selected_model = (model or app_config.flow2api_cloning_model or "gemini-2.5-flash").strip()
         retry_count = normalized_retry_count(app_config.flow2api_cloning_provider_retry_count)
         out: List[Dict[str, Any]] = []
+        deadline_at = time.monotonic() + CLONING_PROMPTS_DEADLINE_SECONDS
         for image in images:
-            image_bytes, mime_type = await self._fetch_image(image.get("image_url"), image.get("image_base64"))
+            image_bytes, mime_type = await self._fetch_image(
+                image.get("image_url"),
+                image.get("image_base64"),
+                deadline_at,
+                image.get("mimeType") or image.get("mime_type"),
+            )
             prompt = self._build_clone_instruction(image)
             response_json = await self._llm.invoke_with_provider_chain(
                 providers=provider_chain,
@@ -384,8 +479,9 @@ class CloningMetadataService:
                 image_bytes=image_bytes,
                 mime_type=str(image.get("mimeType") or mime_type),
                 use_cloning_credentials=True,
+                deadline_at=deadline_at,
             )
-            out.append(_normalize_image_prompt(response_json))
+            out.append(_ensure_meaningful_image_prompt(_normalize_image_prompt(response_json)))
         return {"prompts": out}
 
     async def generate_cloning_video_prompt(
@@ -419,7 +515,11 @@ class CloningMetadataService:
         image_bytes = None
         mime_type = "image/jpeg"
         if payload.get("image_base64"):
-            image_bytes, mime_type = await self._fetch_image(None, payload.get("image_base64"))
+            image_bytes, mime_type = await self._fetch_image(
+                None,
+                payload.get("image_base64"),
+                mime_type_hint=payload.get("mimeType") or payload.get("mime_type"),
+            )
         response_json = await self._llm.invoke_with_provider_chain(
             providers=provider_chain,
             retry_count=retry_count,
@@ -496,7 +596,11 @@ class CloningMetadataService:
 
         model = str(payload.get("model") or configured_primary).strip()
         fallback_models = payload.get("fallbackModels") or default_fallback_chain
-        image_bytes, mime_type = await self._fetch_image(payload.get("image_url"), payload.get("image_base64"))
+        image_bytes, mime_type = await self._fetch_image(
+            payload.get("image_url"),
+            payload.get("image_base64"),
+            mime_type_hint=payload.get("mimeType") or payload.get("mime_type"),
+        )
         metadata_settings = payload.get("metadataSettings") or {}
         include_category = bool(metadata_settings.get("includeCategory"))
         prompt = self._build_metadata_prompt(metadata_settings, bool(payload.get("dnaNoBgWorkflowActive")))
