@@ -598,6 +598,8 @@ class MetadataSettingsRequest(BaseModel):
     titleStyle: str = "seo-optimized"
     keywordTypes: KeywordTypesConfig = Field(default_factory=KeywordTypesConfig)
     transparentBackground: bool = False
+    language: Literal["en", "fr", "de", "es", "it", "pt", "ja", "pl", "ko"] = "en"
+    assetType: Optional[str] = None
     customPrompt: CustomPromptConfig = Field(default_factory=CustomPromptConfig)
 
 

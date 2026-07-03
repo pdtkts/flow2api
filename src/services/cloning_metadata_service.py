@@ -345,6 +345,19 @@ class CloningMetadataService:
 
     def _build_metadata_prompt(self, metadata_settings: Dict[str, Any], dna_no_bg: bool) -> str:
         meta = metadata_settings or {}
+        language_code = str(meta.get("language") or "en").strip().lower()
+        language_name = {
+            "en": "English",
+            "fr": "French",
+            "de": "German",
+            "es": "Spanish",
+            "it": "Italian",
+            "pt": "Portuguese",
+            "ja": "Japanese",
+            "pl": "Polish",
+            "ko": "Korean",
+        }.get(language_code, "English")
+        asset_type = str(meta.get("assetType") or "photo").strip() or "photo"
         title_min = int(meta.get("titleMin", 50) or 50)
         title_max = int(meta.get("titleMax", 80) or 80)
         keyword_min = int(meta.get("keywordMin", 32) or 32)
@@ -405,6 +418,8 @@ class CloningMetadataService:
         keyword_count = f"Generate between {keyword_min} and {keyword_max} keywords inclusive."
         default_prompt = (
             "You are generating agency microstock metadata for exactly ONE image (attached).\n\n"
+            f"Output language: Write the title, keywords, and non-empty description strictly in {language_name}.\n"
+            f"Adobe asset type: {asset_type}.\n\n"
             "CRITICAL LENGTH (stay as close as possible):\n"
             f"* {title_length}\n"
             f"* {keyword_count}\n"
@@ -417,7 +432,7 @@ class CloningMetadataService:
             "* Sentence case for the title; no clickbait; no redundant site names.\n"
             "* Do not put keyword lists in the title.\n\n"
             "Keywords content:\n"
-            "* English unless a proper noun clearly requires another language.\n"
+            f"* Write keywords in {language_name}; retain a proper noun in its established form only when necessary.\n"
             "* No duplicate or near-duplicate keywords; no camera serials; no filler words image, photo, picture.\n"
             "* No hashtags.\n\n"
             "Safety / accuracy:\n"

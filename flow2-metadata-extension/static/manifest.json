@@ -1,0 +1,48 @@
+{
+  "manifest_version": 3,
+  "name": "Flow2 Metadata",
+  "version": "1.0.0",
+  "description": "Generate and apply Adobe Stock metadata through Flow2 API.",
+  "permissions": [
+    "activeTab",
+    "declarativeContent",
+    "notifications",
+    "scripting",
+    "sidePanel",
+    "storage"
+  ],
+  "host_permissions": [
+    "https://contributor.stock.adobe.com/en/uploads*",
+    "https://contributor.stock.adobe.com/ca/uploads*"
+  ],
+  "optional_host_permissions": ["https://*/*", "http://*/*"],
+  "action": {
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "side_panel": { "default_path": "popup.html" },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "background": { "service_worker": "background.js" },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://contributor.stock.adobe.com/en/uploads*",
+        "https://contributor.stock.adobe.com/ca/uploads*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'"
+  }
+}

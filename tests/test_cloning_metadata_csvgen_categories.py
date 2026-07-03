@@ -1,11 +1,19 @@
 """CSVGEN metadata: Adobe categories injection in outbound settings."""
 
 import base64
+import asyncio
 import json
+import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from fastapi import HTTPException
+from pydantic import ValidationError
+
+from src.api.routes import extension_metadata_session
+from src.core.api_key_manager import ApiKeyManager, AuthContext
+from src.core.models import MetadataSettingsRequest
 from src.core.route_log_sanitize import dumps_for_request_log, sanitize_for_request_log
 from src.services import cloning_metadata_service as cms
 
@@ -330,6 +338,82 @@ class TestMetadataProviderRouting(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(llm.invoke_model_json.await_args.kwargs["provider"], "cloudflare")
+
+
+class TestFlow2MetadataExtensionContract(unittest.TestCase):
+    def test_metadata_scoped_managed_key_activates(self):
+        context = AuthContext(7, "stock-team", False, set(), {"adobe:metadata"})
+        result = asyncio.run(extension_metadata_session(context))
+        self.assertEqual(result["service"], "flow2-metadata")
+        self.assertEqual(result["keyLabel"], "stock-team")
+        self.assertEqual(result["capabilities"], ["adobe:metadata"])
+
+    def test_legacy_and_wrong_scope_keys_are_rejected(self):
+        with self.assertRaises(HTTPException) as legacy_error:
+            asyncio.run(extension_metadata_session(AuthContext(None, "legacy", True, set(), {"*"})))
+        self.assertEqual(legacy_error.exception.status_code, 403)
+
+        with self.assertRaises(HTTPException) as scope_error:
+            asyncio.run(extension_metadata_session(AuthContext(8, "video", False, set(), {"generate:video"})))
+        self.assertEqual(scope_error.exception.detail, "Missing scope: adobe:metadata")
+
+    def test_language_and_asset_type_are_validated_and_used(self):
+        settings = MetadataSettingsRequest(language="ja", assetType="illustration")
+        self.assertEqual(settings.language, "ja")
+        with self.assertRaises(ValidationError):
+            MetadataSettingsRequest(language="xx")
+
+        prompt = cms.CloningMetadataService()._build_metadata_prompt(
+            {"language": "de", "assetType": "vector illustration"}, False
+        )
+        self.assertIn("strictly in German", prompt)
+        self.assertIn("Adobe asset type: vector illustration", prompt)
+
+
+class _Flow2MetadataAuthDatabase:
+    def __init__(self, row):
+        self.row = row
+
+    async def get_client_api_key_by_hash(self, _key_hash):
+        return self.row
+
+    async def get_api_key_account_ids(self, _key_id):
+        return []
+
+    async def get_api_key_rate_limits(self, _key_id, _endpoint):
+        return None
+
+    async def touch_api_key_usage(self, _key_id):
+        return None
+
+
+class TestFlow2MetadataAuthentication(unittest.TestCase):
+    def test_missing_invalid_disabled_and_expired_keys_are_rejected(self):
+        endpoint = "/api/extension/metadata-session"
+        manager = ApiKeyManager(_Flow2MetadataAuthDatabase(None), lambda: "")
+        with self.assertRaisesRegex(PermissionError, "Missing API key"):
+            asyncio.run(manager.authenticate(None, endpoint=endpoint))
+        with self.assertRaisesRegex(PermissionError, "Invalid API key"):
+            asyncio.run(manager.authenticate("wrong", endpoint=endpoint))
+
+        disabled = ApiKeyManager(
+            _Flow2MetadataAuthDatabase({"id": 4, "is_active": False, "scopes": "adobe:metadata"}), lambda: ""
+        )
+        with self.assertRaisesRegex(PermissionError, "disabled"):
+            asyncio.run(disabled.authenticate("key", endpoint=endpoint))
+
+        expired = ApiKeyManager(
+            _Flow2MetadataAuthDatabase({
+                "id": 4,
+                "is_active": True,
+                "scopes": "adobe:metadata",
+                "expires_at": "past",
+                "expires_unix": int(time.time()) - 1,
+            }),
+            lambda: "",
+        )
+        with self.assertRaisesRegex(PermissionError, "expired"):
+            asyncio.run(expired.authenticate("key", endpoint=endpoint))
 
 
 if __name__ == "__main__":

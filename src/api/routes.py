@@ -2232,6 +2232,22 @@ async def extension_generation_upload(
     return Response(status_code=204)
 
 
+@router.get("/api/extension/metadata-session")
+async def extension_metadata_session(
+    auth_ctx: AuthContext = Depends(verify_api_key_flexible),
+):
+    """Validate that a managed key may activate the Flow2 Metadata extension."""
+    if auth_ctx.is_legacy or auth_ctx.key_id is None:
+        raise HTTPException(status_code=403, detail="Managed API key required")
+    _require_managed_scope(auth_ctx, "adobe:metadata")
+    return {
+        "active": True,
+        "service": "flow2-metadata",
+        "keyLabel": auth_ctx.key_label,
+        "capabilities": ["adobe:metadata"],
+    }
+
+
 @router.get("/api/cache/file")
 async def list_cache_files_for_key(
     limit: int = Query(100, ge=1, le=500),
