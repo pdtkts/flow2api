@@ -5,7 +5,7 @@ let cachedInstanceId = null;
 let sessionRefreshTimeout = null;
 
 const DEFAULT_SETTINGS = {
-    serverUrl: "ws://127.0.0.1:38000/captcha_ws",
+    serverUrl: "ws://localhost:38000/captcha_ws",
     connectionMode: "endUser",
     apiKey: "f2a_live_pstxLjznAj3olnyP3W5LxkPx-v_06CjePO7O93IxRveWv7lD",
     captchaWorkerAuthKey: "",
@@ -337,15 +337,6 @@ function generateInstanceId() {
     return `ext-${Date.now().toString(36)}-${rand}`;
 }
 
-function generateRandomClientLabel() {
-    const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-    let label = "";
-    for (let i = 0; i < 20; i++) {
-        label += chars.charAt(Math.floor(Math.random() * chars.length));
-    }
-    return label;
-}
-
 function getInstanceId() {
     if (cachedInstanceId) return Promise.resolve(cachedInstanceId);
     return new Promise((resolve) => {
@@ -368,24 +359,15 @@ function getInstanceId() {
 function getSettings() {
     return new Promise((resolve) => {
         const keys = { ...DEFAULT_SETTINGS, ...DEFAULT_WORKER_SETTINGS };
-        chrome.storage.local.get(keys, async (stored) => {
+        chrome.storage.local.get(keys, (stored) => {
             const connectionMode = inferConnectionMode(stored);
-            let clientLabel = (stored.clientLabel || "").trim();
-
-            // Auto-generate random 20-char client label for endUser mode if empty
-            if (connectionMode === "endUser" && !clientLabel) {
-                clientLabel = generateRandomClientLabel();
-                // Persist the generated label
-                chrome.storage.local.set({ clientLabel }, () => {});
-            }
-
             resolve({
                 serverUrl: normalizeWebSocketUrl((stored.serverUrl || DEFAULT_SETTINGS.serverUrl).trim()),
                 connectionMode,
-                apiKey: (stored.apiKey || DEFAULT_SETTINGS.apiKey).trim(),
+                apiKey: (stored.apiKey || "").trim(),
                 captchaWorkerAuthKey: (stored.captchaWorkerAuthKey || "").trim(),
                 refreshTokenId: String(stored.refreshTokenId || "").trim(),
-                clientLabel,
+                clientLabel: (stored.clientLabel || "").trim(),
                 workerPageUrl: normalizeWorkerPageUrl(stored.workerPageUrl),
                 usePersistentWorkerTab: !!stored.usePersistentWorkerTab,
                 autoRecycleWorkerTabOnCaptchaFailure:

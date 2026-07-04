@@ -1,7 +1,7 @@
 const DEFAULT_SETTINGS = {
-  serverUrl: "ws://127.0.0.1:38000/captcha_ws",
+  serverUrl: "wss://flow-api.prismacreative.online/captcha_ws",
   connectionMode: "endUser",
-  apiKey: "f2a_live_pstxLjznAj3olnyP3W5LxkPx-v_06CjePO7O93IxRveWv7lD",
+  apiKey: "",
   captchaWorkerAuthKey: "",
   refreshTokenId: "",
   clientLabel: ""
@@ -35,15 +35,6 @@ function clampWorkerRecaptchaSettleMs(raw) {
   if (i < 0) return 0;
   if (i > WORKER_RECAPTCHA_SETTLE_MAX_MS) return WORKER_RECAPTCHA_SETTLE_MAX_MS;
   return i;
-}
-
-function generateRandomClientLabel() {
-  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-  let label = "";
-  for (let i = 0; i < 20; i++) {
-    label += chars.charAt(Math.floor(Math.random() * chars.length));
-  }
-  return label;
 }
 
 function normalizeWorkerPageUrl(raw) {
@@ -201,17 +192,11 @@ function saveSettings() {
       setStatus("API Key is required for End user worker mode.", true);
       return;
     }
-    // Auto-generate random 20-char client label if empty
-    let clientLabel = ($("clientLabel").value || "").trim();
-    if (!clientLabel) {
-      clientLabel = generateRandomClientLabel();
-      $("clientLabel").value = clientLabel;
-    }
     const payload = {
       serverUrl,
       connectionMode: "endUser",
       apiKey,
-      clientLabel
+      clientLabel: ($("clientLabel").value || "").trim()
     };
     chrome.storage.local.set(payload, () => {
       if (chrome.runtime.lastError) {
