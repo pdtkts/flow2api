@@ -1527,6 +1527,40 @@ class FileCacheSpaceRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
 
 class StartupStorageRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_emergency_prune_compacts_history_without_deleting_tokens(self):
+        if os.name == "nt":
+            self.skipTest("Windows keeps SQLite file handles longer than Railway/Linux")
+        from src.main import _emergency_prune_sqlite_history
+
+        with tempfile.TemporaryDirectory() as root:
+            db_path = Path(root) / "flow.db"
+            with sqlite3.connect(db_path) as conn:
+                conn.execute("CREATE TABLE tokens (id INTEGER PRIMARY KEY, st TEXT)")
+                conn.execute("CREATE TABLE request_logs (id INTEGER PRIMARY KEY, request_body TEXT)")
+                conn.execute("CREATE TABLE tasks (id INTEGER PRIMARY KEY, prompt TEXT)")
+                conn.execute("CREATE TABLE cache_files (id INTEGER PRIMARY KEY, filename TEXT)")
+                conn.execute("INSERT INTO tokens (id, st) VALUES (1, 'keep')")
+                for i in range(20):
+                    conn.execute(
+                        "INSERT INTO request_logs (request_body) VALUES (?)",
+                        ("x" * 1000,),
+                    )
+                    conn.execute("INSERT INTO tasks (prompt) VALUES (?)", (f"task-{i}",))
+                    conn.execute("INSERT INTO cache_files (filename) VALUES (?)", (f"{i}.mp4",))
+                conn.commit()
+
+            result = _emergency_prune_sqlite_history(SimpleNamespace(db_path=str(db_path)))
+
+            self.assertTrue(result["success"])
+            self.assertEqual(result["deleted_rows"]["request_logs"], 20)
+            self.assertEqual(result["deleted_rows"]["tasks"], 20)
+            self.assertEqual(result["deleted_rows"]["cache_files"], 20)
+            with sqlite3.connect(db_path) as conn:
+                self.assertEqual(conn.execute("SELECT st FROM tokens").fetchone()[0], "keep")
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM request_logs").fetchone()[0], 0)
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0], 0)
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM cache_files").fetchone()[0], 0)
+
     async def test_sqlite_full_reclaims_cache_and_retries_once(self):
         from src.main import _init_database_with_storage_recovery
 

@@ -1,9 +1,12 @@
 """FastAPI application initialization"""
+import errno
+import gc
 import heapq
 import os
 import shutil
 import sqlite3
 import sys
+import tempfile
 from datetime import datetime, timezone
 
 from fastapi import FastAPI
@@ -147,6 +150,17 @@ def _storage_recovery_diagnostic(stats: dict) -> str:
     )
 
 
+EMERGENCY_PRUNE_TABLES = (
+    "request_logs",
+    "tasks",
+    "cache_files",
+    "geminigen_tasks",
+    "runway_tasks",
+    "api_key_audit_logs",
+    "admin_sessions",
+)
+
+
 def _format_bytes(value: int) -> str:
     size = float(max(0, int(value or 0)))
     for unit in ("B", "KB", "MB", "GB", "TB"):
@@ -203,6 +217,127 @@ def _largest_files(path: Path, limit: int = 20):
             elif size > largest[0][0]:
                 heapq.heapreplace(largest, item)
     return sorted(largest, reverse=True)
+
+
+def _sqlite_literal(value: Path) -> str:
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def _sqlite_table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (table_name,),
+    ).fetchone()
+    return row is not None
+
+
+def _remove_sqlite_sidecars(db_path: Path) -> int:
+    removed = 0
+    candidates = [
+        db_path.with_name(db_path.name + suffix)
+        for suffix in ("-wal", "-shm", "-journal")
+    ]
+    candidates.extend(db_path.parent.glob(f"{db_path.name}.upload-*"))
+    for path in candidates:
+        try:
+            if path.is_file() and not path.is_symlink():
+                path.unlink()
+                removed += 1
+        except OSError:
+            continue
+    return removed
+
+
+def _emergency_prune_sqlite_history(database) -> dict:
+    db_path = Path(getattr(database, "db_path", "") or "")
+    if not db_path.is_file():
+        return {"success": False, "reason": "database file not found"}
+
+    old_size = db_path.stat().st_size
+    compact_path = Path(tempfile.gettempdir()) / f"flow2api-compact-{os.getpid()}.db"
+    try:
+        compact_path.unlink()
+    except OSError:
+        pass
+
+    deleted_rows = {}
+    source_uri = f"{db_path.resolve().as_uri()}?mode=rw"
+    conn = sqlite3.connect(source_uri, uri=True, timeout=30)
+    try:
+        conn.execute("PRAGMA busy_timeout = 30000")
+        try:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except sqlite3.DatabaseError as exc:
+            print(f"WARN Emergency DB prune could not checkpoint WAL: {exc}")
+        conn.execute("PRAGMA foreign_keys = OFF")
+        conn.execute("PRAGMA journal_mode = OFF")
+        conn.execute("PRAGMA synchronous = OFF")
+        conn.execute("PRAGMA temp_store = MEMORY")
+
+        for table_name in EMERGENCY_PRUNE_TABLES:
+            if not _sqlite_table_exists(conn, table_name):
+                continue
+            try:
+                count = conn.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
+                conn.execute(f"DELETE FROM {table_name}")
+                deleted_rows[table_name] = int(count or 0)
+            except sqlite3.DatabaseError as exc:
+                print(f"WARN Emergency DB prune skipped {table_name}: {exc}")
+        conn.commit()
+
+        conn.execute(f"VACUUM INTO {_sqlite_literal(compact_path)}")
+    finally:
+        conn.close()
+        del conn
+        gc.collect()
+
+    with sqlite3.connect(f"{compact_path.resolve().as_uri()}?mode=ro", uri=True) as compact:
+        check = compact.execute("PRAGMA quick_check").fetchone()
+        if not check or str(check[0]).lower() != "ok":
+            raise RuntimeError(f"Compacted SQLite quick_check failed: {check}")
+    gc.collect()
+
+    _remove_sqlite_sidecars(db_path)
+    try:
+        os.replace(compact_path, db_path)
+    except OSError as exc:
+        if exc.errno != errno.EXDEV:
+            raise
+        db_path.unlink()
+        shutil.copy2(compact_path, db_path)
+        compact_path.unlink()
+
+    new_size = db_path.stat().st_size
+    return {
+        "success": True,
+        "old_size": int(old_size),
+        "new_size": int(new_size),
+        "reclaimed_bytes": int(max(0, old_size - new_size)),
+        "deleted_rows": deleted_rows,
+    }
+
+
+def _try_emergency_prune_sqlite_history(database) -> dict:
+    try:
+        result = _emergency_prune_sqlite_history(database)
+    except Exception as exc:
+        print(f"WARN Emergency DB history prune failed: {exc}")
+        return {"success": False, "reason": str(exc)}
+
+    if result.get("success"):
+        deleted = ", ".join(
+            f"{table}={count}" for table, count in sorted(result.get("deleted_rows", {}).items())
+        ) or "none"
+        print(
+            "WARN Emergency DB history prune compacted SQLite "
+            f"from {_format_bytes(result.get('old_size', 0))} "
+            f"to {_format_bytes(result.get('new_size', 0))}; "
+            f"reclaimed={_format_bytes(result.get('reclaimed_bytes', 0))}; "
+            f"deleted_rows={deleted}"
+        )
+    else:
+        print(f"WARN Emergency DB history prune skipped: {result.get('reason')}")
+    return result
 
 
 def _log_volume_usage_report(file_cache) -> None:
@@ -272,6 +407,7 @@ async def _init_database_with_storage_recovery(
             raise
         first_error = exc
 
+    _try_emergency_prune_sqlite_history(database)
     stats = await file_cache.reclaim_cache_space()
     if stats["free_after"] < stats["target_free"]:
         _log_volume_usage_report(file_cache)
