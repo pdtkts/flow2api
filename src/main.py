@@ -254,14 +254,22 @@ def _emergency_prune_sqlite_history(database) -> dict:
         return {"success": False, "reason": "database file not found"}
 
     old_size = db_path.stat().st_size
+    source_path = Path(tempfile.gettempdir()) / f"flow2api-source-{os.getpid()}.db"
     compact_path = Path(tempfile.gettempdir()) / f"flow2api-compact-{os.getpid()}.db"
-    try:
-        compact_path.unlink()
-    except OSError:
-        pass
+    for path in (source_path, compact_path):
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+    shutil.copy2(db_path, source_path)
+    for suffix in ("-wal", "-shm"):
+        sidecar = db_path.with_name(db_path.name + suffix)
+        if sidecar.is_file() and not sidecar.is_symlink():
+            shutil.copy2(sidecar, source_path.with_name(source_path.name + suffix))
 
     deleted_rows = {}
-    source_uri = f"{db_path.resolve().as_uri()}?mode=rw"
+    source_uri = f"{source_path.resolve().as_uri()}?mode=rw"
     conn = sqlite3.connect(source_uri, uri=True, timeout=30)
     try:
         conn.execute("PRAGMA busy_timeout = 30000")
@@ -306,6 +314,12 @@ def _emergency_prune_sqlite_history(database) -> dict:
         db_path.unlink()
         shutil.copy2(compact_path, db_path)
         compact_path.unlink()
+
+    for suffix in ("", "-wal", "-shm", "-journal"):
+        try:
+            source_path.with_name(source_path.name + suffix).unlink()
+        except OSError:
+            pass
 
     new_size = db_path.stat().st_size
     return {
