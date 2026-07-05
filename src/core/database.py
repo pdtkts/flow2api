@@ -8,7 +8,10 @@ from typing import Optional, List, Dict, Any, Tuple, Set
 from pathlib import Path
 from .config import DEFAULT_YESCAPTCHA_TASK_TYPE, get_runtime_data_dir, normalize_yescaptcha_task_type
 from .runway_manifest import RUNWAY_MANIFEST_VERSION, RUNWAY_MODEL_MANIFEST
-from .storage_errors import is_sqlite_storage_full_error
+from .storage_errors import (
+    is_sqlite_recoverable_storage_error,
+    is_sqlite_storage_full_error,
+)
 from .models import (
     Token,
     TokenStats,
@@ -167,6 +170,21 @@ class Database:
         """Apply SQLite runtime settings for better concurrent behavior."""
         await db.execute(f"PRAGMA busy_timeout = {self._busy_timeout_ms}")
         await db.execute("PRAGMA foreign_keys = ON")
+
+    async def _configure_write_pragmas(self, db):
+        """Prefer WAL, but fall back when the mounted volume cannot create WAL files."""
+        try:
+            await db.execute("PRAGMA journal_mode = WAL")
+            await db.execute("PRAGMA synchronous = NORMAL")
+        except Exception as exc:
+            if not is_sqlite_recoverable_storage_error(exc):
+                raise
+            print(
+                "WARN SQLite WAL mode unavailable during startup "
+                f"({exc}); falling back to DELETE journal mode."
+            )
+            await db.execute("PRAGMA journal_mode = DELETE")
+            await db.execute("PRAGMA synchronous = FULL")
 
     def _current_stats_date(self) -> str:
         """Return the logical date used by daily token statistics."""
@@ -817,8 +835,7 @@ class Database:
         """
         async with self._connect(write=True) as db:
             print("Checking database integrity and performing migrations...")
-            await db.execute("PRAGMA journal_mode = WAL")
-            await db.execute("PRAGMA synchronous = NORMAL")
+            await self._configure_write_pragmas(db)
             await self._ensure_runway_tables(db)
             await self._ensure_geminigen_tables(db)
 
@@ -1323,8 +1340,7 @@ class Database:
     async def init_db(self):
         """Initialize database tables"""
         async with self._connect(write=True) as db:
-            await db.execute("PRAGMA journal_mode = WAL")
-            await db.execute("PRAGMA synchronous = NORMAL")
+            await self._configure_write_pragmas(db)
             # Tokens table (Flow2API版本)
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS tokens (

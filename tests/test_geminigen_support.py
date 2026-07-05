@@ -309,6 +309,18 @@ def _database_with_connection(connection):
     return db
 
 
+class _PragmaConnection:
+    def __init__(self, wal_error=None):
+        self.wal_error = wal_error
+        self.statements = []
+
+    async def execute(self, query, _params=None):
+        self.statements.append(query)
+        if query == "PRAGMA journal_mode = WAL" and self.wal_error is not None:
+            raise self.wal_error
+        return _AdminSessionCursor(None)
+
+
 def test_sqlite_storage_full_classifier_uses_code_and_message_fallback():
     coded = sqlite3.OperationalError("write failed")
     coded.sqlite_errorcode = sqlite3.SQLITE_FULL
@@ -336,6 +348,32 @@ def test_sqlite_startup_recoverable_classifier_includes_io_errors():
         sqlite3.OperationalError("database is locked")
     ) is False
     assert is_sqlite_recoverable_storage_error(RuntimeError("disk I/O error")) is False
+
+
+def test_database_write_pragmas_fallback_to_delete_when_wal_io_fails():
+    conn = _PragmaConnection(sqlite3.OperationalError("disk I/O error"))
+    db = Database(":memory:")
+
+    asyncio.run(db._configure_write_pragmas(conn))
+
+    assert conn.statements == [
+        "PRAGMA journal_mode = WAL",
+        "PRAGMA journal_mode = DELETE",
+        "PRAGMA synchronous = FULL",
+    ]
+
+
+def test_database_write_pragmas_preserve_non_storage_sqlite_errors():
+    error = sqlite3.OperationalError("database is locked")
+    conn = _PragmaConnection(error)
+    db = Database(":memory:")
+
+    try:
+        asyncio.run(db._configure_write_pragmas(conn))
+    except sqlite3.OperationalError as exc:
+        assert exc is error
+    else:
+        raise AssertionError("Expected non-storage SQLite error to be re-raised")
 
 
 def test_valid_admin_session_survives_storage_full_activity_touch():
