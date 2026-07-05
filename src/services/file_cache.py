@@ -81,6 +81,24 @@ class FileCache:
         except OSError:
             return 0
 
+    def _iter_cache_files(self):
+        """Yield regular cache files recursively without following symlinked directories."""
+        if not self.cache_dir.exists():
+            return
+        for root, dirnames, filenames in os.walk(self.cache_dir, followlinks=False):
+            root_path = Path(root)
+            safe_dirs = []
+            for dirname in dirnames:
+                path = root_path / dirname
+                try:
+                    if not path.is_symlink():
+                        safe_dirs.append(dirname)
+                except OSError:
+                    continue
+            dirnames[:] = safe_dirs
+            for filename in filenames:
+                yield root_path / filename
+
     async def reclaim_cache_space(
         self,
         required_bytes: int = 0,
@@ -102,11 +120,7 @@ class FileCache:
             timeout = self.get_timeout()
             candidates = []
 
-            try:
-                paths = list(self.cache_dir.iterdir())
-            except OSError:
-                paths = []
-            for path in paths:
+            for path in self._iter_cache_files() or ():
                 try:
                     if path.is_symlink() or not path.is_file():
                         continue

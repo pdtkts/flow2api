@@ -1,5 +1,7 @@
 """FastAPI application initialization"""
+import heapq
 import os
+import shutil
 import sqlite3
 import sys
 from datetime import datetime, timezone
@@ -145,6 +147,100 @@ def _storage_recovery_diagnostic(stats: dict) -> str:
     )
 
 
+def _format_bytes(value: int) -> str:
+    size = float(max(0, int(value or 0)))
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024 or unit == "TB":
+            return f"{size:.1f}{unit}" if unit != "B" else f"{int(size)}B"
+        size /= 1024
+    return f"{size:.1f}TB"
+
+
+def _directory_size(path: Path) -> int:
+    total = 0
+    try:
+        if path.is_symlink():
+            return 0
+        if path.is_file():
+            return path.stat().st_size
+    except OSError:
+        return 0
+    for root, dirnames, filenames in os.walk(path, followlinks=False):
+        root_path = Path(root)
+        dirnames[:] = [
+            name for name in dirnames
+            if not (root_path / name).is_symlink()
+        ]
+        for filename in filenames:
+            file_path = root_path / filename
+            try:
+                if not file_path.is_symlink():
+                    total += file_path.stat().st_size
+            except OSError:
+                continue
+    return total
+
+
+def _largest_files(path: Path, limit: int = 20):
+    largest = []
+    for root, dirnames, filenames in os.walk(path, followlinks=False):
+        root_path = Path(root)
+        dirnames[:] = [
+            name for name in dirnames
+            if not (root_path / name).is_symlink()
+        ]
+        for filename in filenames:
+            file_path = root_path / filename
+            try:
+                if file_path.is_symlink():
+                    continue
+                size = file_path.stat().st_size
+            except OSError:
+                continue
+            item = (size, str(file_path))
+            if len(largest) < limit:
+                heapq.heappush(largest, item)
+            elif size > largest[0][0]:
+                heapq.heapreplace(largest, item)
+    return sorted(largest, reverse=True)
+
+
+def _log_volume_usage_report(file_cache) -> None:
+    cache_dir = getattr(file_cache, "cache_dir", None)
+    root_value = os.environ.get("RAILWAY_VOLUME_MOUNT_PATH") or (
+        str(Path(cache_dir).parent) if cache_dir else ""
+    )
+    if not root_value:
+        return
+    root = Path(root_value)
+    try:
+        usage = shutil.disk_usage(root)
+    except OSError as exc:
+        print(f"WARN Unable to inspect runtime volume {root}: {exc}")
+        return
+
+    print(
+        "WARN Runtime volume usage: "
+        f"path={root}, total={_format_bytes(usage.total)}, "
+        f"used={_format_bytes(usage.used)}, free={_format_bytes(usage.free)}"
+    )
+    try:
+        children = list(root.iterdir())
+    except OSError as exc:
+        print(f"WARN Unable to list runtime volume {root}: {exc}")
+        children = []
+    if children:
+        print("WARN Runtime volume top-level usage:")
+        for child in sorted(children, key=_directory_size, reverse=True)[:20]:
+            print(f"WARN   {_format_bytes(_directory_size(child))}\t{child}")
+
+    largest = _largest_files(root, limit=20)
+    if largest:
+        print("WARN Runtime volume largest files:")
+        for size, path in largest:
+            print(f"WARN   {_format_bytes(size)}\t{path}")
+
+
 async def _run_database_startup(database, config_dict: dict = None, is_first_startup: bool = None) -> None:
     await database.init_db()
     if is_first_startup is None:
@@ -178,6 +274,7 @@ async def _init_database_with_storage_recovery(
 
     stats = await file_cache.reclaim_cache_space()
     if stats["free_after"] < stats["target_free"]:
+        _log_volume_usage_report(file_cache)
         raise RuntimeError(_storage_recovery_diagnostic(stats)) from first_error
 
     print(
@@ -189,6 +286,7 @@ async def _init_database_with_storage_recovery(
         await _run_database_startup(database, config_dict, is_first_startup)
     except Exception as exc:
         if is_sqlite_recoverable_storage_error(exc):
+            _log_volume_usage_report(file_cache)
             raise RuntimeError(_storage_recovery_diagnostic(stats)) from exc
         raise
 

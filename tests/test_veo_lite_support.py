@@ -1505,7 +1505,7 @@ class FileCacheSpaceRecoveryTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(database.exists())
             self.assertTrue(unrelated.exists())
             self.assertTrue(nested.is_dir())
-            self.assertTrue((nested / "inside.mp4").exists())
+            self.assertFalse((nested / "inside.mp4").exists())
             if link is not None:
                 self.assertTrue(link.is_symlink())
 
