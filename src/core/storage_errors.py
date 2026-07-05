@@ -32,6 +32,20 @@ def is_sqlite_storage_full_error(exc: BaseException) -> bool:
     )
 
 
+def is_sqlite_recoverable_storage_error(exc: BaseException) -> bool:
+    """Return whether startup should try freeing generated cache and retrying."""
+    if is_sqlite_storage_full_error(exc):
+        return True
+    if not isinstance(exc, sqlite3.OperationalError):
+        return False
+
+    error_code = getattr(exc, "sqlite_errorcode", None)
+    if isinstance(error_code, int) and (error_code & 0xFF) == sqlite3.SQLITE_IOERR:
+        return True
+
+    return "disk i/o error" in str(exc).strip().lower()
+
+
 async def sqlite_operational_error_handler(_request: Any, exc: sqlite3.OperationalError):
     """Render SQLITE_FULL cleanly while preserving other SQLite failures."""
     if not is_sqlite_storage_full_error(exc):

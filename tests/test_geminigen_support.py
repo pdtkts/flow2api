@@ -30,6 +30,7 @@ from src.api import routes
 from src.core.geminigen_manifest import GEMINIGEN_MODEL_BY_ID, GEMINIGEN_MODEL_MANIFEST
 from src.core.models import GeminiGenAccount, GeminiGenTask, RunwayAccount, RunwayModel, RunwayTask, Token
 from src.core.storage_errors import (
+    is_sqlite_recoverable_storage_error,
     is_sqlite_storage_full_error,
     sqlite_operational_error_handler,
 )
@@ -320,6 +321,23 @@ def test_sqlite_storage_full_classifier_uses_code_and_message_fallback():
     assert is_sqlite_storage_full_error(RuntimeError("disk is full")) is False
 
 
+def test_sqlite_startup_recoverable_classifier_includes_io_errors():
+    coded = sqlite3.OperationalError("write failed")
+    coded.sqlite_errorcode = sqlite3.SQLITE_IOERR
+
+    assert is_sqlite_recoverable_storage_error(coded) is True
+    assert is_sqlite_recoverable_storage_error(
+        sqlite3.OperationalError("disk I/O error")
+    ) is True
+    assert is_sqlite_recoverable_storage_error(
+        sqlite3.OperationalError("database or disk is full")
+    ) is True
+    assert is_sqlite_recoverable_storage_error(
+        sqlite3.OperationalError("database is locked")
+    ) is False
+    assert is_sqlite_recoverable_storage_error(RuntimeError("disk I/O error")) is False
+
+
 def test_valid_admin_session_survives_storage_full_activity_touch():
     expires_at = int(time.time()) + 3600
     db = _database_with_connection(_FullAdminSessionConnection((expires_at,)))
@@ -359,6 +377,17 @@ def test_non_storage_sqlite_error_is_not_converted_to_507():
         assert exc is error
     else:
         raise AssertionError("Expected non-storage SQLite error to be re-raised")
+
+
+def test_runtime_sqlite_io_error_is_not_converted_to_507():
+    error = sqlite3.OperationalError("disk I/O error")
+
+    try:
+        asyncio.run(sqlite_operational_error_handler(None, error))
+    except sqlite3.OperationalError as exc:
+        assert exc is error
+    else:
+        raise AssertionError("Expected runtime SQLite I/O error to be re-raised")
 
 
 def test_extract_artifact_urls_falls_back_to_preview_without_download_url():

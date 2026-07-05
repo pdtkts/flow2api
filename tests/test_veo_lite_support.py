@@ -1551,6 +1551,90 @@ class StartupStorageRecoveryTests(unittest.IsolatedAsyncioTestCase):
         cache._cleanup_expired_files.assert_awaited_once()
         cache.reclaim_cache_space.assert_awaited_once()
 
+    async def test_sqlite_disk_io_error_reclaims_cache_and_retries_once(self):
+        from src.main import _init_database_with_storage_recovery
+
+        database = SimpleNamespace(
+            init_db=AsyncMock(
+                side_effect=[sqlite3.OperationalError("disk I/O error"), None]
+            )
+        )
+        cache = SimpleNamespace(
+            _cleanup_expired_files=AsyncMock(return_value={}),
+            reclaim_cache_space=AsyncMock(
+                return_value={
+                    "free_after": 600,
+                    "target_free": 500,
+                    "reclaimed_bytes": 400,
+                }
+            ),
+        )
+
+        await _init_database_with_storage_recovery(database, cache)
+        self.assertEqual(database.init_db.await_count, 2)
+        cache._cleanup_expired_files.assert_awaited_once()
+        cache.reclaim_cache_space.assert_awaited_once()
+
+    async def test_config_seed_storage_error_retries_full_startup_branch(self):
+        from src.main import _init_database_with_storage_recovery
+
+        database = SimpleNamespace(
+            init_db=AsyncMock(return_value=None),
+            init_config_from_toml=AsyncMock(
+                side_effect=[sqlite3.OperationalError("disk I/O error"), None]
+            ),
+        )
+        cache = SimpleNamespace(
+            _cleanup_expired_files=AsyncMock(return_value={}),
+            reclaim_cache_space=AsyncMock(
+                return_value={
+                    "free_after": 600,
+                    "target_free": 500,
+                    "reclaimed_bytes": 400,
+                }
+            ),
+        )
+
+        await _init_database_with_storage_recovery(
+            database,
+            cache,
+            config_dict={"global": {}},
+            is_first_startup=True,
+        )
+        self.assertEqual(database.init_db.await_count, 2)
+        self.assertEqual(database.init_config_from_toml.await_count, 2)
+        cache.reclaim_cache_space.assert_awaited_once()
+
+    async def test_migration_storage_error_retries_full_startup_branch(self):
+        from src.main import _init_database_with_storage_recovery
+
+        database = SimpleNamespace(
+            init_db=AsyncMock(return_value=None),
+            check_and_migrate_db=AsyncMock(
+                side_effect=[sqlite3.OperationalError("disk I/O error"), None]
+            ),
+        )
+        cache = SimpleNamespace(
+            _cleanup_expired_files=AsyncMock(return_value={}),
+            reclaim_cache_space=AsyncMock(
+                return_value={
+                    "free_after": 600,
+                    "target_free": 500,
+                    "reclaimed_bytes": 400,
+                }
+            ),
+        )
+
+        await _init_database_with_storage_recovery(
+            database,
+            cache,
+            config_dict={"global": {}},
+            is_first_startup=False,
+        )
+        self.assertEqual(database.init_db.await_count, 2)
+        self.assertEqual(database.check_and_migrate_db.await_count, 2)
+        cache.reclaim_cache_space.assert_awaited_once()
+
     async def test_unrecoverable_full_volume_has_concise_diagnostic(self):
         from src.main import _init_database_with_storage_recovery
 
@@ -1569,10 +1653,33 @@ class StartupStorageRecoveryTests(unittest.IsolatedAsyncioTestCase):
         )
 
         with self.assertRaisesRegex(
-            RuntimeError, r"volume remains full.*free=10 bytes, reclaimed=25 bytes"
+            RuntimeError, r"storage I/O remains unavailable.*free=10 bytes, reclaimed=25 bytes"
         ):
             await _init_database_with_storage_recovery(database, cache)
         self.assertEqual(database.init_db.await_count, 1)
+
+    async def test_retry_recoverable_storage_failure_has_concise_diagnostic(self):
+        from src.main import _init_database_with_storage_recovery
+
+        database = SimpleNamespace(
+            init_db=AsyncMock(side_effect=sqlite3.OperationalError("disk I/O error"))
+        )
+        cache = SimpleNamespace(
+            _cleanup_expired_files=AsyncMock(return_value={}),
+            reclaim_cache_space=AsyncMock(
+                return_value={
+                    "free_after": 600,
+                    "target_free": 500,
+                    "reclaimed_bytes": 400,
+                }
+            ),
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError, r"storage I/O remains unavailable.*free=600 bytes, reclaimed=400 bytes"
+        ):
+            await _init_database_with_storage_recovery(database, cache)
+        self.assertEqual(database.init_db.await_count, 2)
 
 
 if __name__ == "__main__":

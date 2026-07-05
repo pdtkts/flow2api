@@ -15,7 +15,10 @@ from pathlib import Path
 
 from .core.config import config
 from .core.database import Database
-from .core.storage_errors import is_sqlite_storage_full_error, sqlite_operational_error_handler
+from .core.storage_errors import (
+    is_sqlite_recoverable_storage_error,
+    sqlite_operational_error_handler,
+)
 from .core.monitoring import CONTENT_TYPE_LATEST, render_main_metrics
 from .services.flow_client import FlowClient
 from .services.proxy_manager import ProxyManager
@@ -135,21 +138,41 @@ class ApiOnlyHostMiddleware(BaseHTTPMiddleware):
 
 def _storage_recovery_diagnostic(stats: dict) -> str:
     return (
-        "Flow2API startup blocked: volume remains full after cache recovery "
+        "Flow2API startup blocked: storage I/O remains unavailable after cache recovery "
         f"(free={int(stats.get('free_after', 0))} bytes, "
         f"reclaimed={int(stats.get('reclaimed_bytes', 0))} bytes, "
         f"target={int(stats.get('target_free', 0))} bytes)."
     )
 
 
-async def _init_database_with_storage_recovery(database, file_cache) -> None:
-    """Initialize SQLite, evicting generated cache files on SQLITE_FULL once."""
+async def _run_database_startup(database, config_dict: dict = None, is_first_startup: bool = None) -> None:
+    await database.init_db()
+    if is_first_startup is None:
+        return
+
+    if is_first_startup:
+        print("First startup detected. Initializing database and configuration from setting.toml...")
+        await database.init_config_from_toml(config_dict, is_first_startup=True)
+        print("OK Database and configuration initialized successfully.")
+    else:
+        print("Existing database detected. Checking for missing tables and columns...")
+        await database.check_and_migrate_db(config_dict)
+        print("OK Database migration check completed.")
+
+
+async def _init_database_with_storage_recovery(
+    database,
+    file_cache,
+    config_dict: dict = None,
+    is_first_startup: bool = None,
+) -> None:
+    """Run SQLite startup, evicting generated cache files on recoverable storage errors once."""
     await file_cache._cleanup_expired_files()
     try:
-        await database.init_db()
+        await _run_database_startup(database, config_dict, is_first_startup)
         return
     except Exception as exc:
-        if not is_sqlite_storage_full_error(exc):
+        if not is_sqlite_recoverable_storage_error(exc):
             raise
         first_error = exc
 
@@ -158,13 +181,14 @@ async def _init_database_with_storage_recovery(database, file_cache) -> None:
         raise RuntimeError(_storage_recovery_diagnostic(stats)) from first_error
 
     print(
-        "WARN SQLite reported a full volume; cache recovery reclaimed "
-        f"{stats['reclaimed_bytes']} bytes. Retrying database initialization once."
+        "WARN SQLite startup storage error "
+        f"({first_error}); generated cache recovery reclaimed "
+        f"{stats['reclaimed_bytes']} bytes. Retrying database startup once."
     )
     try:
-        await database.init_db()
+        await _run_database_startup(database, config_dict, is_first_startup)
     except Exception as exc:
-        if is_sqlite_storage_full_error(exc):
+        if is_sqlite_recoverable_storage_error(exc):
             raise RuntimeError(_storage_recovery_diagnostic(stats)) from exc
         raise
 
@@ -188,18 +212,13 @@ async def lifespan(app: FastAPI):
     # Check if database exists (determine if first startup)
     is_first_startup = not db.db_exists()
 
-    # Initialize database tables structure
-    await _init_database_with_storage_recovery(db, generation_handler.file_cache)
-
-    # Handle database initialization based on startup type
-    if is_first_startup:
-        print("First startup detected. Initializing database and configuration from setting.toml...")
-        await db.init_config_from_toml(config_dict, is_first_startup=True)
-        print("OK Database and configuration initialized successfully.")
-    else:
-        print("Existing database detected. Checking for missing tables and columns...")
-        await db.check_and_migrate_db(config_dict)
-        print("OK Database migration check completed.")
+    # Initialize database tables/configuration, reclaiming generated cache once on storage pressure.
+    await _init_database_with_storage_recovery(
+        db,
+        generation_handler.file_cache,
+        config_dict=config_dict,
+        is_first_startup=is_first_startup,
+    )
 
     # 启动时统一把数据库配置同步到内存，避免 personal/brower 相关运行时配置遗漏。
     await db.reload_config_to_memory()
