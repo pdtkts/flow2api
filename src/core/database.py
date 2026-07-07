@@ -404,6 +404,27 @@ class Database:
                 last_status TEXT,
                 last_error TEXT,
                 last_used_at TIMESTAMP,
+                profile_user_id INTEGER,
+                profile_uuid TEXT,
+                profile_email TEXT,
+                profile_full_name TEXT,
+                profile_is_active BOOLEAN,
+                available_credit INTEGER,
+                plan_credit INTEGER,
+                purchased_credit INTEGER,
+                locked_credit INTEGER,
+                subscription_credit INTEGER,
+                plan_name TEXT,
+                plan_expire_at TIMESTAMP,
+                active_benefits_json TEXT,
+                remaining_bulk_videos INTEGER,
+                remaining_daily_videos INTEGER,
+                remaining_grok_max_daily_videos INTEGER,
+                remaining_grok_max_daily_720p_videos INTEGER,
+                remaining_grok_max_daily_10s_videos INTEGER,
+                profile_synced_at TIMESTAMP,
+                profile_sync_status TEXT,
+                profile_sync_error TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
@@ -444,6 +465,27 @@ class Database:
             ("video_concurrency", "INTEGER DEFAULT 5"),
             ("image_in_flight", "INTEGER DEFAULT 0"),
             ("video_in_flight", "INTEGER DEFAULT 0"),
+            ("profile_user_id", "INTEGER"),
+            ("profile_uuid", "TEXT"),
+            ("profile_email", "TEXT"),
+            ("profile_full_name", "TEXT"),
+            ("profile_is_active", "BOOLEAN"),
+            ("available_credit", "INTEGER"),
+            ("plan_credit", "INTEGER"),
+            ("purchased_credit", "INTEGER"),
+            ("locked_credit", "INTEGER"),
+            ("subscription_credit", "INTEGER"),
+            ("plan_name", "TEXT"),
+            ("plan_expire_at", "TIMESTAMP"),
+            ("active_benefits_json", "TEXT"),
+            ("remaining_bulk_videos", "INTEGER"),
+            ("remaining_daily_videos", "INTEGER"),
+            ("remaining_grok_max_daily_videos", "INTEGER"),
+            ("remaining_grok_max_daily_720p_videos", "INTEGER"),
+            ("remaining_grok_max_daily_10s_videos", "INTEGER"),
+            ("profile_synced_at", "TIMESTAMP"),
+            ("profile_sync_status", "TEXT"),
+            ("profile_sync_error", "TEXT"),
         ]
         for column_name, column_type in account_columns:
             if not await self._column_exists(db, "geminigen_accounts", column_name):
@@ -3089,6 +3131,12 @@ class Database:
             "label", "raw_cookie", "bearer_token", "refresh_token", "guard_id", "turnstile_token",
             "is_active", "image_concurrency", "video_concurrency",
             "image_in_flight", "video_in_flight", "last_status", "last_error", "last_used_at",
+            "profile_user_id", "profile_uuid", "profile_email", "profile_full_name", "profile_is_active",
+            "available_credit", "plan_credit", "purchased_credit", "locked_credit", "subscription_credit",
+            "plan_name", "plan_expire_at", "active_benefits_json", "remaining_bulk_videos",
+            "remaining_daily_videos", "remaining_grok_max_daily_videos",
+            "remaining_grok_max_daily_720p_videos", "remaining_grok_max_daily_10s_videos",
+            "profile_synced_at", "profile_sync_status", "profile_sync_error",
         }
         updates = []
         params = []
@@ -3097,7 +3145,15 @@ class Database:
                 continue
             if key == "is_active":
                 value = int(bool(value))
-            if key in {"image_concurrency", "video_concurrency", "image_in_flight", "video_in_flight"} and value is not None:
+            if key == "profile_is_active" and value is not None:
+                value = int(bool(value))
+            if key in {
+                "image_concurrency", "video_concurrency", "image_in_flight", "video_in_flight",
+                "profile_user_id", "available_credit", "plan_credit", "purchased_credit", "locked_credit",
+                "subscription_credit", "remaining_bulk_videos", "remaining_daily_videos",
+                "remaining_grok_max_daily_videos", "remaining_grok_max_daily_720p_videos",
+                "remaining_grok_max_daily_10s_videos",
+            } and value is not None:
                 value = int(value)
             updates.append(f"{key} = ?")
             params.append(value)

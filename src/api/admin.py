@@ -1974,6 +1974,15 @@ def _mask_secret(value: str) -> str:
 
 
 def _geminigen_account_payload(account) -> Dict[str, Any]:
+    active_benefits = []
+    raw_benefits = getattr(account, "active_benefits_json", None)
+    if raw_benefits:
+        try:
+            parsed_benefits = json.loads(raw_benefits)
+            if isinstance(parsed_benefits, list):
+                active_benefits = parsed_benefits
+        except Exception:
+            active_benefits = []
     return {
         "id": account.id,
         "label": account.label,
@@ -1995,6 +2004,27 @@ def _geminigen_account_payload(account) -> Dict[str, Any]:
         "last_status": account.last_status or "",
         "last_error": account.last_error or "",
         "last_used_at": account.last_used_at.isoformat() if account.last_used_at else None,
+        "profile_user_id": account.profile_user_id,
+        "profile_uuid": account.profile_uuid,
+        "profile_email": account.profile_email,
+        "profile_full_name": account.profile_full_name,
+        "profile_is_active": account.profile_is_active if account.profile_is_active is not None else None,
+        "available_credit": account.available_credit,
+        "plan_credit": account.plan_credit,
+        "purchased_credit": account.purchased_credit,
+        "locked_credit": account.locked_credit,
+        "subscription_credit": account.subscription_credit,
+        "plan_name": account.plan_name,
+        "plan_expire_at": account.plan_expire_at.isoformat() if account.plan_expire_at else None,
+        "active_benefits": active_benefits,
+        "remaining_bulk_videos": account.remaining_bulk_videos,
+        "remaining_daily_videos": account.remaining_daily_videos,
+        "remaining_grok_max_daily_videos": account.remaining_grok_max_daily_videos,
+        "remaining_grok_max_daily_720p_videos": account.remaining_grok_max_daily_720p_videos,
+        "remaining_grok_max_daily_10s_videos": account.remaining_grok_max_daily_10s_videos,
+        "profile_synced_at": account.profile_synced_at.isoformat() if account.profile_synced_at else None,
+        "profile_sync_status": account.profile_sync_status or "",
+        "profile_sync_error": account.profile_sync_error or "",
         "created_at": account.created_at.isoformat() if account.created_at else None,
         "updated_at": account.updated_at.isoformat() if account.updated_at else None,
     }
@@ -2310,6 +2340,8 @@ async def sync_runway_models(token: str = Depends(verify_admin_token)):
 async def get_geminigen_admin_config(token: str = Depends(verify_admin_token)):
     cfg = await db.get_geminigen_config()
     accounts = await db.list_geminigen_accounts()
+    if geminigen_service is not None:
+        geminigen_service.schedule_stale_account_profile_refresh(accounts)
     return {
         "success": True,
         "config": _geminigen_config_payload(cfg),

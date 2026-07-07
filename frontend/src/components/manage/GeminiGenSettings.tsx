@@ -39,6 +39,21 @@ type GeminiGenAccount = {
   video_in_flight: number
   last_status: string
   last_error: string
+  profile_email?: string | null
+  profile_full_name?: string | null
+  profile_is_active?: boolean | null
+  available_credit?: number | null
+  plan_credit?: number | null
+  purchased_credit?: number | null
+  plan_name?: string | null
+  plan_expire_at?: string | null
+  active_benefits?: Array<{ id?: number | null; name?: string; expire_at?: string | null; estimated_remaining?: number | null }>
+  remaining_bulk_videos?: number | null
+  remaining_daily_videos?: number | null
+  remaining_grok_max_daily_videos?: number | null
+  profile_synced_at?: string | null
+  profile_sync_status?: string
+  profile_sync_error?: string
 }
 
 type GeminiGenModel = {
@@ -107,6 +122,33 @@ const DEFAULT_CONFIG: GeminiGenConfig = {
   global_image_concurrency: 5,
   global_video_concurrency: 5,
   cache_outputs: true,
+}
+
+function formatCompactDateTime(value: string | null | undefined) {
+  if (!value) return "-"
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return date.toLocaleString("en-US", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  })
+}
+
+function formatNumberValue(value: number | null | undefined) {
+  return value === null || value === undefined ? "-" : value.toLocaleString()
+}
+
+function geminiGenVideoQuota(account: GeminiGenAccount) {
+  const quotas = [
+    account.remaining_daily_videos !== null && account.remaining_daily_videos !== undefined ? `Daily ${account.remaining_daily_videos}` : "",
+    account.remaining_bulk_videos !== null && account.remaining_bulk_videos !== undefined ? `Bulk ${account.remaining_bulk_videos}` : "",
+    account.remaining_grok_max_daily_videos !== null && account.remaining_grok_max_daily_videos !== undefined
+      ? `Grok ${account.remaining_grok_max_daily_videos}`
+      : "",
+  ].filter(Boolean)
+  return quotas.length ? quotas.join(" / ") : "-"
 }
 
 const EMPTY_ACCOUNT: AccountDraft = {
@@ -457,8 +499,12 @@ export function GeminiGenSettings({ active }: { active: boolean }) {
               <TableRow>
                 <TableHead>Account</TableHead>
                 <TableHead>Status</TableHead>
+                <TableHead>Credits</TableHead>
+                <TableHead>Plan</TableHead>
                 <TableHead>Image</TableHead>
                 <TableHead>Video</TableHead>
+                <TableHead>Video quota</TableHead>
+                <TableHead>Benefits</TableHead>
                 <TableHead>Token</TableHead>
                 <TableHead className="text-right">Actions</TableHead>
               </TableRow>
@@ -468,11 +514,55 @@ export function GeminiGenSettings({ active }: { active: boolean }) {
                 <TableRow key={account.id}>
                   <TableCell>
                     <div className="font-medium">{account.label}</div>
-                    {account.last_error ? <div className="text-xs text-destructive max-w-md truncate">{account.last_error}</div> : null}
+                    <div className="text-xs text-muted-foreground max-w-md truncate">
+                      {account.profile_full_name || account.profile_email || "No profile synced"}
+                    </div>
+                    {account.profile_full_name && account.profile_email ? (
+                      <div className="text-xs text-muted-foreground max-w-md truncate">{account.profile_email}</div>
+                    ) : null}
+                    {account.profile_sync_error || account.last_error ? (
+                      <div className="text-xs text-destructive max-w-md truncate">{account.profile_sync_error || account.last_error}</div>
+                    ) : null}
                   </TableCell>
-                  <TableCell>{account.is_active ? <Badge>enabled</Badge> : <Badge variant="outline">disabled</Badge>}</TableCell>
+                  <TableCell>
+                    {!account.is_active ? (
+                      <Badge variant="outline">disabled</Badge>
+                    ) : account.profile_is_active === false ? (
+                      <Badge variant="outline">inactive</Badge>
+                    ) : (
+                      <Badge>enabled</Badge>
+                    )}
+                  </TableCell>
+                  <TableCell className="text-xs whitespace-nowrap">
+                    <div className="font-medium tabular-nums">{formatNumberValue(account.available_credit)}</div>
+                    <div className="text-muted-foreground tabular-nums">
+                      Plan {formatNumberValue(account.plan_credit)}
+                      {account.purchased_credit ? ` + ${account.purchased_credit}` : ""}
+                    </div>
+                  </TableCell>
+                  <TableCell className="text-xs whitespace-nowrap">
+                    <div className="font-medium">{account.plan_name || "-"}</div>
+                    <div className="text-muted-foreground">{account.plan_expire_at ? `Exp ${formatCompactDateTime(account.plan_expire_at)}` : "-"}</div>
+                  </TableCell>
                   <TableCell className="tabular-nums">{account.image_in_flight}/{account.image_concurrency}</TableCell>
                   <TableCell className="tabular-nums">{account.video_in_flight}/{account.video_concurrency}</TableCell>
+                  <TableCell className="text-xs whitespace-nowrap">{geminiGenVideoQuota(account)}</TableCell>
+                  <TableCell className="max-w-[220px] text-xs">
+                    {account.active_benefits?.length ? (
+                      <div className="space-y-1">
+                        {account.active_benefits.slice(0, 2).map((benefit, index) => (
+                          <div key={`${benefit.id ?? index}-${benefit.name ?? "benefit"}`} className="truncate" title={benefit.name || ""}>
+                            {benefit.name || "Benefit"}
+                            {benefit.expire_at ? <span className="text-muted-foreground"> - {formatCompactDateTime(benefit.expire_at)}</span> : null}
+                          </div>
+                        ))}
+                        {account.active_benefits.length > 2 ? <div className="text-muted-foreground">+{account.active_benefits.length - 2} more</div> : null}
+                        <div className="text-muted-foreground">Synced {formatCompactDateTime(account.profile_synced_at)}</div>
+                      </div>
+                    ) : (
+                      <span className="text-muted-foreground">-</span>
+                    )}
+                  </TableCell>
                   <TableCell className="font-mono text-xs">{account.bearer_token_preview || "***"}</TableCell>
                   <TableCell>
                     <div className="flex justify-end gap-2">
@@ -496,7 +586,7 @@ export function GeminiGenSettings({ active }: { active: boolean }) {
                 </TableRow>
               )) : (
                 <TableRow>
-                  <TableCell colSpan={6} className="text-center text-muted-foreground">No GeminiGen accounts configured.</TableCell>
+                  <TableCell colSpan={10} className="text-center text-muted-foreground">No GeminiGen accounts configured.</TableCell>
                 </TableRow>
               )}
             </TableBody>

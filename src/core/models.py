@@ -445,6 +445,27 @@ class GeminiGenAccount(BaseModel):
     last_status: Optional[str] = None
     last_error: Optional[str] = None
     last_used_at: Optional[datetime] = None
+    profile_user_id: Optional[int] = None
+    profile_uuid: Optional[str] = None
+    profile_email: Optional[str] = None
+    profile_full_name: Optional[str] = None
+    profile_is_active: Optional[bool] = None
+    available_credit: Optional[int] = None
+    plan_credit: Optional[int] = None
+    purchased_credit: Optional[int] = None
+    locked_credit: Optional[int] = None
+    subscription_credit: Optional[int] = None
+    plan_name: Optional[str] = None
+    plan_expire_at: Optional[datetime] = None
+    active_benefits_json: Optional[str] = None
+    remaining_bulk_videos: Optional[int] = None
+    remaining_daily_videos: Optional[int] = None
+    remaining_grok_max_daily_videos: Optional[int] = None
+    remaining_grok_max_daily_720p_videos: Optional[int] = None
+    remaining_grok_max_daily_10s_videos: Optional[int] = None
+    profile_synced_at: Optional[datetime] = None
+    profile_sync_status: Optional[str] = None
+    profile_sync_error: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 

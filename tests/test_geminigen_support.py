@@ -333,6 +333,185 @@ def test_metadata_stats_survive_request_log_retention_cleanup():
     assert stats["today_metadata"] == 1
 
 
+def _sample_geminigen_me_payload():
+    return {
+        "id": 301913,
+        "uuid": "56fd932a-d887-11f0-b3aa-6673a75f95e0",
+        "email": "huzaifaphantompak@gmail.com",
+        "full_name": "Muhammad Huzaifa",
+        "is_active": True,
+        "user_credit": {
+            "plan_credit": 1,
+            "purchased_credit": 0,
+            "locked_credit": 0,
+            "available_credit": 1,
+            "subscription_credit": 0,
+        },
+        "user_plan": {
+            "product": {"name": "Premium"},
+            "expire_at": "2025-12-13T23:59:59",
+        },
+        "user_benefits": [
+            {
+                "id": 22869,
+                "product": {"name": "Image Generation 30 days"},
+                "expire_at": "2026-07-27T10:15:08",
+                "is_active": True,
+                "estimated_remaining": 0,
+            },
+            {
+                "id": 27961,
+                "product": {"name": "Grok 30 days"},
+                "expire_at": "2026-07-05T00:07:03",
+                "is_active": False,
+                "estimated_remaining": 0,
+            },
+        ],
+        "remaining_bulk_videos": 100,
+        "remaining_daily_videos": None,
+        "remaining_grok_max_daily_videos": None,
+        "remaining_grok_max_daily_720p_videos": None,
+        "remaining_grok_max_daily_10s_videos": None,
+    }
+
+
+def test_geminigen_me_profile_parser_normalizes_user_credit_plan_and_benefits():
+    parsed = GeminiGenService.parse_me_profile(_sample_geminigen_me_payload())
+    benefits = json.loads(parsed["active_benefits_json"])
+
+    assert parsed["profile_user_id"] == 301913
+    assert parsed["profile_uuid"] == "56fd932a-d887-11f0-b3aa-6673a75f95e0"
+    assert parsed["profile_email"] == "huzaifaphantompak@gmail.com"
+    assert parsed["profile_full_name"] == "Muhammad Huzaifa"
+    assert parsed["profile_is_active"] is True
+    assert parsed["available_credit"] == 1
+    assert parsed["plan_credit"] == 1
+    assert parsed["plan_name"] == "Premium"
+    assert parsed["plan_expire_at"] == datetime(2025, 12, 13, 23, 59, 59)
+    assert parsed["remaining_bulk_videos"] == 100
+    assert parsed["remaining_daily_videos"] is None
+    assert benefits == [
+        {
+            "id": 22869,
+            "name": "Image Generation 30 days",
+            "expire_at": "2026-07-27T10:15:08",
+            "is_active": True,
+            "estimated_remaining": 0,
+        }
+    ]
+
+
+def test_geminigen_account_profile_sync_stores_me_payload():
+    async def run():
+        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        tmp.close()
+        db = Database(tmp.name)
+        try:
+            await db.init_db()
+            account_id = await db.create_geminigen_account(label="primary", raw_cookie="", bearer_token="token")
+            service = GeminiGenService(db, None)
+
+            async def fetch(_account, _base_url):
+                return _sample_geminigen_me_payload()
+
+            service._fetch_me_profile_payload = fetch
+            result = await service.sync_account_profile(account_id)
+            account = await db.get_geminigen_account(account_id)
+            return result, account
+        finally:
+            os.unlink(tmp.name)
+
+    result, account = asyncio.run(run())
+
+    assert result["success"] is True
+    assert account.profile_email == "huzaifaphantompak@gmail.com"
+    assert account.profile_full_name == "Muhammad Huzaifa"
+    assert account.available_credit == 1
+    assert account.plan_name == "Premium"
+    assert account.remaining_bulk_videos == 100
+    assert account.profile_sync_status == "healthy"
+    assert account.profile_sync_error == ""
+    assert account.profile_synced_at is not None
+
+
+def test_geminigen_account_profile_sync_failure_preserves_saved_profile():
+    async def run():
+        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        tmp.close()
+        db = Database(tmp.name)
+        try:
+            await db.init_db()
+            account_id = await db.create_geminigen_account(label="primary", raw_cookie="", bearer_token="token")
+            await db.update_geminigen_account(
+                account_id,
+                profile_email="saved@example.com",
+                available_credit=7,
+                profile_sync_status="healthy",
+            )
+            service = GeminiGenService(db, None)
+
+            async def fetch(_account, _base_url):
+                raise RuntimeError("upstream unavailable")
+
+            service._fetch_me_profile_payload = fetch
+            result = await service.sync_account_profile(account_id)
+            account = await db.get_geminigen_account(account_id)
+            return result, account
+        finally:
+            os.unlink(tmp.name)
+
+    result, account = asyncio.run(run())
+
+    assert result["success"] is False
+    assert account.profile_email == "saved@example.com"
+    assert account.available_credit == 7
+    assert account.profile_sync_status == "failed"
+    assert account.profile_sync_error == "upstream unavailable"
+    assert account.profile_synced_at is not None
+
+
+def test_geminigen_account_profile_stale_uses_one_hour_ttl():
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    fresh = GeminiGenAccount(profile_synced_at=now - timedelta(minutes=30))
+    stale = GeminiGenAccount(profile_synced_at=now - timedelta(hours=2))
+    missing = GeminiGenAccount()
+
+    assert GeminiGenService.is_account_profile_stale(fresh) is False
+    assert GeminiGenService.is_account_profile_stale(stale) is True
+    assert GeminiGenService.is_account_profile_stale(missing) is True
+
+
+def test_geminigen_admin_account_payload_includes_profile_fields():
+    from src.api.admin import _geminigen_account_payload
+
+    account = GeminiGenAccount(
+        id=1,
+        label="primary",
+        bearer_token="secret-token",
+        profile_email="huzaifaphantompak@gmail.com",
+        profile_full_name="Muhammad Huzaifa",
+        available_credit=1,
+        plan_name="Premium",
+        plan_expire_at=datetime(2025, 12, 13, 23, 59, 59),
+        active_benefits_json=json.dumps([{"name": "Image Generation 30 days"}]),
+        remaining_bulk_videos=100,
+        profile_synced_at=datetime(2026, 7, 7, 12, 0, 0),
+        profile_sync_status="healthy",
+    )
+
+    payload = _geminigen_account_payload(account)
+
+    assert payload["profile_email"] == "huzaifaphantompak@gmail.com"
+    assert payload["profile_full_name"] == "Muhammad Huzaifa"
+    assert payload["available_credit"] == 1
+    assert payload["plan_name"] == "Premium"
+    assert payload["plan_expire_at"] == "2025-12-13T23:59:59"
+    assert payload["active_benefits"] == [{"name": "Image Generation 30 days"}]
+    assert payload["remaining_bulk_videos"] == 100
+    assert payload["profile_synced_at"] == "2026-07-07T12:00:00"
+    assert payload["profile_sync_status"] == "healthy"
+
+
 class _AdminSessionCursor:
     def __init__(self, row):
         self.row = row

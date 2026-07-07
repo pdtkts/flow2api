@@ -27,6 +27,25 @@ type GeminiGenAccountSummary = {
   last_status?: string
   last_error?: string
   last_used_at?: string | null
+  profile_email?: string | null
+  profile_full_name?: string | null
+  profile_is_active?: boolean | null
+  available_credit?: number | null
+  plan_credit?: number | null
+  purchased_credit?: number | null
+  locked_credit?: number | null
+  subscription_credit?: number | null
+  plan_name?: string | null
+  plan_expire_at?: string | null
+  active_benefits?: Array<{ id?: number | null; name?: string; expire_at?: string | null; estimated_remaining?: number | null }>
+  remaining_bulk_videos?: number | null
+  remaining_daily_videos?: number | null
+  remaining_grok_max_daily_videos?: number | null
+  remaining_grok_max_daily_720p_videos?: number | null
+  remaining_grok_max_daily_10s_videos?: number | null
+  profile_synced_at?: string | null
+  profile_sync_status?: string
+  profile_sync_error?: string
 }
 
 type GeminiGenConfigResponse = {
@@ -88,6 +107,33 @@ function accountTierBadge(tier: string | null | undefined) {
       {tier}
     </span>
   )
+}
+
+function formatCompactDateTime(value: string | null | undefined) {
+  if (!value) return "-"
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return date.toLocaleString("en-US", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  })
+}
+
+function formatNumberValue(value: number | null | undefined) {
+  return value === null || value === undefined ? "-" : value.toLocaleString()
+}
+
+function geminiGenVideoQuota(account: GeminiGenAccountSummary) {
+  const quotas = [
+    account.remaining_daily_videos !== null && account.remaining_daily_videos !== undefined ? `Daily ${account.remaining_daily_videos}` : "",
+    account.remaining_bulk_videos !== null && account.remaining_bulk_videos !== undefined ? `Bulk ${account.remaining_bulk_videos}` : "",
+    account.remaining_grok_max_daily_videos !== null && account.remaining_grok_max_daily_videos !== undefined
+      ? `Grok ${account.remaining_grok_max_daily_videos}`
+      : "",
+  ].filter(Boolean)
+  return quotas.length ? quotas.join(" / ") : "-"
 }
 
 export function TokenManagement() {
@@ -590,34 +636,57 @@ export function TokenManagement() {
                   <TableRow>
                     <TableHead>Account</TableHead>
                     <TableHead className="text-center">Status</TableHead>
+                    <TableHead>Credits</TableHead>
+                    <TableHead>Plan</TableHead>
                     <TableHead className="text-center">Image slots</TableHead>
                     <TableHead className="text-center">Video slots</TableHead>
+                    <TableHead>Video quota</TableHead>
+                    <TableHead>Benefits</TableHead>
                     <TableHead>Token</TableHead>
                     <TableHead>Last used</TableHead>
-                    <TableHead>Status detail</TableHead>
+                    <TableHead>Profile sync</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {!geminiGenAccounts.length ? (
                     <TableRow>
-                      <TableCell colSpan={7} className="text-center text-muted-foreground py-8">
+                      <TableCell colSpan={11} className="text-center text-muted-foreground py-8">
                         {geminiGenLoading ? "Loading..." : "No GeminiGen accounts configured"}
                       </TableCell>
                     </TableRow>
                   ) : (
                     geminiGenAccounts.map((account) => (
                       <TableRow key={account.id}>
-                        <TableCell className="font-medium max-w-[220px] truncate" title={account.label || ""}>
-                          {account.label || `Account ${account.id}`}
+                        <TableCell className="max-w-[240px]" title={account.profile_email || account.label || ""}>
+                          <div className="font-medium truncate">{account.label || `Account ${account.id}`}</div>
+                          <div className="text-xs text-muted-foreground truncate">
+                            {account.profile_full_name || account.profile_email || "No profile synced"}
+                          </div>
+                          {account.profile_full_name && account.profile_email ? (
+                            <div className="text-xs text-muted-foreground truncate">{account.profile_email}</div>
+                          ) : null}
                         </TableCell>
                         <TableCell className="text-center">
                           <span
                             className={`inline-flex rounded px-2 py-0.5 text-xs ${
-                              account.is_active ? "bg-green-500/15 text-green-700 dark:text-green-400" : "bg-muted text-muted-foreground"
+                              account.is_active && account.profile_is_active !== false
+                                ? "bg-green-500/15 text-green-700 dark:text-green-400"
+                                : "bg-muted text-muted-foreground"
                             }`}
                           >
-                            {account.is_active ? "Active" : "Disabled"}
+                            {!account.is_active ? "Disabled" : account.profile_is_active === false ? "Inactive" : "Active"}
                           </span>
+                        </TableCell>
+                        <TableCell className="text-xs whitespace-nowrap">
+                          <div className="font-medium tabular-nums">{formatNumberValue(account.available_credit)}</div>
+                          <div className="text-muted-foreground tabular-nums">
+                            Plan {formatNumberValue(account.plan_credit)}
+                            {account.purchased_credit ? ` + ${account.purchased_credit}` : ""}
+                          </div>
+                        </TableCell>
+                        <TableCell className="text-xs whitespace-nowrap">
+                          <div className="font-medium">{account.plan_name || "-"}</div>
+                          <div className="text-muted-foreground">{account.plan_expire_at ? `Exp ${formatCompactDateTime(account.plan_expire_at)}` : "-"}</div>
                         </TableCell>
                         <TableCell className="text-center tabular-nums">
                           {account.image_in_flight ?? 0}/{account.image_concurrency ?? 0}
@@ -625,13 +694,32 @@ export function TokenManagement() {
                         <TableCell className="text-center tabular-nums">
                           {account.video_in_flight ?? 0}/{account.video_concurrency ?? 0}
                         </TableCell>
-                        <TableCell className="font-mono text-xs">{account.bearer_token_preview || "***"}</TableCell>
-                        <TableCell className="text-xs whitespace-nowrap">{account.last_used_at || "-"}</TableCell>
-                        <TableCell className="max-w-[260px] truncate text-xs" title={account.last_error || account.last_status || ""}>
-                          {account.last_error ? (
-                            <span className="text-destructive">{account.last_error}</span>
+                        <TableCell className="text-xs whitespace-nowrap">{geminiGenVideoQuota(account)}</TableCell>
+                        <TableCell className="max-w-[220px] text-xs">
+                          {account.active_benefits?.length ? (
+                            <div className="space-y-1">
+                              {account.active_benefits.slice(0, 2).map((benefit, index) => (
+                                <div key={`${benefit.id ?? index}-${benefit.name ?? "benefit"}`} className="truncate" title={benefit.name || ""}>
+                                  {benefit.name || "Benefit"}
+                                  {benefit.expire_at ? <span className="text-muted-foreground"> - {formatCompactDateTime(benefit.expire_at)}</span> : null}
+                                </div>
+                              ))}
+                              {account.active_benefits.length > 2 ? <div className="text-muted-foreground">+{account.active_benefits.length - 2} more</div> : null}
+                            </div>
                           ) : (
-                            account.last_status || "-"
+                            <span className="text-muted-foreground">-</span>
+                          )}
+                        </TableCell>
+                        <TableCell className="font-mono text-xs">{account.bearer_token_preview || "***"}</TableCell>
+                        <TableCell className="text-xs whitespace-nowrap">{formatCompactDateTime(account.last_used_at)}</TableCell>
+                        <TableCell className="max-w-[240px] truncate text-xs" title={account.profile_sync_error || account.last_error || account.profile_sync_status || ""}>
+                          {account.profile_sync_error || account.last_error ? (
+                            <span className="text-destructive">{account.profile_sync_error || account.last_error}</span>
+                          ) : (
+                            <>
+                              <div>{account.profile_sync_status || account.last_status || "-"}</div>
+                              <div className="text-muted-foreground">{formatCompactDateTime(account.profile_synced_at)}</div>
+                            </>
                           )}
                         </TableCell>
                       </TableRow>
