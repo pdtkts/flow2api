@@ -642,7 +642,6 @@ export function TokenManagement() {
                     <TableHead className="text-center">Video slots</TableHead>
                     <TableHead>Video quota</TableHead>
                     <TableHead>Benefits</TableHead>
-                    <TableHead>Token</TableHead>
                     <TableHead>Last used</TableHead>
                     <TableHead>Profile sync</TableHead>
                   </TableRow>
@@ -650,7 +649,7 @@ export function TokenManagement() {
                 <TableBody>
                   {!geminiGenAccounts.length ? (
                     <TableRow>
-                      <TableCell colSpan={11} className="text-center text-muted-foreground py-8">
+                      <TableCell colSpan={10} className="text-center text-muted-foreground py-8">
                         {geminiGenLoading ? "Loading..." : "No GeminiGen accounts configured"}
                       </TableCell>
                     </TableRow>
@@ -710,7 +709,6 @@ export function TokenManagement() {
                             <span className="text-muted-foreground">-</span>
                           )}
                         </TableCell>
-                        <TableCell className="font-mono text-xs">{account.bearer_token_preview || "***"}</TableCell>
                         <TableCell className="text-xs whitespace-nowrap">{formatCompactDateTime(account.last_used_at)}</TableCell>
                         <TableCell className="max-w-[240px] truncate text-xs" title={account.profile_sync_error || account.last_error || account.profile_sync_status || ""}>
                           {account.profile_sync_error || account.last_error ? (

@@ -505,7 +505,6 @@ export function GeminiGenSettings({ active }: { active: boolean }) {
                 <TableHead>Video</TableHead>
                 <TableHead>Video quota</TableHead>
                 <TableHead>Benefits</TableHead>
-                <TableHead>Token</TableHead>
                 <TableHead className="text-right">Actions</TableHead>
               </TableRow>
             </TableHeader>
@@ -563,7 +562,6 @@ export function GeminiGenSettings({ active }: { active: boolean }) {
                       <span className="text-muted-foreground">-</span>
                     )}
                   </TableCell>
-                  <TableCell className="font-mono text-xs">{account.bearer_token_preview || "***"}</TableCell>
                   <TableCell>
                     <div className="flex justify-end gap-2">
                       <Button size="icon" variant="ghost" onClick={() => testAccount(account)} title="Test">
@@ -586,7 +584,7 @@ export function GeminiGenSettings({ active }: { active: boolean }) {
                 </TableRow>
               )) : (
                 <TableRow>
-                  <TableCell colSpan={10} className="text-center text-muted-foreground">No GeminiGen accounts configured.</TableCell>
+                  <TableCell colSpan={9} className="text-center text-muted-foreground">No GeminiGen accounts configured.</TableCell>
                 </TableRow>
               )}
             </TableBody>
