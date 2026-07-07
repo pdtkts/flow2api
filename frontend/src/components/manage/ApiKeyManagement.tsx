@@ -61,6 +61,14 @@ type ScopeOption = { id: string; label: string; description: string }
 
 type AdobeUsageMonthRow = { year_month: string; success_count: number }
 type AdobeUsageOpRow = { year_month: string; operation: string; success_count: number }
+type GenerationStats = {
+  total_images: number
+  total_videos: number
+  total_errors: number
+  today_images: number
+  today_videos: number
+  today_errors: number
+}
 
 const AUDIT_PAGE_SIZE = 25
 const KEY_PROJECT_PAGE_SIZE = 10
@@ -156,6 +164,8 @@ export function ApiKeyManagement() {
   const [adobeUsageRows, setAdobeUsageRows] = useState<AdobeUsageMonthRow[]>([])
   const [adobeUsageOpRows, setAdobeUsageOpRows] = useState<AdobeUsageOpRow[]>([])
   const [adobeUsageLoading, setAdobeUsageLoading] = useState(false)
+  const [generationStats, setGenerationStats] = useState<GenerationStats | null>(null)
+  const [generationStatsLoading, setGenerationStatsLoading] = useState(false)
   const [createdKey, setCreatedKey] = useState("")
   const [captchaWorkerKeys, setCaptchaWorkerKeys] = useState<CaptchaWorkerKeyRow[]>([])
   const [captchaWorkerSessions, setCaptchaWorkerSessions] = useState<NonNullable<ListCaptchaWorkerKeysResponse["sessions"]>>([])
@@ -262,6 +272,33 @@ export function ApiKeyManagement() {
       setAdobeUsageOpRows([])
     } finally {
       setAdobeUsageLoading(false)
+    }
+  }, [token])
+
+  const loadGenerationStats = useCallback(async (keyId: number) => {
+    if (!token) return
+    setGenerationStatsLoading(true)
+    try {
+      const r = await adminJson<{ success?: boolean } & GenerationStats>(
+        `/api/admin/managed-apikeys/${keyId}/generation-stats`,
+        token
+      )
+      if (r.ok && r.data?.success) {
+        setGenerationStats({
+          total_images: Number(r.data.total_images || 0),
+          total_videos: Number(r.data.total_videos || 0),
+          total_errors: Number(r.data.total_errors || 0),
+          today_images: Number(r.data.today_images || 0),
+          today_videos: Number(r.data.today_videos || 0),
+          today_errors: Number(r.data.today_errors || 0),
+        })
+      } else {
+        setGenerationStats(null)
+      }
+    } catch {
+      setGenerationStats(null)
+    } finally {
+      setGenerationStatsLoading(false)
     }
   }, [token])
 
@@ -473,6 +510,7 @@ export function ApiKeyManagement() {
     setNewProjSetCurrent(true)
     setEditOpen(true)
     void loadAdobeUsage(key.id)
+    void loadGenerationStats(key.id)
   }
 
   const handleEditOpenChange = (open: boolean) => {
@@ -485,6 +523,8 @@ export function ApiKeyManagement() {
       setKeyProjectsTotal(0)
       setAdobeUsageRows([])
       setAdobeUsageOpRows([])
+      setGenerationStats(null)
+      setGenerationStatsLoading(false)
       setLegacyScopesNotice(false)
       setNewProjTokenId("")
       setNewProjTitle("")
@@ -1055,6 +1095,51 @@ export function ApiKeyManagement() {
                 <Label>Expires at (optional)</Label>
                 <Input className="mt-1" value={expiresAt} onChange={(e) => setExpiresAt(e.target.value)} placeholder="YYYY-MM-DD HH:MM:SS" />
               </div>
+            </div>
+
+            <div className="space-y-3 rounded-md border p-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <Label>Generation stats</Label>
+                  <p className="mt-0.5 text-xs text-muted-foreground">
+                    Durable image/video generation counters for this key.
+                  </p>
+                </div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-8"
+                  disabled={generationStatsLoading || editingKeyId == null}
+                  onClick={() => editingKeyId != null && void loadGenerationStats(editingKeyId)}
+                >
+                  <RefreshCw className={`h-3.5 w-3.5 mr-1 ${generationStatsLoading ? "animate-spin" : ""}`} />
+                  Refresh
+                </Button>
+              </div>
+              {generationStatsLoading && !generationStats ? (
+                <div className="flex justify-center py-6 text-muted-foreground">
+                  <Loader2 className="h-6 w-6 animate-spin" />
+                </div>
+              ) : (
+                <div className="grid gap-3 sm:grid-cols-3">
+                  <div className="rounded-md border bg-muted/20 px-3 py-2">
+                    <div className="text-xs text-muted-foreground">Images</div>
+                    <div className="text-lg font-semibold tabular-nums">{generationStats?.total_images ?? 0}</div>
+                    <div className="text-[11px] text-muted-foreground">Today {generationStats?.today_images ?? 0}</div>
+                  </div>
+                  <div className="rounded-md border bg-muted/20 px-3 py-2">
+                    <div className="text-xs text-muted-foreground">Videos</div>
+                    <div className="text-lg font-semibold tabular-nums">{generationStats?.total_videos ?? 0}</div>
+                    <div className="text-[11px] text-muted-foreground">Today {generationStats?.today_videos ?? 0}</div>
+                  </div>
+                  <div className="rounded-md border bg-muted/20 px-3 py-2">
+                    <div className="text-xs text-muted-foreground">Errors</div>
+                    <div className="text-lg font-semibold tabular-nums">{generationStats?.total_errors ?? 0}</div>
+                    <div className="text-[11px] text-muted-foreground">Today {generationStats?.today_errors ?? 0}</div>
+                  </div>
+                </div>
+              )}
             </div>
 
             <div className="space-y-3 rounded-md border p-3">

@@ -375,6 +375,7 @@ class Database:
             CREATE TABLE IF NOT EXISTS geminigen_config (
                 id INTEGER PRIMARY KEY DEFAULT 1,
                 enabled BOOLEAN DEFAULT 0,
+                video_enabled BOOLEAN DEFAULT 1,
                 base_url TEXT DEFAULT 'https://api.geminigen.ai',
                 poll_interval_image_sec REAL DEFAULT 3.0,
                 poll_interval_video_sec REAL DEFAULT 12.0,
@@ -448,6 +449,7 @@ class Database:
             if not await self._column_exists(db, "geminigen_accounts", column_name):
                 await db.execute(f"ALTER TABLE geminigen_accounts ADD COLUMN {column_name} {column_type}")
         config_columns = [
+            ("video_enabled", "BOOLEAN DEFAULT 1"),
             ("global_image_concurrency", "INTEGER DEFAULT 5"),
             ("global_video_concurrency", "INTEGER DEFAULT 5"),
         ]
@@ -2061,6 +2063,116 @@ class Database:
                 "today_errors": int(stats_data.get("today_errors") or 0) + int(geminigen_data.get("today_errors") or 0)
             }
 
+    async def get_api_key_generation_stats(
+        self,
+        api_key_id: int,
+        *,
+        native_image_models: Optional[List[str]] = None,
+        native_video_models: Optional[List[str]] = None,
+    ) -> Dict[str, int]:
+        """Dashboard-style durable generation counters for one managed API key."""
+        today = self._current_stats_date()
+        stats = {
+            "total_images": 0,
+            "total_videos": 0,
+            "total_errors": 0,
+            "today_images": 0,
+            "today_videos": 0,
+            "today_errors": 0,
+        }
+
+        def add_row(row: Optional[aiosqlite.Row]) -> None:
+            data = dict(row) if row else {}
+            for key in stats:
+                stats[key] += int(data.get(key) or 0)
+
+        def model_in_condition(column_name: str, values: List[str]) -> tuple[str, List[str]]:
+            cleaned = [str(value).strip() for value in values if str(value).strip()]
+            if not cleaned:
+                return "0", []
+            placeholders = ",".join("?" for _ in cleaned)
+            return f"{column_name} IN ({placeholders})", cleaned
+
+        image_condition, image_params = model_in_condition("model", native_image_models or [])
+        video_condition, video_params = model_in_condition("model", native_video_models or [])
+
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+
+            native_params: List[Any] = (
+                image_params
+                + video_params
+                + image_params
+                + [today]
+                + video_params
+                + [today, today, api_key_id]
+            )
+            native_cursor = await db.execute(
+                f"""
+                SELECT
+                    COALESCE(SUM(CASE WHEN status = 'completed' AND {image_condition} THEN 1 ELSE 0 END), 0) AS total_images,
+                    COALESCE(SUM(CASE WHEN status = 'completed' AND {video_condition} THEN 1 ELSE 0 END), 0) AS total_videos,
+                    COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0) AS total_errors,
+                    COALESCE(SUM(CASE
+                        WHEN status = 'completed' AND {image_condition}
+                             AND DATE(completed_at, 'localtime') = ? THEN 1 ELSE 0 END), 0) AS today_images,
+                    COALESCE(SUM(CASE
+                        WHEN status = 'completed' AND {video_condition}
+                             AND DATE(completed_at, 'localtime') = ? THEN 1 ELSE 0 END), 0) AS today_videos,
+                    COALESCE(SUM(CASE
+                        WHEN status = 'failed' AND DATE(completed_at, 'localtime') = ? THEN 1 ELSE 0 END), 0) AS today_errors
+                FROM tasks
+                WHERE api_key_id = ?
+                """,
+                native_params,
+            )
+            add_row(await native_cursor.fetchone())
+
+            geminigen_cursor = await db.execute(
+                """
+                SELECT
+                    COALESCE(SUM(CASE WHEN status = 'completed' AND kind = 'image' THEN 1 ELSE 0 END), 0) AS total_images,
+                    COALESCE(SUM(CASE WHEN status = 'completed' AND kind = 'video' THEN 1 ELSE 0 END), 0) AS total_videos,
+                    COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0) AS total_errors,
+                    COALESCE(SUM(CASE
+                        WHEN status = 'completed' AND kind = 'image'
+                             AND DATE(completed_at, 'localtime') = ? THEN 1 ELSE 0 END), 0) AS today_images,
+                    COALESCE(SUM(CASE
+                        WHEN status = 'completed' AND kind = 'video'
+                             AND DATE(completed_at, 'localtime') = ? THEN 1 ELSE 0 END), 0) AS today_videos,
+                    COALESCE(SUM(CASE
+                        WHEN status = 'failed' AND DATE(completed_at, 'localtime') = ? THEN 1 ELSE 0 END), 0) AS today_errors
+                FROM geminigen_tasks
+                WHERE api_key_id = ?
+                """,
+                (today, today, today, api_key_id),
+            )
+            add_row(await geminigen_cursor.fetchone())
+
+            runway_cursor = await db.execute(
+                """
+                SELECT
+                    COALESCE(SUM(CASE WHEN rt.status = 'completed' AND rm.kind = 'image' THEN 1 ELSE 0 END), 0) AS total_images,
+                    COALESCE(SUM(CASE WHEN rt.status = 'completed' AND rm.kind = 'video' THEN 1 ELSE 0 END), 0) AS total_videos,
+                    COALESCE(SUM(CASE WHEN rt.status = 'failed' THEN 1 ELSE 0 END), 0) AS total_errors,
+                    COALESCE(SUM(CASE
+                        WHEN rt.status = 'completed' AND rm.kind = 'image'
+                             AND DATE(rt.completed_at, 'localtime') = ? THEN 1 ELSE 0 END), 0) AS today_images,
+                    COALESCE(SUM(CASE
+                        WHEN rt.status = 'completed' AND rm.kind = 'video'
+                             AND DATE(rt.completed_at, 'localtime') = ? THEN 1 ELSE 0 END), 0) AS today_videos,
+                    COALESCE(SUM(CASE
+                        WHEN rt.status = 'failed' AND DATE(rt.completed_at, 'localtime') = ? THEN 1 ELSE 0 END), 0) AS today_errors
+                FROM runway_tasks rt
+                LEFT JOIN runway_models rm ON rm.public_model_id = rt.public_model_id
+                WHERE rt.api_key_id = ?
+                """,
+                (today, today, today, api_key_id),
+            )
+            add_row(await runway_cursor.fetchone())
+
+        return stats
+
     async def get_system_info_stats(self) -> Dict[str, int]:
         """Get lightweight system counters used by admin dashboard"""
         async with self._connect() as db:
@@ -2832,6 +2944,7 @@ class Database:
         self,
         *,
         enabled: Optional[bool] = None,
+        video_enabled: Optional[bool] = None,
         base_url: Optional[str] = None,
         poll_interval_image_sec: Optional[float] = None,
         poll_interval_video_sec: Optional[float] = None,
@@ -2844,6 +2957,7 @@ class Database:
         current = await self.get_geminigen_config()
         values = {
             "enabled": int(current.enabled if enabled is None else bool(enabled)),
+            "video_enabled": int(current.video_enabled if video_enabled is None else bool(video_enabled)),
             "base_url": (base_url if base_url is not None else current.base_url).strip().rstrip("/") or "https://api.geminigen.ai",
             "poll_interval_image_sec": max(1.0, float(current.poll_interval_image_sec if poll_interval_image_sec is None else poll_interval_image_sec)),
             "poll_interval_video_sec": max(2.0, float(current.poll_interval_video_sec if poll_interval_video_sec is None else poll_interval_video_sec)),
@@ -2857,13 +2971,14 @@ class Database:
             await db.execute(
                 """
                 INSERT INTO geminigen_config (
-                    id, enabled, base_url, poll_interval_image_sec, poll_interval_video_sec,
+                    id, enabled, video_enabled, base_url, poll_interval_image_sec, poll_interval_video_sec,
                     timeout_image_sec, timeout_video_sec, global_image_concurrency,
                     global_video_concurrency, cache_outputs, updated_at
                 )
-                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                 ON CONFLICT(id) DO UPDATE SET
                     enabled = excluded.enabled,
+                    video_enabled = excluded.video_enabled,
                     base_url = excluded.base_url,
                     poll_interval_image_sec = excluded.poll_interval_image_sec,
                     poll_interval_video_sec = excluded.poll_interval_video_sec,
@@ -2876,6 +2991,7 @@ class Database:
                 """,
                 (
                     values["enabled"],
+                    values["video_enabled"],
                     values["base_url"],
                     values["poll_interval_image_sec"],
                     values["poll_interval_video_sec"],
@@ -4452,6 +4568,17 @@ class Database:
         async with self._connect(write=True) as db:
             await db.execute("DELETE FROM request_logs")
             await db.commit()
+
+    async def delete_request_logs_older_than(self, days: int = 3) -> int:
+        """Delete request log rows older than the configured number of days."""
+        safe_days = max(1, int(days or 3))
+        async with self._connect(write=True) as db:
+            cursor = await db.execute(
+                "DELETE FROM request_logs WHERE datetime(created_at) < datetime('now', ?)",
+                (f"-{safe_days} days",),
+            )
+            await db.commit()
+            return int(cursor.rowcount or 0)
 
     async def upsert_cache_file(
         self,

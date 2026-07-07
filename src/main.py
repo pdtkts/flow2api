@@ -159,6 +159,8 @@ EMERGENCY_PRUNE_TABLES = (
     "api_key_audit_logs",
     "admin_sessions",
 )
+REQUEST_LOG_RETENTION_DAYS = 3
+REQUEST_LOG_CLEANUP_INTERVAL_SECONDS = 12 * 3600
 
 
 def _format_bytes(value: int) -> str:
@@ -534,6 +536,25 @@ async def lifespan(app: FastAPI):
 
     # Start 429 auto-unban task
     import asyncio
+
+    async def request_log_cleanup_task():
+        """Prune request log rows while leaving durable telemetry untouched."""
+        while True:
+            try:
+                deleted = await db.delete_request_logs_older_than(REQUEST_LOG_RETENTION_DAYS)
+                if deleted:
+                    debug_logger.log_info(
+                        f"[REQUEST_LOG_CLEANUP] Deleted {deleted} request log row(s) older than {REQUEST_LOG_RETENTION_DAYS} days"
+                    )
+                await asyncio.sleep(REQUEST_LOG_CLEANUP_INTERVAL_SECONDS)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                debug_logger.log_warning(f"[REQUEST_LOG_CLEANUP] task error: {e}")
+                await asyncio.sleep(3600)
+
+    request_log_cleanup_handle = asyncio.create_task(request_log_cleanup_task())
+
     async def auto_unban_task():
         """定时任务：每小时检查并解禁429被禁用的token"""
         while True:
@@ -674,6 +695,7 @@ async def lifespan(app: FastAPI):
     else:
         print("WARN File cache cleanup task failed to start")
     print("OK 429 auto-unban task started (runs every hour)")
+    print(f"OK Request log cleanup task started (retention: {REQUEST_LOG_RETENTION_DAYS} days)")
     print("OK Scheduled token refresh task started")
     print("OK Scheduled ST-only refresh task started")
     if resumed_geminigen_tasks:
@@ -688,6 +710,11 @@ async def lifespan(app: FastAPI):
     # Stop file cache cleanup task
     await generation_handler.file_cache.stop_cleanup_task()
     # Stop auto-unban task
+    request_log_cleanup_handle.cancel()
+    try:
+        await request_log_cleanup_handle
+    except asyncio.CancelledError:
+        pass
     auto_unban_task_handle.cancel()
     try:
         await auto_unban_task_handle
@@ -710,6 +737,7 @@ async def lifespan(app: FastAPI):
         await browser_service.close()
         print("OK Browser captcha service closed")
     print("OK File cache cleanup task stopped")
+    print("OK Request log cleanup task stopped")
     print("OK 429 auto-unban task stopped")
     print("OK Scheduled token refresh task stopped")
     print("OK Scheduled ST-only refresh task stopped")

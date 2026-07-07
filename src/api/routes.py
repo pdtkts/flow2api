@@ -28,7 +28,7 @@ from ..core.logger import debug_logger
 from ..core.route_log_sanitize import dumps_for_request_log
 from ..core.account_tiers import normalize_user_paygate_tier, supports_model_for_tier
 from ..core.model_resolver import get_base_model_aliases, resolve_model_name
-from ..core.geminigen_manifest import GEMINIGEN_MODEL_MANIFEST
+from ..core.geminigen_manifest import GEMINIGEN_MODEL_MANIFEST, geminigen_manifest_entry
 from ..core.studio_model_catalog import (
     geminigen_studio_metadata,
     native_studio_metadata,
@@ -367,6 +367,7 @@ async def _get_geminigen_openai_model_catalog() -> List[Dict[str, str]]:
             "studio": geminigen_studio_metadata(item),
         }
         for item in GEMINIGEN_MODEL_MANIFEST
+        if bool(getattr(cfg, "video_enabled", True)) or item.get("kind") != "video"
     ]
 
 
@@ -897,6 +898,16 @@ def _is_runway_model(model: str) -> bool:
 
 def _is_geminigen_model(model: str) -> bool:
     return GeminiGenService.is_geminigen_model(model)
+
+
+async def _require_geminigen_model_enabled(model: str) -> None:
+    manifest = geminigen_manifest_entry(model or "")
+    if not manifest or manifest.get("kind") != "video":
+        return
+    service = _ensure_geminigen_service()
+    cfg = await service.db.get_geminigen_config()
+    if not bool(getattr(cfg, "video_enabled", True)):
+        raise HTTPException(status_code=404, detail="GeminiGen video mode is disabled")
 
 
 def _request_extra_dict(request: Any) -> Dict[str, Any]:
@@ -2765,6 +2776,7 @@ async def create_chat_completion(
 
         if _is_geminigen_model(normalized.model):
             _require_geminigen_scope(auth_ctx)
+            await _require_geminigen_model_enabled(normalized.model)
             if request.stream:
                 return StreamingResponse(
                     _iterate_geminigen_openai_stream(
@@ -2875,6 +2887,7 @@ async def create_chat_completion_async(
 
         if _is_geminigen_model(normalized.model):
             _require_geminigen_scope(auth_ctx)
+            await _require_geminigen_model_enabled(normalized.model)
             task = await _enqueue_geminigen_from_request(
                 request,
                 normalized,
@@ -3029,6 +3042,7 @@ async def generate_content(
         request_base_url = _get_request_base_url(raw_request)
         if _is_geminigen_model(normalized.model):
             _require_geminigen_scope(auth_ctx)
+            await _require_geminigen_model_enabled(normalized.model)
             payload = await _geminigen_openai_non_stream(
                 request,
                 normalized,
@@ -3117,6 +3131,7 @@ async def stream_generate_content(
         request_base_url = _get_request_base_url(raw_request)
         if _is_geminigen_model(normalized.model):
             _require_geminigen_scope(auth_ctx)
+            await _require_geminigen_model_enabled(normalized.model)
             return StreamingResponse(
                 _iterate_geminigen_openai_stream(
                     request,

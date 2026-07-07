@@ -14,6 +14,7 @@ import { CheckCircle2, Edit3, Plus, RefreshCw, Save, Trash2 } from "lucide-react
 
 type GeminiGenConfig = {
   enabled: boolean
+  video_enabled: boolean
   base_url: string
   poll_interval_image_sec: number
   poll_interval_video_sec: number
@@ -97,6 +98,7 @@ type AccountDraft = {
 
 const DEFAULT_CONFIG: GeminiGenConfig = {
   enabled: false,
+  video_enabled: true,
   base_url: "https://api.geminigen.ai",
   poll_interval_image_sec: 3,
   poll_interval_video_sec: 12,
@@ -392,10 +394,14 @@ export function GeminiGenSettings({ active }: { active: boolean }) {
         <CardHeader>
           <CardTitle>GeminiGen Config</CardTitle>
         </CardHeader>
-        <CardContent className="grid gap-4 md:grid-cols-4">
+        <CardContent className="grid gap-4 md:grid-cols-5">
           <div className="flex items-center gap-2">
             <Switch checked={config.enabled} onCheckedChange={(enabled) => setConfig((c) => ({ ...c, enabled }))} />
             <Label>Enabled</Label>
+          </div>
+          <div className="flex items-center gap-2">
+            <Switch checked={config.video_enabled} onCheckedChange={(video_enabled) => setConfig((c) => ({ ...c, video_enabled }))} />
+            <Label>Video mode</Label>
           </div>
           <div className="space-y-2 md:col-span-2">
             <Label>Base URL</Label>

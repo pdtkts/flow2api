@@ -415,6 +415,7 @@ class GeminiGenConfig(BaseModel):
 
     id: int = 1
     enabled: bool = False
+    video_enabled: bool = True
     base_url: str = "https://api.geminigen.ai"
     poll_interval_image_sec: float = 3.0
     poll_interval_video_sec: float = 12.0

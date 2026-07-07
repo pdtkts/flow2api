@@ -616,6 +616,169 @@ def test_geminigen_global_image_concurrency_queues_after_five_slots():
     assert acquired_after_release is not None
 
 
+def test_request_log_retention_deletes_only_old_request_logs():
+    async def run():
+        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        tmp.close()
+        db = Database(tmp.name)
+        try:
+            await db.init_db()
+            now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+            old_created = (now_utc - timedelta(days=4)).strftime("%Y-%m-%d %H:%M:%S")
+            recent_created = (now_utc - timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S")
+            async with db._connect(write=True) as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO request_logs (operation, status_code, duration, created_at, updated_at)
+                    VALUES ('old', 200, 0.1, ?, ?)
+                    """,
+                    (old_created, old_created),
+                )
+                await conn.execute(
+                    """
+                    INSERT INTO request_logs (operation, status_code, duration, created_at, updated_at)
+                    VALUES ('recent', 200, 0.1, ?, ?)
+                    """,
+                    (recent_created, recent_created),
+                )
+                await conn.execute(
+                    """
+                    INSERT INTO geminigen_tasks (job_id, public_model_id, kind, status, completed_at, created_at)
+                    VALUES ('old-task', 'geminigen-test', 'image', 'completed', ?, ?)
+                    """,
+                    (old_created, old_created),
+                )
+                await conn.commit()
+
+            deleted = await db.delete_request_logs_older_than(days=3)
+            async with db._connect() as conn:
+                request_count = (await (await conn.execute("SELECT COUNT(*) FROM request_logs")).fetchone())[0]
+                task_count = (await (await conn.execute("SELECT COUNT(*) FROM geminigen_tasks")).fetchone())[0]
+            return deleted, request_count, task_count
+        finally:
+            os.unlink(tmp.name)
+
+    deleted, request_count, task_count = asyncio.run(run())
+
+    assert deleted == 1
+    assert request_count == 1
+    assert task_count == 1
+
+
+def test_api_key_generation_stats_aggregate_durable_generation_tables():
+    async def run():
+        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        tmp.close()
+        db = Database(tmp.name)
+        try:
+            await db.init_db()
+            today = f"{db._current_stats_date()} 12:00:00"
+            async with db._connect(write=True) as conn:
+                await conn.execute("INSERT INTO api_clients (id, name) VALUES (1, 'client')")
+                await conn.execute(
+                    """
+                    INSERT INTO api_keys (id, client_id, label, key_prefix, key_hash)
+                    VALUES (7, 1, 'key', 'fk_test', 'hash')
+                    """
+                )
+                await conn.execute(
+                    "INSERT INTO tokens (id, st, email) VALUES (1, 'st', 'user@example.com')"
+                )
+                await conn.executemany(
+                    """
+                    INSERT INTO tasks (task_id, token_id, api_key_id, model, prompt, status, completed_at)
+                    VALUES (?, 1, 7, ?, 'prompt', ?, ?)
+                    """,
+                    [
+                        ("native-image", "native-image-model", "completed", today),
+                        ("native-video", "native-video-model", "completed", today),
+                        ("native-error", "native-image-model", "failed", today),
+                    ],
+                )
+                await conn.executemany(
+                    """
+                    INSERT INTO geminigen_tasks (job_id, api_key_id, public_model_id, kind, endpoint_type, status, completed_at)
+                    VALUES (?, 7, ?, ?, 'imagen', ?, ?)
+                    """,
+                    [
+                        ("geminigen-image", "geminigen-image-model", "image", "completed", today),
+                        ("geminigen-error", "geminigen-video-model", "video", "failed", today),
+                    ],
+                )
+                await conn.executemany(
+                    """
+                    INSERT INTO runway_models (public_model_id, display_name, kind, task_type)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    [
+                        ("runway-video-model", "Runway Video", "video", "video_task"),
+                        ("runway-error-model", "Runway Image", "image", "image_task"),
+                    ],
+                )
+                await conn.executemany(
+                    """
+                    INSERT INTO runway_tasks (job_id, api_key_id, public_model_id, prompt, status, completed_at)
+                    VALUES (?, 7, ?, 'prompt', ?, ?)
+                    """,
+                    [
+                        ("runway-video", "runway-video-model", "completed", today),
+                        ("runway-error", "runway-error-model", "failed", today),
+                    ],
+                )
+                await conn.commit()
+
+            return await db.get_api_key_generation_stats(
+                7,
+                native_image_models=["native-image-model"],
+                native_video_models=["native-video-model"],
+            )
+        finally:
+            os.unlink(tmp.name)
+
+    stats = asyncio.run(run())
+
+    assert stats == {
+        "total_images": 2,
+        "total_videos": 2,
+        "total_errors": 3,
+        "today_images": 2,
+        "today_videos": 2,
+        "today_errors": 3,
+    }
+
+
+def test_geminigen_video_disabled_filters_catalog_and_rejects_video_model():
+    async def run():
+        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        tmp.close()
+        db = Database(tmp.name)
+        old_service = routes.geminigen_service
+        try:
+            await db.init_db()
+            await db.update_geminigen_config(enabled=True, video_enabled=False)
+            await db.create_geminigen_account(label="account", raw_cookie="", bearer_token="token")
+            routes.geminigen_service = SimpleNamespace(db=db)
+
+            catalog = await routes._get_geminigen_openai_model_catalog()
+            video_id = next(item["id"] for item in GEMINIGEN_MODEL_MANIFEST if item["kind"] == "video")
+            error_status = None
+            try:
+                await routes._require_geminigen_model_enabled(video_id)
+            except HTTPException as exc:
+                error_status = exc.status_code
+            return catalog, error_status
+        finally:
+            routes.geminigen_service = old_service
+            os.unlink(tmp.name)
+
+    catalog, error_status = asyncio.run(run())
+
+    assert catalog
+    assert all(model["id"] in GEMINIGEN_MODEL_BY_ID for model in catalog)
+    assert all(GEMINIGEN_MODEL_BY_ID[model["id"]]["kind"] != "video" for model in catalog)
+    assert error_status == 404
+
+
 class FakeGeminiGenDatabase:
     def __init__(self, *, timeout_image_sec=3.0):
         self.account = GeminiGenAccount(id=1, label="primary", bearer_token="token", image_concurrency=1, image_in_flight=0)

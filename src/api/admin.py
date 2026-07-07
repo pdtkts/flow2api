@@ -32,6 +32,7 @@ from ..services.proxy_manager import ProxyManager
 from ..services.concurrency_manager import ConcurrencyManager
 from ..services.runway_service import RunwayService
 from ..services.geminigen_service import GeminiGenService
+from ..services.generation_handler import MODEL_CONFIG
 
 try:
     import httpx
@@ -878,6 +879,7 @@ class RunwayModelUpdateRequest(BaseModel):
 
 class GeminiGenConfigUpdateRequest(BaseModel):
     enabled: Optional[bool] = None
+    video_enabled: Optional[bool] = None
     base_url: Optional[str] = None
     poll_interval_image_sec: Optional[float] = None
     poll_interval_video_sec: Optional[float] = None
@@ -1998,6 +2000,21 @@ def _geminigen_account_payload(account) -> Dict[str, Any]:
     }
 
 
+def _geminigen_config_payload(cfg) -> Dict[str, Any]:
+    return {
+        "enabled": bool(cfg.enabled),
+        "video_enabled": bool(getattr(cfg, "video_enabled", True)),
+        "base_url": cfg.base_url,
+        "poll_interval_image_sec": cfg.poll_interval_image_sec,
+        "poll_interval_video_sec": cfg.poll_interval_video_sec,
+        "timeout_image_sec": cfg.timeout_image_sec,
+        "timeout_video_sec": cfg.timeout_video_sec,
+        "global_image_concurrency": cfg.global_image_concurrency,
+        "global_video_concurrency": cfg.global_video_concurrency,
+        "cache_outputs": bool(cfg.cache_outputs),
+    }
+
+
 @router.get("/api/admin/runway/config")
 async def get_runway_admin_config(token: str = Depends(verify_admin_token)):
     cfg = await db.get_runway_config()
@@ -2295,19 +2312,9 @@ async def get_geminigen_admin_config(token: str = Depends(verify_admin_token)):
     accounts = await db.list_geminigen_accounts()
     return {
         "success": True,
-        "config": {
-            "enabled": bool(cfg.enabled),
-            "base_url": cfg.base_url,
-            "poll_interval_image_sec": cfg.poll_interval_image_sec,
-            "poll_interval_video_sec": cfg.poll_interval_video_sec,
-            "timeout_image_sec": cfg.timeout_image_sec,
-            "timeout_video_sec": cfg.timeout_video_sec,
-            "global_image_concurrency": cfg.global_image_concurrency,
-            "global_video_concurrency": cfg.global_video_concurrency,
-            "cache_outputs": bool(cfg.cache_outputs),
-        },
+        "config": _geminigen_config_payload(cfg),
         "accounts": [_geminigen_account_payload(account) for account in accounts],
-        "models": GeminiGenService.model_catalog(),
+        "models": GeminiGenService.model_catalog(video_enabled=bool(getattr(cfg, "video_enabled", True))),
     }
 
 
@@ -2318,6 +2325,7 @@ async def update_geminigen_admin_config(
 ):
     cfg = await db.update_geminigen_config(
         enabled=request.enabled,
+        video_enabled=request.video_enabled,
         base_url=request.base_url,
         poll_interval_image_sec=request.poll_interval_image_sec,
         poll_interval_video_sec=request.poll_interval_video_sec,
@@ -2329,17 +2337,7 @@ async def update_geminigen_admin_config(
     )
     return {
         "success": True,
-        "config": {
-            "enabled": bool(cfg.enabled),
-            "base_url": cfg.base_url,
-            "poll_interval_image_sec": cfg.poll_interval_image_sec,
-            "poll_interval_video_sec": cfg.poll_interval_video_sec,
-            "timeout_image_sec": cfg.timeout_image_sec,
-            "timeout_video_sec": cfg.timeout_video_sec,
-            "global_image_concurrency": cfg.global_image_concurrency,
-            "global_video_concurrency": cfg.global_video_concurrency,
-            "cache_outputs": bool(cfg.cache_outputs),
-        },
+        "config": _geminigen_config_payload(cfg),
     }
 
 
@@ -2997,6 +2995,33 @@ async def get_managed_api_key_adobe_usage(
         "by_month": stats.get("by_month") or [],
         "by_month_by_operation": stats.get("by_month_by_operation") or [],
     }
+
+
+@router.get("/api/admin/managed-apikeys/{key_id}/generation-stats")
+async def get_managed_api_key_generation_stats(
+    key_id: int,
+    token: str = Depends(verify_admin_token),
+):
+    """Durable dashboard-style generation counters for one managed API key."""
+    detail = await db.get_api_key_detail(key_id)
+    if not detail:
+        raise HTTPException(status_code=404, detail="Managed API key not found")
+    native_image_models = [
+        model_id
+        for model_id, model_config in MODEL_CONFIG.items()
+        if model_config.get("type") == "image"
+    ]
+    native_video_models = [
+        model_id
+        for model_id, model_config in MODEL_CONFIG.items()
+        if model_config.get("type") == "video"
+    ]
+    stats = await db.get_api_key_generation_stats(
+        key_id,
+        native_image_models=native_image_models,
+        native_video_models=native_video_models,
+    )
+    return {"success": True, "key_id": key_id, **stats}
 
 
 @router.get("/api/admin/managed-apikeys/audit")

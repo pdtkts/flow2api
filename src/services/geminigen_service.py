@@ -82,13 +82,14 @@ class GeminiGenService:
         return bool(geminigen_manifest_entry(model or ""))
 
     @staticmethod
-    def model_catalog() -> List[Dict[str, str]]:
+    def model_catalog(*, video_enabled: bool = True) -> List[Dict[str, str]]:
         return [
             {
                 "id": item["id"],
                 "description": f"GeminiGen {item['kind']} generation - {item['endpoint_type']}",
             }
             for item in GEMINIGEN_MODEL_MANIFEST
+            if video_enabled or item.get("kind") != "video"
         ]
 
     @staticmethod
@@ -1134,6 +1135,8 @@ class GeminiGenService:
         if not cfg.enabled:
             raise RuntimeError("GeminiGen integration is disabled")
         kind = str(manifest["kind"])
+        if kind == "video" and not bool(getattr(cfg, "video_enabled", True)):
+            raise RuntimeError("GeminiGen video mode is disabled")
         job_id = f"geminigen-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
         request_log_id = await self._create_request_log(
             api_key_id=api_key_id,
