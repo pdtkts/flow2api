@@ -275,6 +275,62 @@ def test_dashboard_stats_exclude_non_terminal_and_cancelled_geminigen_tasks():
     assert stats["today_images"] == 0
     assert stats["today_videos"] == 0
     assert stats["today_errors"] == 0
+    assert stats["total_metadata"] == 0
+    assert stats["today_metadata"] == 0
+
+
+def test_dashboard_stats_include_durable_metadata_counts():
+    async def run():
+        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        tmp.close()
+        db = Database(tmp.name)
+        try:
+            await db.init_db()
+            await db.increment_operation_stat("adobe:metadata", success=True)
+            await db.increment_operation_stat("adobe:metadata", success=True)
+            await db.increment_operation_stat("adobe:metadata", success=False)
+            return await db.get_dashboard_stats()
+        finally:
+            os.unlink(tmp.name)
+
+    stats = asyncio.run(run())
+
+    assert stats["total_metadata"] == 2
+    assert stats["today_metadata"] == 2
+    assert stats["metadata_errors"] == 1
+    assert stats["today_metadata_errors"] == 1
+
+
+def test_metadata_stats_survive_request_log_retention_cleanup():
+    async def run():
+        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        tmp.close()
+        db = Database(tmp.name)
+        try:
+            await db.init_db()
+            await db.increment_operation_stat("adobe:metadata", success=True)
+            old_created = (datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=4)).strftime("%Y-%m-%d %H:%M:%S")
+            async with db._connect(write=True) as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO request_logs (operation, status_code, duration, created_at, updated_at)
+                    VALUES ('adobe:metadata', 200, 0.1, ?, ?)
+                    """,
+                    (old_created, old_created),
+                )
+                await conn.commit()
+
+            deleted = await db.delete_request_logs_older_than(days=3)
+            stats = await db.get_dashboard_stats()
+            return deleted, stats
+        finally:
+            os.unlink(tmp.name)
+
+    deleted, stats = asyncio.run(run())
+
+    assert deleted == 1
+    assert stats["total_metadata"] == 1
+    assert stats["today_metadata"] == 1
 
 
 class _AdminSessionCursor:

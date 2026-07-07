@@ -264,6 +264,11 @@ async def _logged_managed_adobe_call(
     finally:
         duration = max(0.0, time.perf_counter() - started)
         if auth_ctx.key_id is not None:
+            if operation == LOG_OP_ADOBE_METADATA:
+                try:
+                    await ldb.increment_operation_stat(operation, success=status_code == 200)
+                except Exception as stat_exc:
+                    debug_logger.log_error(f"Managed Adobe metadata stats update failed: {stat_exc}")
             try:
                 status_text = "completed" if status_code == 200 else "failed"
                 await ldb.insert_managed_route_request_log(

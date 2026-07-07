@@ -1319,6 +1319,7 @@ class Database:
                     except Exception as e:
                         print(f"  ERR Failed to add column 'flow_project_id' to cache_files: {e}")
 
+            await self._ensure_operation_stats_table(db)
             await self._ensure_tokens_use_extension_for_generation_column(db)
 
             # ========== Step 3: Ensure all config tables have default rows ==========
@@ -1333,6 +1334,7 @@ class Database:
             )
             await db.execute("CREATE INDEX IF NOT EXISTS idx_cache_files_api_key_filename ON cache_files(api_key_id, filename)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_cache_files_api_key_project ON cache_files(api_key_id, flow_project_id)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_operation_stats_operation ON operation_stats(operation)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_extension_worker_bindings_api_key_id ON extension_worker_bindings(api_key_id)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_captcha_worker_keys_active ON captcha_worker_keys(is_active)")
 
@@ -1408,6 +1410,8 @@ class Database:
                     FOREIGN KEY (token_id) REFERENCES tokens(id)
                 )
             """)
+
+            await self._ensure_operation_stats_table(db)
 
             # Tasks table
             await db.execute("""
@@ -1783,8 +1787,24 @@ class Database:
 
             # Token stats lookup index
             await db.execute("CREATE INDEX IF NOT EXISTS idx_token_stats_token_id ON token_stats(token_id)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_operation_stats_operation ON operation_stats(operation)")
 
             await db.commit()
+
+    async def _ensure_operation_stats_table(self, db) -> None:
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS operation_stats (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                operation TEXT NOT NULL UNIQUE,
+                success_count INTEGER DEFAULT 0,
+                error_count INTEGER DEFAULT 0,
+                today_success_count INTEGER DEFAULT 0,
+                today_error_count INTEGER DEFAULT 0,
+                today_date DATE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
 
     async def _ensure_tokens_use_extension_for_generation_column(self, db) -> None:
         """Add use_extension_for_generation when upgrading older tokens schemas."""
@@ -2051,6 +2071,7 @@ class Database:
             token_data = dict(token_row) if token_row else {}
             stats_data = dict(stats_row) if stats_row else {}
             geminigen_data = dict(geminigen_row) if geminigen_row else {}
+            metadata_stats = await self.get_operation_stats("adobe:metadata")
 
             return {
                 "total_tokens": int(token_data.get("total_tokens") or 0),
@@ -2060,7 +2081,11 @@ class Database:
                 "total_errors": int(stats_data.get("total_errors") or 0) + int(geminigen_data.get("total_errors") or 0),
                 "today_images": int(stats_data.get("today_images") or 0) + int(geminigen_data.get("today_images") or 0),
                 "today_videos": int(stats_data.get("today_videos") or 0) + int(geminigen_data.get("today_videos") or 0),
-                "today_errors": int(stats_data.get("today_errors") or 0) + int(geminigen_data.get("today_errors") or 0)
+                "today_errors": int(stats_data.get("today_errors") or 0) + int(geminigen_data.get("today_errors") or 0),
+                "total_metadata": int(metadata_stats.get("success_count") or 0),
+                "today_metadata": int(metadata_stats.get("today_success_count") or 0),
+                "metadata_errors": int(metadata_stats.get("error_count") or 0),
+                "today_metadata_errors": int(metadata_stats.get("today_error_count") or 0),
             }
 
     async def get_api_key_generation_stats(
@@ -3436,6 +3461,85 @@ class Database:
             await self.increment_video_count(token_id)
         elif stat_type == "error":
             await self.increment_error_count(token_id)
+
+    async def increment_operation_stat(self, operation: str, *, success: bool) -> None:
+        """Increment durable counters for non-token operations such as Adobe metadata."""
+        op = str(operation or "").strip()
+        if not op:
+            return
+        today = self._current_stats_date()
+        total_col = "success_count" if success else "error_count"
+        today_col = "today_success_count" if success else "today_error_count"
+        async with self._connect(write=True) as db:
+            await db.execute(
+                """
+                INSERT OR IGNORE INTO operation_stats (operation, today_date)
+                VALUES (?, ?)
+                """,
+                (op, today),
+            )
+            await db.execute(
+                """
+                UPDATE operation_stats
+                SET today_success_count = 0,
+                    today_error_count = 0,
+                    today_date = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE operation = ?
+                  AND COALESCE(today_date, '') != ?
+                """,
+                (today, op, today),
+            )
+            await db.execute(
+                f"""
+                UPDATE operation_stats
+                SET {total_col} = {total_col} + 1,
+                    {today_col} = {today_col} + 1,
+                    today_date = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE operation = ?
+                """,
+                (today, op),
+            )
+            await db.commit()
+
+    async def get_operation_stats(self, operation: str) -> Dict[str, int]:
+        """Return durable operation counters with daily values scoped to today's date."""
+        op = str(operation or "").strip()
+        if not op:
+            return {
+                "success_count": 0,
+                "error_count": 0,
+                "today_success_count": 0,
+                "today_error_count": 0,
+            }
+        today = self._current_stats_date()
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT success_count, error_count, today_success_count, today_error_count, today_date
+                FROM operation_stats
+                WHERE operation = ?
+                """,
+                (op,),
+            )
+            row = await cursor.fetchone()
+        if not row:
+            return {
+                "success_count": 0,
+                "error_count": 0,
+                "today_success_count": 0,
+                "today_error_count": 0,
+            }
+        data = dict(row)
+        same_day = str(data.get("today_date") or "") == today
+        return {
+            "success_count": int(data.get("success_count") or 0),
+            "error_count": int(data.get("error_count") or 0),
+            "today_success_count": int(data.get("today_success_count") or 0) if same_day else 0,
+            "today_error_count": int(data.get("today_error_count") or 0) if same_day else 0,
+        }
 
     async def get_token_stats(self, token_id: int) -> Optional[TokenStats]:
         """Get token statistics"""

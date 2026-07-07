@@ -15,6 +15,26 @@ import { RefreshCw, Download, Upload, Plus, Loader2, RefreshCcw, Pencil, Trash2,
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select"
 import type { CreateProjectResponse } from "../../types/admin"
 
+type GeminiGenAccountSummary = {
+  id: number
+  label: string
+  bearer_token_preview?: string
+  is_active: boolean
+  image_concurrency: number
+  video_concurrency: number
+  image_in_flight: number
+  video_in_flight: number
+  last_status?: string
+  last_error?: string
+  last_used_at?: string | null
+}
+
+type GeminiGenConfigResponse = {
+  success?: boolean
+  config?: { enabled?: boolean }
+  accounts?: GeminiGenAccountSummary[]
+}
+
 function formatExpiryDisplay(atExpires: string | null | undefined): ReactNode {
   if (!atExpires) return <span className="text-muted-foreground">-</span>
   const d = new Date(atExpires)
@@ -74,6 +94,9 @@ export function TokenManagement() {
   const { token } = useAuth()
   const [stats, setStats] = useState<DashboardStats | null>(null)
   const [tokens, setTokens] = useState<TokenRow[]>([])
+  const [geminiGenAccounts, setGeminiGenAccounts] = useState<GeminiGenAccountSummary[]>([])
+  const [geminiGenConfigured, setGeminiGenConfigured] = useState(false)
+  const [geminiGenLoading, setGeminiGenLoading] = useState(false)
   const [loading, setLoading] = useState(false)
   const [atAutoRefresh, setAtAutoRefresh] = useState(true)
 
@@ -145,15 +168,38 @@ export function TokenManagement() {
     if (ok && data?.config) setAtAutoRefresh(!!data.config.at_auto_refresh_enabled)
   }, [token])
 
+  const loadGeminiGenAccounts = useCallback(async () => {
+    if (!token) return
+    setGeminiGenLoading(true)
+    try {
+      const { ok, data } = await adminJson<GeminiGenConfigResponse>("/api/admin/geminigen/config", token)
+      if (ok && data?.success) {
+        const accounts = Array.isArray(data.accounts) ? data.accounts : []
+        setGeminiGenAccounts(accounts)
+        setGeminiGenConfigured(!!data.config?.enabled || accounts.length > 0)
+      } else {
+        setGeminiGenAccounts([])
+        setGeminiGenConfigured(false)
+      }
+    } catch {
+      setGeminiGenAccounts([])
+      setGeminiGenConfigured(false)
+    } finally {
+      setGeminiGenLoading(false)
+    }
+  }, [token])
+
   useEffect(() => {
     loadStats()
     loadTokens()
     loadAtRefreshConfig()
-  }, [loadStats, loadTokens, loadAtRefreshConfig])
+    loadGeminiGenAccounts()
+  }, [loadStats, loadTokens, loadAtRefreshConfig, loadGeminiGenAccounts])
 
   const refreshAll = async () => {
     await loadStats()
     await loadTokens()
+    await loadGeminiGenAccounts()
   }
 
   const onToggleAtAutoRefresh = async (enabled: boolean) => {
@@ -482,7 +528,7 @@ export function TokenManagement() {
 
   return (
     <div className="space-y-6">
-      <div className="grid gap-4 grid-cols-2 md:grid-cols-5">
+      <div className="grid gap-4 grid-cols-2 md:grid-cols-3 xl:grid-cols-6">
         <Card>
           <CardContent className="p-4">
             <p className="text-sm font-medium text-muted-foreground mb-2">Total Tokens</p>
@@ -513,6 +559,14 @@ export function TokenManagement() {
         </Card>
         <Card>
           <CardContent className="p-4">
+            <p className="text-sm font-medium text-muted-foreground mb-2">Today / Total Metadata</p>
+            <h3 className="text-xl font-bold text-cyan-600">
+              {(stats?.today_metadata ?? 0)}/{(stats?.total_metadata ?? 0)}
+            </h3>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="p-4">
             <p className="text-sm font-medium text-muted-foreground mb-2">Today / Total Errors</p>
             <h3 className="text-xl font-bold text-destructive">
               {(stats?.today_errors ?? 0)}/{(stats?.total_errors ?? 0)}
@@ -520,6 +574,75 @@ export function TokenManagement() {
           </CardContent>
         </Card>
       </div>
+
+      {geminiGenConfigured ? (
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between pb-4 border-b">
+            <CardTitle className="text-lg font-semibold">GeminiGen accounts</CardTitle>
+            <Button size="icon" variant="outline" onClick={loadGeminiGenAccounts} disabled={geminiGenLoading} title="Refresh GeminiGen accounts">
+              <RefreshCw className={`h-4 w-4 ${geminiGenLoading ? "animate-spin" : ""}`} />
+            </Button>
+          </CardHeader>
+          <CardContent className="p-0">
+            <div className="w-full overflow-x-auto">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Account</TableHead>
+                    <TableHead className="text-center">Status</TableHead>
+                    <TableHead className="text-center">Image slots</TableHead>
+                    <TableHead className="text-center">Video slots</TableHead>
+                    <TableHead>Token</TableHead>
+                    <TableHead>Last used</TableHead>
+                    <TableHead>Status detail</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {!geminiGenAccounts.length ? (
+                    <TableRow>
+                      <TableCell colSpan={7} className="text-center text-muted-foreground py-8">
+                        {geminiGenLoading ? "Loading..." : "No GeminiGen accounts configured"}
+                      </TableCell>
+                    </TableRow>
+                  ) : (
+                    geminiGenAccounts.map((account) => (
+                      <TableRow key={account.id}>
+                        <TableCell className="font-medium max-w-[220px] truncate" title={account.label || ""}>
+                          {account.label || `Account ${account.id}`}
+                        </TableCell>
+                        <TableCell className="text-center">
+                          <span
+                            className={`inline-flex rounded px-2 py-0.5 text-xs ${
+                              account.is_active ? "bg-green-500/15 text-green-700 dark:text-green-400" : "bg-muted text-muted-foreground"
+                            }`}
+                          >
+                            {account.is_active ? "Active" : "Disabled"}
+                          </span>
+                        </TableCell>
+                        <TableCell className="text-center tabular-nums">
+                          {account.image_in_flight ?? 0}/{account.image_concurrency ?? 0}
+                        </TableCell>
+                        <TableCell className="text-center tabular-nums">
+                          {account.video_in_flight ?? 0}/{account.video_concurrency ?? 0}
+                        </TableCell>
+                        <TableCell className="font-mono text-xs">{account.bearer_token_preview || "***"}</TableCell>
+                        <TableCell className="text-xs whitespace-nowrap">{account.last_used_at || "-"}</TableCell>
+                        <TableCell className="max-w-[260px] truncate text-xs" title={account.last_error || account.last_status || ""}>
+                          {account.last_error ? (
+                            <span className="text-destructive">{account.last_error}</span>
+                          ) : (
+                            account.last_status || "-"
+                          )}
+                        </TableCell>
+                      </TableRow>
+                    ))
+                  )}
+                </TableBody>
+              </Table>
+            </div>
+          </CardContent>
+        </Card>
+      ) : null}
 
       <Card>
         <CardHeader className="flex flex-row items-center justify-between pb-4 border-b">

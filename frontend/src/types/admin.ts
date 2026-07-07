@@ -5,9 +5,13 @@ export interface DashboardStats {
   total_images: number
   total_videos: number
   total_errors: number
+  total_metadata: number
   today_images: number
   today_videos: number
   today_errors: number
+  today_metadata: number
+  metadata_errors?: number
+  today_metadata_errors?: number
 }
 
 /** Row from GET /api/tokens */
