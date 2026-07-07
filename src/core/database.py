@@ -3178,7 +3178,6 @@ class Database:
         is_video = str(kind or "").lower() == "video"
         limit_col = "video_concurrency" if is_video else "image_concurrency"
         inflight_col = "video_in_flight" if is_video else "image_in_flight"
-        global_limit_col = "global_video_concurrency" if is_video else "global_image_concurrency"
         excluded = [int(account_id) for account_id in (excluded_account_ids or []) if account_id]
         exclusion_clause = ""
         params: List[Any] = []
@@ -3188,15 +3187,6 @@ class Database:
             params.extend(excluded)
         async with self._connect(write=True) as db:
             db.row_factory = aiosqlite.Row
-            config_cursor = await db.execute(f"SELECT {global_limit_col} FROM geminigen_config WHERE id = 1")
-            config_row = await config_cursor.fetchone()
-            global_limit_raw = None if not config_row else config_row[global_limit_col]
-            global_limit = 5 if global_limit_raw is None else int(global_limit_raw)
-            if global_limit >= 0:
-                total_cursor = await db.execute(f"SELECT COALESCE(SUM({inflight_col}), 0) FROM geminigen_accounts")
-                total_in_flight = int((await total_cursor.fetchone())[0] or 0)
-                if total_in_flight >= global_limit:
-                    return None
             cursor = await db.execute(
                 f"""
                 SELECT * FROM geminigen_accounts

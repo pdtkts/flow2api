@@ -481,6 +481,100 @@ def test_geminigen_account_profile_stale_uses_one_hour_ttl():
     assert GeminiGenService.is_account_profile_stale(missing) is True
 
 
+def test_geminigen_image_capacity_uses_sum_of_account_slots_not_default_global_cap():
+    async def run():
+        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        tmp.close()
+        db = Database(tmp.name)
+        try:
+            await db.init_db()
+            account_ids = [
+                await db.create_geminigen_account(label="primary", raw_cookie="", bearer_token="token-1", image_concurrency=5),
+                await db.create_geminigen_account(label="secondary", raw_cookie="", bearer_token="token-2", image_concurrency=5),
+            ]
+
+            acquired = [await db.acquire_geminigen_account("image") for _ in range(10)]
+            blocked = await db.acquire_geminigen_account("image")
+            accounts = [await db.get_geminigen_account(account_id) for account_id in account_ids]
+            return acquired, blocked, accounts
+        finally:
+            os.unlink(tmp.name)
+
+    acquired, blocked, accounts = asyncio.run(run())
+
+    assert len([account for account in acquired if account is not None]) == 10
+    assert blocked is None
+    assert sorted(account.image_in_flight for account in accounts) == [5, 5]
+    assert all(account.image_in_flight <= account.image_concurrency for account in accounts)
+
+
+def test_geminigen_video_capacity_is_independent_from_image_slots():
+    async def run():
+        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        tmp.close()
+        db = Database(tmp.name)
+        try:
+            await db.init_db()
+            account_ids = [
+                await db.create_geminigen_account(
+                    label="primary",
+                    raw_cookie="",
+                    bearer_token="token-1",
+                    image_concurrency=1,
+                    video_concurrency=5,
+                ),
+                await db.create_geminigen_account(
+                    label="secondary",
+                    raw_cookie="",
+                    bearer_token="token-2",
+                    image_concurrency=1,
+                    video_concurrency=5,
+                ),
+            ]
+
+            videos = [await db.acquire_geminigen_account("video") for _ in range(10)]
+            video_blocked = await db.acquire_geminigen_account("video")
+            images = [await db.acquire_geminigen_account("image") for _ in range(2)]
+            image_blocked = await db.acquire_geminigen_account("image")
+            accounts = [await db.get_geminigen_account(account_id) for account_id in account_ids]
+            return videos, video_blocked, images, image_blocked, accounts
+        finally:
+            os.unlink(tmp.name)
+
+    videos, video_blocked, images, image_blocked, accounts = asyncio.run(run())
+
+    assert len([account for account in videos if account is not None]) == 10
+    assert video_blocked is None
+    assert len([account for account in images if account is not None]) == 2
+    assert image_blocked is None
+    assert sorted(account.video_in_flight for account in accounts) == [5, 5]
+    assert sorted(account.image_in_flight for account in accounts) == [1, 1]
+
+
+def test_geminigen_acquire_respects_excluded_account_cooldown():
+    async def run():
+        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        tmp.close()
+        db = Database(tmp.name)
+        try:
+            await db.init_db()
+            first_id = await db.create_geminigen_account(label="primary", raw_cookie="", bearer_token="token-1", image_concurrency=5)
+            second_id = await db.create_geminigen_account(label="secondary", raw_cookie="", bearer_token="token-2", image_concurrency=5)
+
+            acquired = await db.acquire_geminigen_account("image", excluded_account_ids=[first_id])
+            first = await db.get_geminigen_account(first_id)
+            second = await db.get_geminigen_account(second_id)
+            return acquired, first, second
+        finally:
+            os.unlink(tmp.name)
+
+    acquired, first, second = asyncio.run(run())
+
+    assert acquired.id == second.id
+    assert first.image_in_flight == 0
+    assert second.image_in_flight == 1
+
+
 def test_geminigen_admin_account_payload_includes_profile_fields():
     from src.api.admin import _geminigen_account_payload
 
@@ -818,7 +912,7 @@ def test_geminigen_non_capacity_400_is_not_retryable():
     assert "Prompt is invalid" in str(error)
 
 
-def test_geminigen_global_image_concurrency_queues_after_five_slots():
+def test_geminigen_global_image_concurrency_does_not_reduce_account_pool_capacity():
     async def run():
         tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
         tmp.close()
@@ -835,20 +929,22 @@ def test_geminigen_global_image_concurrency_queues_after_five_slots():
                     video_concurrency=5,
                 )
 
-            acquired = [await db.acquire_geminigen_account("image") for _ in range(5)]
+            acquired = [await db.acquire_geminigen_account("image") for _ in range(15)]
             blocked = await db.acquire_geminigen_account("image")
             await db.release_geminigen_account(acquired[0].id, "image")
             acquired_after_release = await db.acquire_geminigen_account("image")
+            accounts = await db.list_geminigen_accounts()
 
-            return acquired, blocked, acquired_after_release
+            return acquired, blocked, acquired_after_release, accounts
         finally:
             os.unlink(tmp.name)
 
-    acquired, blocked, acquired_after_release = asyncio.run(run())
+    acquired, blocked, acquired_after_release, accounts = asyncio.run(run())
 
     assert all(account is not None for account in acquired)
     assert blocked is None
     assert acquired_after_release is not None
+    assert sorted(account.image_in_flight for account in accounts) == [5, 5, 5]
 
 
 def test_request_log_retention_deletes_only_old_request_logs():
