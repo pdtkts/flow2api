@@ -28,7 +28,7 @@ from src.services.llm_provider_chain import LlmProviderChain, extract_non_empty_
 from src.services.runway_service import RunwayService
 from src.api import routes
 from src.core.geminigen_manifest import GEMINIGEN_MODEL_BY_ID, GEMINIGEN_MODEL_MANIFEST
-from src.core.models import GeminiGenAccount, GeminiGenTask, RunwayAccount, RunwayModel, RunwayTask, Token
+from src.core.models import GeminiGenAccount, GeminiGenTask, RequestLog, RunwayAccount, RunwayModel, RunwayTask, Token
 from src.core.storage_errors import (
     is_sqlite_recoverable_storage_error,
     is_sqlite_storage_full_error,
@@ -945,6 +945,68 @@ def test_geminigen_global_image_concurrency_does_not_reduce_account_pool_capacit
     assert blocked is None
     assert acquired_after_release is not None
     assert sorted(account.image_in_flight for account in accounts) == [5, 5, 5]
+
+
+def test_request_logs_include_and_search_geminigen_job_id():
+    async def run():
+        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        tmp.close()
+        db = Database(tmp.name)
+        try:
+            await db.init_db()
+            log_id = await db.add_request_log(
+                RequestLog(
+                    operation="geminigen_image",
+                    request_body="{}",
+                    response_body=json.dumps({"status": "queued"}),
+                    status_code=102,
+                    duration=0.1,
+                    status_text="geminigen_queued",
+                    progress=0,
+                )
+            )
+            await db.create_geminigen_task(
+                GeminiGenTask(
+                    job_id="geminigen-search-me",
+                    request_log_id=log_id,
+                    public_model_id="geminigen-nano-banana-pro-image-landscape-1k",
+                    kind="image",
+                    endpoint_type="imagen",
+                    status="queued",
+                )
+            )
+            await db.add_request_log(
+                RequestLog(
+                    operation="geminigen_image",
+                    request_body="{}",
+                    response_body=json.dumps({"status": "queued"}),
+                    status_code=102,
+                    duration=0.1,
+                    status_text="geminigen_queued",
+                    progress=0,
+                )
+            )
+
+            total = await db.count_request_logs(search="search-me")
+            logs = await db.get_logs(search="search-me")
+            detail = await db.get_log_detail(log_id)
+            return total, logs, detail
+        finally:
+            os.unlink(tmp.name)
+
+    total, logs, detail = asyncio.run(run())
+
+    assert total == 1
+    assert len(logs) == 1
+    assert logs[0]["job_id"] == "geminigen-search-me"
+    assert detail["job_id"] == "geminigen-search-me"
+
+
+def test_request_log_job_id_extractor_reads_nested_payloads():
+    from src.api.admin import _extract_log_job_id
+
+    assert _extract_log_job_id(json.dumps({"content": {"job_id": "job-native-123"}})) == "job-native-123"
+    assert _extract_log_job_id({"response": {"task_id": "task-456"}}) == "task-456"
 
 
 def test_request_log_retention_deletes_only_old_request_logs():

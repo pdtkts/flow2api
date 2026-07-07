@@ -190,6 +190,41 @@ def _extract_error_summary(payload: Any) -> str:
     return _truncate_text(payload)
 
 
+def _extract_log_job_id(*payloads: Any) -> str:
+    def visit(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return ""
+            try:
+                return visit(json.loads(text))
+            except Exception:
+                return ""
+        if isinstance(value, dict):
+            for key in ("job_id", "task_id", "upstream_task_id"):
+                candidate = value.get(key)
+                if isinstance(candidate, str) and candidate.strip():
+                    return candidate.strip()
+            for key in ("content", "response", "data", "task", "operation", "performance"):
+                nested = visit(value.get(key))
+                if nested:
+                    return nested
+        if isinstance(value, list):
+            for item in value:
+                nested = visit(item)
+                if nested:
+                    return nested
+        return ""
+
+    for payload in payloads:
+        found = visit(payload)
+        if found:
+            return found
+    return ""
+
+
 def _guess_client_hints_from_user_agent(user_agent: str) -> Dict[str, str]:
     """根据 UA 补全常见的 sec-ch-* 头。"""
     ua = (user_agent or "").strip()
@@ -2676,6 +2711,7 @@ async def get_stats(token: str = Depends(verify_admin_token)):
 async def get_logs(
     limit: int = 50,
     offset: int = 0,
+    search: Optional[str] = Query(None, description="Search request logs by job id or text fragment"),
     exclude_operations: Optional[str] = Query(
         None,
         description="Comma-separated operation values to exclude (e.g. generate_image,generate_video)",
@@ -2688,9 +2724,10 @@ async def get_logs(
     exclude_list = None
     if exclude_operations and exclude_operations.strip():
         exclude_list = [x.strip() for x in exclude_operations.split(",") if x.strip()]
-    total = await db.count_request_logs(exclude_operations=exclude_list)
+    search_text = (search or "").strip()
+    total = await db.count_request_logs(exclude_operations=exclude_list, search=search_text)
     logs = await db.get_logs(
-        limit=limit, offset=offset, include_payload=False, exclude_operations=exclude_list
+        limit=limit, offset=offset, include_payload=False, exclude_operations=exclude_list, search=search_text
     )
 
     result = []
@@ -2702,6 +2739,7 @@ async def get_logs(
             status_code = None
         result.append({
             "id": log.get("id"),
+            "job_id": log.get("job_id") or _extract_log_job_id(log.get("response_body_excerpt")),
             "token_id": log.get("token_id"),
             "token_email": log.get("token_email"),
             "token_username": log.get("token_username"),
@@ -2734,6 +2772,7 @@ async def get_log_detail(
 
     return {
         "id": log.get("id"),
+        "job_id": log.get("job_id") or _extract_log_job_id(log.get("response_body"), log.get("request_body")),
         "token_id": log.get("token_id"),
         "token_email": log.get("token_email"),
         "token_username": log.get("token_username"),

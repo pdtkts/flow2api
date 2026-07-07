@@ -9,10 +9,11 @@ import { Card, CardContent, CardHeader, CardTitle } from "../ui/card"
 import { Switch } from "../ui/switch"
 import { Label } from "../ui/label"
 import { Button } from "../ui/button"
+import { Input } from "../ui/input"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../ui/table"
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "../ui/dialog"
 import { toast } from "sonner"
-import { ChevronLeft, ChevronRight, RefreshCw, Trash2, Loader2, XCircle } from "lucide-react"
+import { ChevronLeft, ChevronRight, RefreshCw, Trash2, Loader2, XCircle, Search } from "lucide-react"
 import { cn } from "@/lib/utils"
 
 const LOG_PAGE_SIZE = 50
@@ -27,6 +28,7 @@ export function RequestLogs() {
   const [detailLoading, setDetailLoading] = useState(false)
   const [detail, setDetail] = useState<LogDetail | null>(null)
   const [hideGeneration, setHideGeneration] = useState(false)
+  const [search, setSearch] = useState("")
 
   const fetchLogs = useCallback(async () => {
     if (!token) return
@@ -34,7 +36,8 @@ export function RequestLogs() {
     try {
       const offset = page * LOG_PAGE_SIZE
       const exclude = hideGeneration ? "&exclude_operations=generate_image%2Cgenerate_video%2Cgeminigen_image%2Cgeminigen_video" : ""
-      const r = await adminFetch(`/api/logs?limit=${LOG_PAGE_SIZE}&offset=${offset}${exclude}`, token)
+      const searchParam = search.trim() ? `&search=${encodeURIComponent(search.trim())}` : ""
+      const r = await adminFetch(`/api/logs?limit=${LOG_PAGE_SIZE}&offset=${offset}${exclude}${searchParam}`, token)
       if (!r?.ok) throw new Error("fetch failed")
       const data = (await r.json()) as LogsListResponse | LogListItem[]
       if (Array.isArray(data)) {
@@ -52,7 +55,7 @@ export function RequestLogs() {
     } finally {
       setLoading(false)
     }
-  }, [token, page, hideGeneration])
+  }, [token, page, hideGeneration, search])
 
   useEffect(() => {
     queueMicrotask(() => {
@@ -132,7 +135,7 @@ export function RequestLogs() {
     }
   }
 
-  const colCount = 10
+  const colCount = 11
 
   return (
     <Card>
@@ -153,7 +156,19 @@ export function RequestLogs() {
             </Label>
           </div>
         </div>
-        <div className="flex gap-2">
+        <div className="flex items-center gap-2">
+          <div className="relative w-56">
+            <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              value={search}
+              onChange={(e) => {
+                setSearch(e.target.value)
+                setPage(0)
+              }}
+              placeholder="Search job ID"
+              className="h-8 pl-8 text-xs"
+            />
+          </div>
           <Button
             variant="ghost"
             size="sm"
@@ -173,6 +188,7 @@ export function RequestLogs() {
           <Table>
             <TableHeader className="sticky top-0 z-20 bg-background">
               <TableRow className="hover:bg-transparent border-b">
+                <TableHead className="h-10 w-[10rem] max-w-[10rem] px-3 text-left font-medium text-muted-foreground">Job ID</TableHead>
                 <TableHead className="h-10 px-3 text-left font-medium text-muted-foreground">Operation</TableHead>
                 <TableHead className="h-10 px-3 text-left font-medium text-muted-foreground">API key</TableHead>
                 <TableHead className="h-10 px-3 text-left font-medium text-muted-foreground">Token email</TableHead>
@@ -205,8 +221,20 @@ export function RequestLogs() {
                   const outcomePreview = outcome.length > 96 ? `${outcome.slice(0, 93)}…` : outcome
                   const email = log.token_email || "Unknown"
                   const keyLabel = log.api_key_label || log.api_key_prefix || ""
+                  const jobId = String(log.job_id || "").trim()
                   return (
                     <TableRow key={log.id} className="border-border/60">
+                      <TableCell className="py-2.5 px-3 text-xs align-top">
+                        <span
+                          className={cn(
+                            "block max-w-[10rem] truncate font-mono",
+                            jobId ? "text-foreground" : "text-muted-foreground"
+                          )}
+                          title={jobId || undefined}
+                        >
+                          {jobId || "â€”"}
+                        </span>
+                      </TableCell>
                       <TableCell className="py-2.5 px-3 text-sm align-top">
                         {operationLabel(getOperationKind(log.operation), log.operation)}
                       </TableCell>

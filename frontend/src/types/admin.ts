@@ -100,6 +100,7 @@ export interface LogsListResponse {
 /** List item from GET /api/logs */
 export interface LogListItem {
   id: number
+  job_id?: string | null
   token_id?: number | null
   token_email?: string | null
   token_username?: string | null

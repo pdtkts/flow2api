@@ -4499,28 +4499,72 @@ class Database:
         token_id: Optional[int] = None,
         api_key_id: Optional[int] = None,
         exclude_operations: Optional[List[str]] = None,
+        search: Optional[str] = None,
     ) -> int:
         """Count rows matching the same filters as get_logs."""
         exc_ops = [str(x).strip() for x in (exclude_operations or []) if str(x).strip()]
+        search_text = str(search or "").strip()
         exclude_sql = ""
         if exc_ops:
             ph = ",".join("?" * len(exc_ops))
             exclude_sql = f" AND rl.operation NOT IN ({ph})"
         async with self._connect() as db:
-            tail_params: List[Any] = list(exc_ops)
+            has_status_text = await self._column_exists(db, "request_logs", "status_text")
+            status_text_expr = "COALESCE(rl.status_text, '')" if has_status_text else "''"
+            search_sql = ""
+            search_params: List[Any] = []
+            if search_text:
+                search_sql = f"""
+                    AND (
+                        CAST(rl.id AS TEXT) LIKE ?
+                        OR COALESCE(gt.job_id, '') LIKE ?
+                        OR COALESCE(rl.operation, '') LIKE ?
+                        OR {status_text_expr} LIKE ?
+                        OR COALESCE(rl.request_body, '') LIKE ?
+                        OR COALESCE(rl.response_body, '') LIKE ?
+                        OR COALESCE(t.email, '') LIKE ?
+                        OR COALESCE(t.name, '') LIKE ?
+                        OR COALESCE(k.label, '') LIKE ?
+                        OR COALESCE(k.key_prefix, '') LIKE ?
+                    )
+                """
+                like = f"%{search_text}%"
+                search_params = [like] * 10
+            tail_params: List[Any] = [*exc_ops, *search_params]
             if token_id is not None:
                 cursor = await db.execute(
-                    f"SELECT COUNT(*) FROM request_logs rl WHERE rl.token_id = ?{exclude_sql}",
+                    f"""
+                    SELECT COUNT(*)
+                    FROM request_logs rl
+                    LEFT JOIN tokens t ON rl.token_id = t.id
+                    LEFT JOIN api_keys k ON rl.api_key_id = k.id
+                    LEFT JOIN geminigen_tasks gt ON gt.request_log_id = rl.id
+                    WHERE rl.token_id = ?{exclude_sql}{search_sql}
+                    """,
                     (token_id, *tail_params),
                 )
             elif api_key_id is not None:
                 cursor = await db.execute(
-                    f"SELECT COUNT(*) FROM request_logs rl WHERE rl.api_key_id = ?{exclude_sql}",
+                    f"""
+                    SELECT COUNT(*)
+                    FROM request_logs rl
+                    LEFT JOIN tokens t ON rl.token_id = t.id
+                    LEFT JOIN api_keys k ON rl.api_key_id = k.id
+                    LEFT JOIN geminigen_tasks gt ON gt.request_log_id = rl.id
+                    WHERE rl.api_key_id = ?{exclude_sql}{search_sql}
+                    """,
                     (api_key_id, *tail_params),
                 )
             else:
                 cursor = await db.execute(
-                    f"SELECT COUNT(*) FROM request_logs rl WHERE 1=1{exclude_sql}",
+                    f"""
+                    SELECT COUNT(*)
+                    FROM request_logs rl
+                    LEFT JOIN tokens t ON rl.token_id = t.id
+                    LEFT JOIN api_keys k ON rl.api_key_id = k.id
+                    LEFT JOIN geminigen_tasks gt ON gt.request_log_id = rl.id
+                    WHERE 1=1{exclude_sql}{search_sql}
+                    """,
                     tuple(tail_params),
                 )
             row = await cursor.fetchone()
@@ -4534,10 +4578,12 @@ class Database:
         include_payload: bool = False,
         api_key_id: Optional[int] = None,
         exclude_operations: Optional[List[str]] = None,
+        search: Optional[str] = None,
     ):
         """Get request logs with token info, optionally including payload fields"""
         safe_offset = max(0, int(offset or 0))
         exc_ops = [str(x).strip() for x in (exclude_operations or []) if str(x).strip()]
+        search_text = str(search or "").strip()
         exclude_sql = ""
         exclude_params: List[Any] = []
         if exc_ops:
@@ -4556,6 +4602,26 @@ class Database:
             progress_column = "rl.progress," if has_progress else "0 as progress,"
             updated_at_column = "rl.updated_at," if has_updated_at else "rl.created_at as updated_at,"
             key_cols = "k.label AS api_key_label, k.key_prefix AS api_key_prefix,"
+            status_text_expr = "COALESCE(rl.status_text, '')" if has_status_text else "''"
+            search_sql = ""
+            search_params: List[Any] = []
+            if search_text:
+                search_sql = f"""
+                    AND (
+                        CAST(rl.id AS TEXT) LIKE ?
+                        OR COALESCE(gt.job_id, '') LIKE ?
+                        OR COALESCE(rl.operation, '') LIKE ?
+                        OR {status_text_expr} LIKE ?
+                        OR COALESCE(rl.request_body, '') LIKE ?
+                        OR COALESCE(rl.response_body, '') LIKE ?
+                        OR COALESCE(t.email, '') LIKE ?
+                        OR COALESCE(t.name, '') LIKE ?
+                        OR COALESCE(k.label, '') LIKE ?
+                        OR COALESCE(k.key_prefix, '') LIKE ?
+                    )
+                """
+                like = f"%{search_text}%"
+                search_params = [like] * 10
 
             if token_id:
                 cursor = await db.execute(
@@ -4574,16 +4640,18 @@ class Database:
                         rl.created_at,
                         {updated_at_column}
                         {key_cols}
+                        gt.job_id as job_id,
                         t.email as token_email,
                         t.name as token_username
                     FROM request_logs rl
                     LEFT JOIN tokens t ON rl.token_id = t.id
                     LEFT JOIN api_keys k ON rl.api_key_id = k.id
-                    WHERE rl.token_id = ?{exclude_sql}
+                    LEFT JOIN geminigen_tasks gt ON gt.request_log_id = rl.id
+                    WHERE rl.token_id = ?{exclude_sql}{search_sql}
                     ORDER BY rl.created_at DESC
                     LIMIT ? OFFSET ?
                     """,
-                    (token_id, *exclude_params, limit, safe_offset),
+                    (token_id, *exclude_params, *search_params, limit, safe_offset),
                 )
             elif api_key_id is not None:
                 cursor = await db.execute(
@@ -4602,16 +4670,18 @@ class Database:
                         rl.created_at,
                         {updated_at_column}
                         {key_cols}
+                        gt.job_id as job_id,
                         t.email as token_email,
                         t.name as token_username
                     FROM request_logs rl
                     LEFT JOIN tokens t ON rl.token_id = t.id
                     LEFT JOIN api_keys k ON rl.api_key_id = k.id
-                    WHERE rl.api_key_id = ?{exclude_sql}
+                    LEFT JOIN geminigen_tasks gt ON gt.request_log_id = rl.id
+                    WHERE rl.api_key_id = ?{exclude_sql}{search_sql}
                     ORDER BY rl.created_at DESC
                     LIMIT ? OFFSET ?
                     """,
-                    (api_key_id, *exclude_params, limit, safe_offset),
+                    (api_key_id, *exclude_params, *search_params, limit, safe_offset),
                 )
             else:
                 cursor = await db.execute(
@@ -4630,16 +4700,18 @@ class Database:
                         rl.created_at,
                         {updated_at_column}
                         {key_cols}
+                        gt.job_id as job_id,
                         t.email as token_email,
                         t.name as token_username
                     FROM request_logs rl
                     LEFT JOIN tokens t ON rl.token_id = t.id
                     LEFT JOIN api_keys k ON rl.api_key_id = k.id
-                    WHERE 1=1{exclude_sql}
+                    LEFT JOIN geminigen_tasks gt ON gt.request_log_id = rl.id
+                    WHERE 1=1{exclude_sql}{search_sql}
                     ORDER BY rl.created_at DESC
                     LIMIT ? OFFSET ?
                     """,
-                    (*exclude_params, limit, safe_offset),
+                    (*exclude_params, *search_params, limit, safe_offset),
                 )
 
             rows = await cursor.fetchall()
@@ -4673,11 +4745,13 @@ class Database:
                         rl.created_at,
                         {updated_at_column}
                         {key_cols}
+                        gt.job_id as job_id,
                         t.email as token_email,
                         t.name as token_username
                     FROM request_logs rl
                     LEFT JOIN tokens t ON rl.token_id = t.id
                     LEFT JOIN api_keys k ON rl.api_key_id = k.id
+                    LEFT JOIN geminigen_tasks gt ON gt.request_log_id = rl.id
                     WHERE rl.id = ?
                     LIMIT 1
                     """,
@@ -4700,11 +4774,13 @@ class Database:
                         rl.created_at,
                         {updated_at_column}
                         {key_cols}
+                        gt.job_id as job_id,
                         t.email as token_email,
                         t.name as token_username
                     FROM request_logs rl
                     LEFT JOIN tokens t ON rl.token_id = t.id
                     LEFT JOIN api_keys k ON rl.api_key_id = k.id
+                    LEFT JOIN geminigen_tasks gt ON gt.request_log_id = rl.id
                     WHERE rl.id = ? AND rl.api_key_id = ?
                     LIMIT 1
                     """,
