@@ -279,6 +279,59 @@ def test_dashboard_stats_exclude_non_terminal_and_cancelled_geminigen_tasks():
     assert stats["today_metadata"] == 0
 
 
+def test_geminigen_account_generation_stats_count_completed_per_account():
+    async def run():
+        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        tmp.close()
+        db = Database(tmp.name)
+        try:
+            await db.init_db()
+            first_id = await db.create_geminigen_account(label="primary", raw_cookie="", bearer_token="token-1")
+            second_id = await db.create_geminigen_account(label="secondary", raw_cookie="", bearer_token="token-2")
+            today = datetime.now().astimezone().date()
+            today_completed_at = _local_date_as_utc_naive(today)
+            old_completed_at = _local_date_as_utc_naive(today - timedelta(days=2))
+            tasks = [
+                ("first-image-today", first_id, "image", "completed", today_completed_at),
+                ("first-image-old", first_id, "image", "completed", old_completed_at),
+                ("first-video-today", first_id, "video", "completed", today_completed_at),
+                ("first-failed", first_id, "image", "failed", today_completed_at),
+                ("first-cancelled", first_id, "video", "cancelled", today_completed_at),
+                ("first-queued", first_id, "image", "queued", None),
+                ("second-video-old", second_id, "video", "completed", old_completed_at),
+            ]
+            for job_id, account_id, kind, status, completed_at in tasks:
+                await db.create_geminigen_task(
+                    GeminiGenTask(
+                        job_id=job_id,
+                        account_id=account_id,
+                        public_model_id=f"test-{kind}-model",
+                        kind=kind,
+                        endpoint_type="veo-video" if kind == "video" else "imagen",
+                        status=status,
+                        completed_at=completed_at,
+                    )
+                )
+            return await db.get_geminigen_account_generation_stats([first_id, second_id])
+        finally:
+            os.unlink(tmp.name)
+
+    stats = asyncio.run(run())
+
+    assert stats[1] == {
+        "image_generated_today": 1,
+        "image_generated_total": 2,
+        "video_generated_today": 1,
+        "video_generated_total": 1,
+    }
+    assert stats[2] == {
+        "image_generated_today": 0,
+        "image_generated_total": 0,
+        "video_generated_today": 0,
+        "video_generated_total": 1,
+    }
+
+
 def test_dashboard_stats_include_durable_metadata_counts():
     async def run():
         tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
@@ -604,6 +657,30 @@ def test_geminigen_admin_account_payload_includes_profile_fields():
     assert payload["remaining_bulk_videos"] == 100
     assert payload["profile_synced_at"] == "2026-07-07T12:00:00"
     assert payload["profile_sync_status"] == "healthy"
+    assert payload["image_generated_today"] == 0
+    assert payload["image_generated_total"] == 0
+    assert payload["video_generated_today"] == 0
+    assert payload["video_generated_total"] == 0
+
+
+def test_geminigen_admin_account_payload_includes_generation_stats():
+    from src.api.admin import _geminigen_account_payload
+
+    account = GeminiGenAccount(id=1, label="primary", bearer_token="secret-token")
+    payload = _geminigen_account_payload(
+        account,
+        {
+            "image_generated_today": 2,
+            "image_generated_total": 10,
+            "video_generated_today": 1,
+            "video_generated_total": 4,
+        },
+    )
+
+    assert payload["image_generated_today"] == 2
+    assert payload["image_generated_total"] == 10
+    assert payload["video_generated_today"] == 1
+    assert payload["video_generated_total"] == 4
 
 
 class _AdminSessionCursor:

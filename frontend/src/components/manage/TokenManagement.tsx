@@ -24,6 +24,10 @@ type GeminiGenAccountSummary = {
   video_concurrency: number
   image_in_flight: number
   video_in_flight: number
+  image_generated_today?: number
+  image_generated_total?: number
+  video_generated_today?: number
+  video_generated_total?: number
   last_status?: string
   last_error?: string
   last_used_at?: string | null
@@ -640,6 +644,8 @@ export function TokenManagement() {
                     <TableHead>Plan</TableHead>
                     <TableHead className="text-center">Image slots</TableHead>
                     <TableHead className="text-center">Video slots</TableHead>
+                    <TableHead className="text-center">Image generated</TableHead>
+                    <TableHead className="text-center">Video generated</TableHead>
                     <TableHead>Video quota</TableHead>
                     <TableHead>Benefits</TableHead>
                     <TableHead>Last used</TableHead>
@@ -649,7 +655,7 @@ export function TokenManagement() {
                 <TableBody>
                   {!geminiGenAccounts.length ? (
                     <TableRow>
-                      <TableCell colSpan={10} className="text-center text-muted-foreground py-8">
+                      <TableCell colSpan={12} className="text-center text-muted-foreground py-8">
                         {geminiGenLoading ? "Loading..." : "No GeminiGen accounts configured"}
                       </TableCell>
                     </TableRow>
@@ -692,6 +698,12 @@ export function TokenManagement() {
                         </TableCell>
                         <TableCell className="text-center tabular-nums">
                           {account.video_in_flight ?? 0}/{account.video_concurrency ?? 0}
+                        </TableCell>
+                        <TableCell className="text-center tabular-nums">
+                          {formatNumberValue(account.image_generated_today ?? 0)}/{formatNumberValue(account.image_generated_total ?? 0)}
+                        </TableCell>
+                        <TableCell className="text-center tabular-nums">
+                          {formatNumberValue(account.video_generated_today ?? 0)}/{formatNumberValue(account.video_generated_total ?? 0)}
                         </TableCell>
                         <TableCell className="text-xs whitespace-nowrap">{geminiGenVideoQuota(account)}</TableCell>
                         <TableCell className="max-w-[220px] text-xs">

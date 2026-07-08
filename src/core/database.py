@@ -3078,6 +3078,52 @@ class Database:
             cursor = await db.execute("SELECT * FROM geminigen_accounts ORDER BY is_active DESC, id ASC")
             return [GeminiGenAccount(**dict(row)) for row in await cursor.fetchall()]
 
+    async def get_geminigen_account_generation_stats(
+        self,
+        account_ids: Optional[List[int]] = None,
+    ) -> Dict[int, Dict[str, int]]:
+        today = self._current_stats_date()
+        cleaned_ids = sorted({int(account_id) for account_id in (account_ids or []) if account_id})
+        account_filter = ""
+        params: List[Any] = [today, today]
+        if cleaned_ids:
+            placeholders = ",".join("?" for _ in cleaned_ids)
+            account_filter = f" AND account_id IN ({placeholders})"
+            params.extend(cleaned_ids)
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                f"""
+                SELECT
+                    account_id,
+                    COALESCE(SUM(CASE WHEN kind = 'image' THEN 1 ELSE 0 END), 0) AS image_generated_total,
+                    COALESCE(SUM(CASE
+                        WHEN kind = 'image'
+                             AND DATE(completed_at, 'localtime') = ? THEN 1 ELSE 0 END), 0) AS image_generated_today,
+                    COALESCE(SUM(CASE WHEN kind = 'video' THEN 1 ELSE 0 END), 0) AS video_generated_total,
+                    COALESCE(SUM(CASE
+                        WHEN kind = 'video'
+                             AND DATE(completed_at, 'localtime') = ? THEN 1 ELSE 0 END), 0) AS video_generated_today
+                FROM geminigen_tasks
+                WHERE status = 'completed'
+                  AND account_id IS NOT NULL
+                  {account_filter}
+                GROUP BY account_id
+                """,
+                params,
+            )
+            rows = await cursor.fetchall()
+            return {
+                int(row["account_id"]): {
+                    "image_generated_today": int(row["image_generated_today"] or 0),
+                    "image_generated_total": int(row["image_generated_total"] or 0),
+                    "video_generated_today": int(row["video_generated_today"] or 0),
+                    "video_generated_total": int(row["video_generated_total"] or 0),
+                }
+                for row in rows
+                if row["account_id"] is not None
+            }
+
     async def get_geminigen_account(self, account_id: int) -> Optional[GeminiGenAccount]:
         async with self._connect() as db:
             db.row_factory = aiosqlite.Row

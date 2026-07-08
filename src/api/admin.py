@@ -2008,7 +2008,7 @@ def _mask_secret(value: str) -> str:
     return f"{text[:6]}...{text[-4:]}"
 
 
-def _geminigen_account_payload(account) -> Dict[str, Any]:
+def _geminigen_account_payload(account, generation_stats: Optional[Dict[str, int]] = None) -> Dict[str, Any]:
     active_benefits = []
     raw_benefits = getattr(account, "active_benefits_json", None)
     if raw_benefits:
@@ -2018,6 +2018,7 @@ def _geminigen_account_payload(account) -> Dict[str, Any]:
                 active_benefits = parsed_benefits
         except Exception:
             active_benefits = []
+    generation_stats = generation_stats or {}
     return {
         "id": account.id,
         "label": account.label,
@@ -2036,6 +2037,10 @@ def _geminigen_account_payload(account) -> Dict[str, Any]:
         "video_concurrency": account.video_concurrency,
         "image_in_flight": account.image_in_flight,
         "video_in_flight": account.video_in_flight,
+        "image_generated_today": int(generation_stats.get("image_generated_today") or 0),
+        "image_generated_total": int(generation_stats.get("image_generated_total") or 0),
+        "video_generated_today": int(generation_stats.get("video_generated_today") or 0),
+        "video_generated_total": int(generation_stats.get("video_generated_total") or 0),
         "last_status": account.last_status or "",
         "last_error": account.last_error or "",
         "last_used_at": account.last_used_at.isoformat() if account.last_used_at else None,
@@ -2375,12 +2380,16 @@ async def sync_runway_models(token: str = Depends(verify_admin_token)):
 async def get_geminigen_admin_config(token: str = Depends(verify_admin_token)):
     cfg = await db.get_geminigen_config()
     accounts = await db.list_geminigen_accounts()
+    generation_stats = await db.get_geminigen_account_generation_stats([account.id for account in accounts if account.id])
     if geminigen_service is not None:
         geminigen_service.schedule_stale_account_profile_refresh(accounts)
     return {
         "success": True,
         "config": _geminigen_config_payload(cfg),
-        "accounts": [_geminigen_account_payload(account) for account in accounts],
+        "accounts": [
+            _geminigen_account_payload(account, generation_stats.get(int(account.id or 0), {}))
+            for account in accounts
+        ],
         "models": GeminiGenService.model_catalog(video_enabled=bool(getattr(cfg, "video_enabled", True))),
     }
 
