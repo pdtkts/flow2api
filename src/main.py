@@ -95,6 +95,7 @@ def _path_allowed_on_api_only_host(path: str) -> bool:
     - Gemini (Google) style: /v1beta/models/…:generateContent, :streamGenerateContent, list models, …
     - Same body on alternate paths: /models, /models/{m}:generateContent, …
     - Cached media (authenticated): /api/cache/file, /api/cache/file/{project_id}, /api/cache/blob/...
+    - Desktop presence (authenticated): /api/client/presence
     - Extension workers: /captcha_ws
     - Discovery/liveness: /openapi.json, /health, /metrics
     """
@@ -109,6 +110,8 @@ def _path_allowed_on_api_only_host(path: str) -> bool:
     if path.startswith("/api/extension/"):
         return True
     if path.startswith("/api/tracker/"):
+        return True
+    if path == "/api/client/presence":
         return True
     # Public cloning + metadata endpoints (managed-API-key auth) used by external clients.
     if path in (

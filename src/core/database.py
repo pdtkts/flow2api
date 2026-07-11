@@ -1026,6 +1026,7 @@ class Database:
                         is_active BOOLEAN DEFAULT 1,
                         expires_at TIMESTAMP,
                         last_used_at TIMESTAMP,
+                        last_presence_at TIMESTAMP,
                         adobe_cloning_enabled INTEGER DEFAULT 1,
                         adobe_metadata_enabled INTEGER DEFAULT 1,
                         adobe_tracker_enabled INTEGER DEFAULT 1,
@@ -1323,6 +1324,7 @@ class Database:
             if await self._table_exists(db, "api_keys"):
                 api_keys_columns_to_add = [
                     ("key_plaintext", "TEXT"),
+                    ("last_presence_at", "TIMESTAMP"),
                     ("adobe_cloning_enabled", "INTEGER DEFAULT 1"),
                     ("adobe_metadata_enabled", "INTEGER DEFAULT 1"),
                     ("adobe_tracker_enabled", "INTEGER DEFAULT 1"),
@@ -1724,6 +1726,7 @@ class Database:
                     is_active BOOLEAN DEFAULT 1,
                     expires_at TIMESTAMP,
                     last_used_at TIMESTAMP,
+                    last_presence_at TIMESTAMP,
                     adobe_cloning_enabled INTEGER DEFAULT 1,
                     adobe_metadata_enabled INTEGER DEFAULT 1,
                     adobe_tracker_enabled INTEGER DEFAULT 1,
@@ -6049,6 +6052,14 @@ class Database:
             )
             await db.commit()
 
+    async def touch_api_key_presence(self, key_id: int):
+        async with self._connect(write=True) as db:
+            await db.execute(
+                "UPDATE api_keys SET last_presence_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (key_id,),
+            )
+            await db.commit()
+
     async def insert_api_key_audit_log(
         self,
         *,
@@ -6085,6 +6096,13 @@ class Database:
                     k.is_active,
                     k.expires_at,
                     k.last_used_at,
+                    k.last_presence_at,
+                    CASE
+                        WHEN k.is_active = 1
+                         AND k.last_presence_at IS NOT NULL
+                         AND datetime(k.last_presence_at) >= datetime('now', '-90 seconds')
+                        THEN 1 ELSE 0
+                    END AS is_online,
                     COALESCE(k.adobe_cloning_enabled, 1) AS adobe_cloning_enabled,
                     COALESCE(k.adobe_metadata_enabled, 1) AS adobe_metadata_enabled,
                     COALESCE(k.adobe_tracker_enabled, 1) AS adobe_tracker_enabled,
@@ -6097,6 +6115,7 @@ class Database:
             rows = [dict(row) for row in await cursor.fetchall()]
 
             for row in rows:
+                row["is_online"] = bool(row.get("is_online"))
                 row["account_ids"] = await self.get_api_key_account_ids(
                     int(row["id"]),
                     existing_only=True,
@@ -6206,6 +6225,13 @@ class Database:
                     k.is_active,
                     k.expires_at,
                     k.last_used_at,
+                    k.last_presence_at,
+                    CASE
+                        WHEN k.is_active = 1
+                         AND k.last_presence_at IS NOT NULL
+                         AND datetime(k.last_presence_at) >= datetime('now', '-90 seconds')
+                        THEN 1 ELSE 0
+                    END AS is_online,
                     COALESCE(k.adobe_cloning_enabled, 1) AS adobe_cloning_enabled,
                     COALESCE(k.adobe_metadata_enabled, 1) AS adobe_metadata_enabled,
                     COALESCE(k.adobe_tracker_enabled, 1) AS adobe_tracker_enabled,
@@ -6221,6 +6247,7 @@ class Database:
             if not row:
                 return None
             data = dict(row)
+            data["is_online"] = bool(data.get("is_online"))
             data["account_ids"] = await self.get_api_key_account_ids(
                 key_id,
                 existing_only=True,

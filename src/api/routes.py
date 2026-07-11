@@ -22,7 +22,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from pydantic import BaseModel, Field
 
 from ..core import auth as auth_core
-from ..core.auth import verify_api_key_flexible
+from ..core.auth import verify_api_key_flexible, verify_managed_presence_key
 from ..core.api_key_manager import AuthContext
 from ..core.logger import debug_logger
 from ..core.route_log_sanitize import dumps_for_request_log
@@ -177,6 +177,17 @@ def set_runway_service(service: RunwayService):
     """Set Runway service instance."""
     global runway_service
     runway_service = service
+
+
+@router.post("/api/client/presence", status_code=204)
+async def report_client_presence(
+    auth_ctx: AuthContext = Depends(verify_managed_presence_key),
+):
+    """Record a lightweight heartbeat for a managed desktop client."""
+    if auth_core.api_key_manager is None or auth_ctx.key_id is None:
+        raise HTTPException(status_code=503, detail="API key manager not initialized")
+    await auth_core.api_key_manager.db.touch_api_key_presence(auth_ctx.key_id)
+    return Response(status_code=204)
 
 
 def set_geminigen_service(service: GeminiGenService):

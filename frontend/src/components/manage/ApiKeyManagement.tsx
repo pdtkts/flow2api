@@ -31,6 +31,8 @@ type ManagedApiKey = {
   is_active: boolean
   expires_at?: string | null
   last_used_at?: string | null
+  last_presence_at?: string | null
+  is_online: boolean
   created_at?: string | null
   account_ids: number[]
   can_reveal_plaintext?: number
@@ -186,13 +188,22 @@ export function ApiKeyManagement() {
   const [creatingProj, setCreatingProj] = useState(false)
   const [legacyScopesNotice, setLegacyScopesNotice] = useState(false)
 
+  const loadManagedKeys = useCallback(async () => {
+    if (!token) return
+    const response = await adminJson<{ success?: boolean; keys?: ManagedApiKey[] }>(
+      "/api/admin/managed-apikeys",
+      token
+    )
+    if (response.ok && response.data?.keys) setKeys(response.data.keys)
+  }, [token])
+
   const loadAll = useCallback(async () => {
     if (!token) return
     setLoading(true)
     try {
       const auditOffset = auditPage * AUDIT_PAGE_SIZE
-      const [k, t, a, cw] = await Promise.all([
-        adminJson<{ success?: boolean; keys?: ManagedApiKey[] }>("/api/admin/managed-apikeys", token),
+      const [, t, a, cw] = await Promise.all([
+        loadManagedKeys(),
         adminJson<TokenRow[]>("/api/tokens", token),
         adminJson<{ success?: boolean; logs?: AuditLog[]; total?: number }>(
           `/api/admin/managed-apikeys/audit?limit=${AUDIT_PAGE_SIZE}&offset=${auditOffset}`,
@@ -200,7 +211,6 @@ export function ApiKeyManagement() {
         ),
         adminJson<ListCaptchaWorkerKeysResponse>("/api/admin/captcha-worker-keys", token),
       ])
-      if (k.ok && k.data?.keys) setKeys(k.data.keys)
       if (t.ok && Array.isArray(t.data)) setTokens(t.data)
       if (a.ok && a.data?.logs) setAuditLogs(a.data.logs)
       if (a.ok && typeof a.data?.total === "number") setAuditTotal(a.data.total)
@@ -215,7 +225,7 @@ export function ApiKeyManagement() {
     } finally {
       setLoading(false)
     }
-  }, [token, auditPage])
+  }, [token, auditPage, loadManagedKeys])
 
   useEffect(() => {
     const timeoutId = window.setTimeout(() => {
@@ -223,6 +233,14 @@ export function ApiKeyManagement() {
     }, 0)
     return () => window.clearTimeout(timeoutId)
   }, [loadAll])
+
+  useEffect(() => {
+    if (!token) return
+    const intervalId = window.setInterval(() => {
+      void loadManagedKeys()
+    }, 15_000)
+    return () => window.clearInterval(intervalId)
+  }, [token, loadManagedKeys])
 
   const loadKeyProjects = useCallback(async () => {
     if (!token || editingKeyId == null || !editOpen) return
@@ -703,7 +721,21 @@ export function ApiKeyManagement() {
                 keys.map((k) => (
                   <TableRow key={k.id}>
                     <TableCell>{k.client_name}</TableCell>
-                    <TableCell>{k.label}</TableCell>
+                    <TableCell>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span>{k.label}</span>
+                        <Badge
+                          variant={k.is_online ? "default" : "secondary"}
+                          className={k.is_online ? "bg-emerald-600 text-white hover:bg-emerald-600" : undefined}
+                        >
+                          <span
+                            className={`mr-1.5 h-1.5 w-1.5 rounded-full ${k.is_online ? "bg-emerald-100" : "bg-muted-foreground/60"}`}
+                            aria-hidden="true"
+                          />
+                          {k.is_online ? "Online" : "Offline"}
+                        </Badge>
+                      </div>
+                    </TableCell>
                     <TableCell className="font-mono text-xs">{k.key_prefix}</TableCell>
                     <TableCell>{k.account_ids.length}</TableCell>
                     <TableCell className="text-xs">{k.last_used_at || "-"}</TableCell>
