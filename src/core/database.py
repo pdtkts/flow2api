@@ -1365,6 +1365,7 @@ class Database:
 
             await self._ensure_operation_stats_table(db)
             await self._ensure_tokens_use_extension_for_generation_column(db)
+            await self._ensure_tokens_browser_profile_columns(db)
 
             # ========== Step 3: Ensure all config tables have default rows ==========
             # Note: This will NOT overwrite existing config rows
@@ -1414,6 +1415,19 @@ class Database:
                     captcha_proxy_url TEXT,
                     extension_route_key TEXT,
                     use_extension_for_generation INTEGER NOT NULL DEFAULT 1,
+                    auth_mode TEXT NOT NULL DEFAULT 'session_token',
+                    browser_profile_path TEXT,
+                    browser_profile_status TEXT DEFAULT 'not_created',
+                    browser_profile_email TEXT,
+                    browser_profile_name TEXT,
+                    browser_profile_login_state TEXT DEFAULT 'unknown',
+                    browser_profile_cookie_status TEXT DEFAULT 'unknown',
+                    browser_profile_st_status TEXT DEFAULT 'unknown',
+                    browser_profile_at_status TEXT DEFAULT 'unknown',
+                    browser_profile_last_opened_at TIMESTAMP,
+                    browser_profile_last_sync_at TIMESTAMP,
+                    browser_profile_last_refresh_at TIMESTAMP,
+                    browser_profile_last_error TEXT,
                     ban_reason TEXT,
                     banned_at TIMESTAMP
                 )
@@ -1803,6 +1817,7 @@ class Database:
             await self._ensure_api_key_ownership_columns(db)
             await self._ensure_task_async_columns(db)
             await self._ensure_tokens_use_extension_for_generation_column(db)
+            await self._ensure_tokens_browser_profile_columns(db)
 
             # Create indexes
             await db.execute("CREATE INDEX IF NOT EXISTS idx_task_id ON tasks(task_id)")
@@ -1863,6 +1878,34 @@ class Database:
                 print("  OK Added column 'use_extension_for_generation' to tokens table")
         except Exception as e:
             print(f"  ERR tokens use_extension_for_generation migration failed: {e}")
+
+    async def _ensure_tokens_browser_profile_columns(self, db) -> None:
+        """Add headed persistent-browser profile metadata to tokens."""
+        try:
+            if not await self._table_exists(db, "tokens"):
+                return
+            columns_to_add = [
+                ("auth_mode", "TEXT NOT NULL DEFAULT 'session_token'"),
+                ("browser_profile_path", "TEXT"),
+                ("browser_profile_status", "TEXT DEFAULT 'not_created'"),
+                ("browser_profile_email", "TEXT"),
+                ("browser_profile_name", "TEXT"),
+                ("browser_profile_login_state", "TEXT DEFAULT 'unknown'"),
+                ("browser_profile_cookie_status", "TEXT DEFAULT 'unknown'"),
+                ("browser_profile_st_status", "TEXT DEFAULT 'unknown'"),
+                ("browser_profile_at_status", "TEXT DEFAULT 'unknown'"),
+                ("browser_profile_last_opened_at", "TIMESTAMP"),
+                ("browser_profile_last_sync_at", "TIMESTAMP"),
+                ("browser_profile_last_refresh_at", "TIMESTAMP"),
+                ("browser_profile_last_error", "TEXT"),
+            ]
+            for col_name, col_type in columns_to_add:
+                if not await self._column_exists(db, "tokens", col_name):
+                    await db.execute(f"ALTER TABLE tokens ADD COLUMN {col_name} {col_type}")
+                    print(f"  OK Added column '{col_name}' to tokens table")
+        except Exception as e:
+            print(f"  ERR tokens browser profile migration failed: {e}")
+            raise
 
     async def _ensure_api_key_ownership_columns(self, db):
         """Add api_key_id to core tables when upgrading from older schemas (before indexes on those columns)."""
@@ -1989,14 +2032,33 @@ class Database:
             cursor = await db.execute("""
                 INSERT INTO tokens (st, at, at_expires, email, name, remark, is_active,
                                    credits, user_paygate_tier, current_project_id, current_project_name,
-                                   image_enabled, video_enabled, image_concurrency, video_concurrency, captcha_proxy_url, extension_route_key, use_extension_for_generation)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                   image_enabled, video_enabled, image_concurrency, video_concurrency,
+                                   captcha_proxy_url, extension_route_key, use_extension_for_generation,
+                                   auth_mode, browser_profile_path, browser_profile_status,
+                                   browser_profile_email, browser_profile_name, browser_profile_login_state,
+                                   browser_profile_cookie_status, browser_profile_st_status, browser_profile_at_status,
+                                   browser_profile_last_opened_at, browser_profile_last_sync_at,
+                                   browser_profile_last_refresh_at, browser_profile_last_error)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (token.st, token.at, token.at_expires, token.email, token.name, token.remark,
                   token.is_active, token.credits, token.user_paygate_tier,
                   token.current_project_id, token.current_project_name,
                   token.image_enabled, token.video_enabled,
                   token.image_concurrency, token.video_concurrency, token.captcha_proxy_url, token.extension_route_key,
-                  1 if getattr(token, "use_extension_for_generation", True) else 0))
+                  1 if getattr(token, "use_extension_for_generation", True) else 0,
+                  getattr(token, "auth_mode", "session_token"),
+                  getattr(token, "browser_profile_path", None),
+                  getattr(token, "browser_profile_status", "not_created"),
+                  getattr(token, "browser_profile_email", None),
+                  getattr(token, "browser_profile_name", None),
+                  getattr(token, "browser_profile_login_state", "unknown"),
+                  getattr(token, "browser_profile_cookie_status", "unknown"),
+                  getattr(token, "browser_profile_st_status", "unknown"),
+                  getattr(token, "browser_profile_at_status", "unknown"),
+                  getattr(token, "browser_profile_last_opened_at", None),
+                  getattr(token, "browser_profile_last_sync_at", None),
+                  getattr(token, "browser_profile_last_refresh_at", None),
+                  getattr(token, "browser_profile_last_error", None)))
             await db.commit()
             token_id = cursor.lastrowid
 

@@ -28,6 +28,19 @@ export interface TokenRow {
   user_paygate_tier?: string | null
   current_project_id?: string | null
   current_project_name?: string | null
+  auth_mode?: "session_token" | "browser_profile" | string | null
+  browser_profile_path?: string | null
+  browser_profile_status?: string | null
+  browser_profile_email?: string | null
+  browser_profile_name?: string | null
+  browser_profile_login_state?: string | null
+  browser_profile_cookie_status?: string | null
+  browser_profile_st_status?: string | null
+  browser_profile_at_status?: string | null
+  browser_profile_last_opened_at?: string | null
+  browser_profile_last_sync_at?: string | null
+  browser_profile_last_refresh_at?: string | null
+  browser_profile_last_error?: string | null
   captcha_proxy_url?: string
   image_enabled: boolean
   video_enabled: boolean

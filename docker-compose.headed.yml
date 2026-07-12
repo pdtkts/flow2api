@@ -9,11 +9,14 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.headed
+      args:
+        VITE_NOVNC_URL: ${VITE_NOVNC_URL:-}
     image: flow2api:headed
     container_name: flow2api-headed
     ports:
       - "${FRONTEND_PORT:-8000}:8000"
       - "${VNC_HOST_PORT:-5900}:${VNC_PORT:-5900}"
+      - "${NOVNC_HOST_PORT:-6080}:${NOVNC_PORT:-6080}"
     volumes:
       - ./data:/app/data
       - ./tmp:/app/tmp
@@ -23,8 +26,10 @@ services:
       - ALLOW_DOCKER_HEADED_CAPTCHA=true
       - DISPLAY=:99
       - XVFB_SCREEN=${XVFB_SCREEN:-1920x1080x24}
-      - ENABLE_HEADED_VNC=${ENABLE_HEADED_VNC:-false}
+      - ENABLE_HEADED_VNC=${ENABLE_HEADED_VNC:-true}
+      - ENABLE_HEADED_NOVNC=${ENABLE_HEADED_NOVNC:-true}
       - VNC_PORT=${VNC_PORT:-5900}
+      - NOVNC_PORT=${NOVNC_PORT:-6080}
       - VNC_PASSWORD=${VNC_PASSWORD:-}
       - FLOW2API_API_ONLY_HOST=${FLOW2API_API_ONLY_HOST:-flow-api.prismacreative.online}
       - FLOW2API_DB_URL=${FLOW2API_DB_URL:-postgresql://flow2api:flow2api@postgres:5432/flow2api}

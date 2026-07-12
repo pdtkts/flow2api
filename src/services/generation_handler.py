@@ -1396,6 +1396,24 @@ class GenerationHandler:
                 yield self._create_error_response(error_msg, status_code=503)
                 return
 
+            if getattr(token, "auth_mode", "session_token") == "browser_profile":
+                profile_status = getattr(token, "browser_profile_status", None) or "unknown"
+                login_state = getattr(token, "browser_profile_login_state", None) or "unknown"
+                if profile_status != "connected" or login_state != "logged_in":
+                    error_msg = (
+                        "Browser profile is not logged in. Open the profile in admin, "
+                        "log in inside Fluxbox, then click Sync."
+                    )
+                    debug_logger.log_error(f"[GENERATION] {error_msg} token_id={token.id}")
+                    record_generation_result(generation_type, "failed", time.time() - start_time)
+                    if stream:
+                        yield self._create_stream_chunk(f"❌ {error_msg}\n")
+                    yield self._create_error_response(error_msg, status_code=409)
+                    return
+                debug_logger.log_info(
+                    f"[GENERATION] Browser-profile token {token.id} is connected; using synced ST/AT for Flow request pipeline"
+                )
+
             # 4. 确保Project存在
             debug_logger.log_info(f"[GENERATION] 检查/创建Project...")
 

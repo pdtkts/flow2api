@@ -7,9 +7,11 @@ export DISPLAY="${DISPLAY_VALUE}"
 XVFB_PID=""
 FLUXBOX_PID=""
 X11VNC_PID=""
+NOVNC_PID=""
 
 cleanup() {
     # Best-effort shutdown for background GUI processes.
+    [ -n "${NOVNC_PID}" ] && kill "${NOVNC_PID}" 2>/dev/null || true
     [ -n "${X11VNC_PID}" ] && kill "${X11VNC_PID}" 2>/dev/null || true
     [ -n "${FLUXBOX_PID}" ] && kill "${FLUXBOX_PID}" 2>/dev/null || true
     [ -n "${XVFB_PID}" ] && kill "${XVFB_PID}" 2>/dev/null || true
@@ -98,6 +100,25 @@ if [ "${ALLOW_DOCKER_HEADED_CAPTCHA:-true}" = "true" ] || [ "${ALLOW_DOCKER_HEAD
                 -listen 0.0.0.0 -rfbport "${VNC_PORT_VALUE}" \
                 >/tmp/x11vnc.log 2>&1 &
             X11VNC_PID="$!"
+
+            case "${ENABLE_HEADED_NOVNC:-1}" in
+                0|false|FALSE|no|NO|off|OFF)
+                    echo "[entrypoint] headed noVNC disabled (ENABLE_HEADED_NOVNC=${ENABLE_HEADED_NOVNC:-})"
+                    ;;
+                *)
+                    if ! command -v websockify >/dev/null 2>&1; then
+                        echo "[entrypoint] websockify not found; noVNC unavailable" >&2
+                    elif [ ! -d /usr/share/novnc ]; then
+                        echo "[entrypoint] /usr/share/novnc not found; noVNC unavailable" >&2
+                    else
+                        NOVNC_PORT_VALUE="${NOVNC_PORT:-6080}"
+                        echo "[entrypoint] starting noVNC on 0.0.0.0:${NOVNC_PORT_VALUE} -> localhost:${VNC_PORT_VALUE}"
+                        websockify --web=/usr/share/novnc "0.0.0.0:${NOVNC_PORT_VALUE}" "localhost:${VNC_PORT_VALUE}" \
+                            >/tmp/novnc.log 2>&1 &
+                        NOVNC_PID="$!"
+                    fi
+                    ;;
+            esac
             ;;
     esac
 fi

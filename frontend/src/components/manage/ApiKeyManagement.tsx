@@ -80,16 +80,6 @@ const AVAILABLE_SCOPES: ScopeOption[] = [
   { id: "generate:chat", label: "Generate chat", description: "Allows `/v1/chat/completions` (stream and non-stream)." },
   { id: "generate:gemini", label: "Generate gemini", description: "Allows Gemini `generateContent` and `streamGenerateContent` endpoints." },
   {
-    id: "projects:read",
-    label: "List Flow projects",
-    description: "Allows `GET /v1/projects` to list VideoFX projects for assigned accounts.",
-  },
-  {
-    id: "projects:write",
-    label: "Create Flow projects",
-    description: "Allows `POST /v1/projects` to create VideoFX projects for assigned accounts.",
-  },
-  {
     id: "adobe:cloning",
     label: "Adobe cloning",
     description: "Allows `POST /api/generate-cloning-prompts` and `POST /api/generate-cloning-video-prompt`.",
@@ -185,7 +175,7 @@ export function ApiKeyManagement() {
   const [newProjTokenId, setNewProjTokenId] = useState("")
   const [newProjTitle, setNewProjTitle] = useState("")
   const [newProjSetCurrent, setNewProjSetCurrent] = useState(true)
-  const [creatingProj, setCreatingProj] = useState(false)
+  const [creatingProj] = useState(false)
   const [legacyScopesNotice, setLegacyScopesNotice] = useState(false)
 
   const loadManagedKeys = useCallback(async () => {
@@ -246,22 +236,13 @@ export function ApiKeyManagement() {
     if (!token || editingKeyId == null || !editOpen) return
     setKeyProjectsLoading(true)
     try {
-      const offset = keyProjectsPage * KEY_PROJECT_PAGE_SIZE
-      const r = await adminJson<ManagedApiKeyProjectsResponse>(
-        `/api/admin/managed-apikeys/${editingKeyId}/projects?limit=${KEY_PROJECT_PAGE_SIZE}&offset=${offset}`,
-        token
-      )
-      if (r.ok && r.data?.success) {
-        setKeyProjectRows(Array.isArray(r.data.projects) ? r.data.projects : [])
-        setKeyProjectsTotal(typeof r.data.total === "number" ? r.data.total : 0)
-        setKeyProjectAccounts(Array.isArray(r.data.accounts) ? r.data.accounts : [])
-      } else {
-        toast.error("Failed to load key projects")
-      }
+      setKeyProjectRows([])
+      setKeyProjectsTotal(0)
+      setKeyProjectAccounts([])
     } finally {
       setKeyProjectsLoading(false)
     }
-  }, [token, editingKeyId, editOpen, keyProjectsPage])
+  }, [token, editingKeyId, editOpen])
 
   useEffect(() => {
     void loadKeyProjects()
@@ -551,37 +532,7 @@ export function ApiKeyManagement() {
   }
 
   const createKeyProject = async () => {
-    if (!token || editingKeyId == null) return
-    const tid = parseInt(newProjTokenId, 10)
-    if (!Number.isFinite(tid)) {
-      toast.error("Select an account")
-      return
-    }
-    if (!selectedAccountIds.includes(tid)) {
-      toast.error("Selected account must be assigned to this key")
-      return
-    }
-    setCreatingProj(true)
-    try {
-      const res = await adminFetch(`/api/admin/managed-apikeys/${editingKeyId}/projects`, token, {
-        method: "POST",
-        body: JSON.stringify({
-          token_id: tid,
-          title: newProjTitle.trim() || null,
-          set_as_current: newProjSetCurrent,
-        }),
-      })
-      if (!res) return
-      const data = await res.json().catch(() => ({}))
-      if (data.success) {
-        toast.success("Project created")
-        await loadKeyProjects()
-      } else {
-        toast.error(data.detail || data.message || "Create failed")
-      }
-    } finally {
-      setCreatingProj(false)
-    }
+    toast.error("Project management has been removed")
   }
 
   const tokenEmail = (tid: number) => tokens.find((x) => x.id === tid)?.email || "—"
@@ -1298,7 +1249,7 @@ export function ApiKeyManagement() {
               ))}
             </div>
 
-            {editingKeyId != null ? (
+            {false ? (
               <div className="space-y-4 rounded-lg border bg-muted/20 p-4">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div className="flex items-center gap-2">

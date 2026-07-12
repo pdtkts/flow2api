@@ -14,6 +14,19 @@ class Token(BaseModel):
     st: str  # Session Token (__Secure-next-auth.session-token)
     at: Optional[str] = None  # Access Token (从ST转换而来)
     at_expires: Optional[datetime] = None  # AT过期时间
+    auth_mode: str = "session_token"  # session_token | browser_profile
+    browser_profile_path: Optional[str] = None
+    browser_profile_status: str = "not_created"
+    browser_profile_email: Optional[str] = None
+    browser_profile_name: Optional[str] = None
+    browser_profile_login_state: str = "unknown"
+    browser_profile_cookie_status: str = "unknown"
+    browser_profile_st_status: str = "unknown"
+    browser_profile_at_status: str = "unknown"
+    browser_profile_last_opened_at: Optional[datetime] = None
+    browser_profile_last_sync_at: Optional[datetime] = None
+    browser_profile_last_refresh_at: Optional[datetime] = None
+    browser_profile_last_error: Optional[str] = None
 
     # 基础信息
     email: str

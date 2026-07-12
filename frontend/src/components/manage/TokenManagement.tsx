@@ -11,9 +11,7 @@ import { Input } from "../ui/input"
 import { Label } from "../ui/label"
 import { Textarea } from "../ui/textarea"
 import { toast } from "sonner"
-import { RefreshCw, Download, Upload, Plus, Loader2, RefreshCcw, Pencil, Trash2, FolderPlus } from "lucide-react"
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select"
-import type { CreateProjectResponse } from "../../types/admin"
+import { RefreshCw, Download, Upload, Plus, Loader2, RefreshCcw, Pencil, Trash2, ExternalLink } from "lucide-react"
 
 type GeminiGenAccountSummary = {
   id: number
@@ -140,6 +138,13 @@ function geminiGenVideoQuota(account: GeminiGenAccountSummary) {
   return quotas.length ? quotas.join(" / ") : "-"
 }
 
+function buildNoVncUrl() {
+  const configured = String(import.meta.env.VITE_NOVNC_URL || "").trim()
+  if (configured) return configured
+  if (typeof window === "undefined") return "http://localhost:6080/vnc.html?autoconnect=1&resize=scale"
+  return `http://${window.location.hostname}:6080/vnc.html?autoconnect=1&resize=scale`
+}
+
 export function TokenManagement() {
   const { token } = useAuth()
   const [stats, setStats] = useState<DashboardStats | null>(null)
@@ -157,8 +162,6 @@ export function TokenManagement() {
 
   const [addSt, setAddSt] = useState("")
   const [addRemark, setAddRemark] = useState("")
-  const [addProjectId, setAddProjectId] = useState("")
-  const [addProjectName, setAddProjectName] = useState("")
   const [addCaptchaProxy, setAddCaptchaProxy] = useState("")
   const [addImageEn, setAddImageEn] = useState(true)
   const [addVideoEn, setAddVideoEn] = useState(true)
@@ -169,8 +172,6 @@ export function TokenManagement() {
   const [editId, setEditId] = useState<number | null>(null)
   const [editSt, setEditSt] = useState("")
   const [editRemark, setEditRemark] = useState("")
-  const [editProjectId, setEditProjectId] = useState("")
-  const [editProjectName, setEditProjectName] = useState("")
   const [editCaptchaProxy, setEditCaptchaProxy] = useState("")
   const [editImageEn, setEditImageEn] = useState(true)
   const [editVideoEn, setEditVideoEn] = useState(true)
@@ -181,12 +182,7 @@ export function TokenManagement() {
   const [editProfileSaving, setEditProfileSaving] = useState(false)
 
   const [importFile, setImportFile] = useState<File | null>(null)
-
-  const [newProjectOpen, setNewProjectOpen] = useState(false)
-  const [newProjectTokenId, setNewProjectTokenId] = useState<string>("")
-  const [newProjectTitle, setNewProjectTitle] = useState("")
-  const [newProjectSetCurrent, setNewProjectSetCurrent] = useState(true)
-  const [newProjectSaving, setNewProjectSaving] = useState(false)
+  const [profileBusyId, setProfileBusyId] = useState<number | "new" | null>(null)
 
   const loadStats = useCallback(async () => {
     if (!token) return
@@ -328,8 +324,6 @@ export function TokenManagement() {
         body: JSON.stringify({
           st,
           remark: addRemark.trim() || null,
-          project_id: addProjectId.trim() || null,
-          project_name: addProjectName.trim() || null,
           captcha_proxy_url: addCaptchaProxy.trim() || null,
           image_enabled: addImageEn,
           video_enabled: addVideoEn,
@@ -344,8 +338,6 @@ export function TokenManagement() {
         setAddOpen(false)
         setAddSt("")
         setAddRemark("")
-        setAddProjectId("")
-        setAddProjectName("")
         setAddCaptchaProxy("")
         setAddImageEn(true)
         setAddVideoEn(true)
@@ -363,8 +355,6 @@ export function TokenManagement() {
     setEditId(row.id)
     setEditSt(row.st || "")
     setEditRemark(row.remark || "")
-    setEditProjectId(row.current_project_id || "")
-    setEditProjectName(row.current_project_name || "")
     setEditCaptchaProxy(row.captcha_proxy_url || "")
     setEditImageEn(row.image_enabled !== false)
     setEditVideoEn(row.video_enabled !== false)
@@ -380,7 +370,8 @@ export function TokenManagement() {
   const submitEdit = async () => {
     if (!token || editId == null) return
     const st = editSt.trim()
-    if (!st) {
+    const selected = tokens.find((t) => t.id === editId)
+    if (!st && selected?.auth_mode !== "browser_profile") {
       toast.error("Session Token is required")
       return
     }
@@ -391,8 +382,6 @@ export function TokenManagement() {
         body: JSON.stringify({
           st,
           remark: editRemark.trim() || null,
-          project_id: editProjectId.trim() || null,
-          project_name: editProjectName.trim() || null,
           captcha_proxy_url: editCaptchaProxy.trim() || null,
           image_enabled: editImageEn,
           video_enabled: editVideoEn,
@@ -526,53 +515,52 @@ export function TokenManagement() {
     } else toast.error("Delete failed")
   }
 
-  const copyProjectId = async (pid: string) => {
-    try {
-      await navigator.clipboard.writeText(pid)
-      toast.success("Project ID copied")
-    } catch {
-      toast.error("Copy failed")
-    }
-  }
-
-  const openNewProject = () => {
-    const first = tokens[0]
-    setNewProjectTokenId(first ? String(first.id) : "")
-    setNewProjectTitle("")
-    setNewProjectSetCurrent(true)
-    setNewProjectOpen(true)
-  }
-
-  const submitNewProject = async () => {
+  const createBrowserProfileAccount = async () => {
     if (!token) return
-    const tid = newProjectTokenId.trim()
-    if (!tid) {
-      toast.error("Select a token")
-      return
-    }
-    setNewProjectSaving(true)
+    setProfileBusyId("new")
     try {
-      const r = await adminFetch(`/api/tokens/${tid}/projects`, token, {
+      const r = await adminFetch("/api/tokens/browser-profile", token, {
         method: "POST",
         body: JSON.stringify({
-          title: newProjectTitle.trim() || null,
-          set_as_current: newProjectSetCurrent,
+          image_enabled: true,
+          video_enabled: true,
+          image_concurrency: -1,
+          video_concurrency: -1,
         }),
       })
       if (!r) return
-      const d = (await r.json().catch(() => ({}))) as CreateProjectResponse & { detail?: string }
+      const d = await r.json().catch(() => ({}))
       if (r.ok && d.success) {
-        const name = d.project?.project_name || "Project"
-        const pid = d.project?.project_id || ""
-        toast.success(pid ? `Created: ${name} (${pid.slice(0, 8)}…)` : `Created: ${name}`)
-        setNewProjectOpen(false)
+        toast.success("Browser profile account created")
+        await refreshAll()
+      } else toast.error(d.detail || d.message || "Create profile failed")
+    } finally {
+      setProfileBusyId(null)
+    }
+  }
+
+  const browserProfileAction = async (id: number, action: "open" | "sync" | "refresh" | "reset") => {
+    if (!token) return
+    if (action === "reset" && !confirm("Reset this browser profile? You will need to log in again.")) return
+    setProfileBusyId(id)
+    try {
+      const r = await adminFetch(`/api/tokens/${id}/browser-profile/${action}`, token, { method: "POST" })
+      if (!r) return
+      const d = await r.json().catch(() => ({}))
+      if (r.ok && d.success) {
+        const labels = {
+          open: "Profile opened in Fluxbox",
+          sync: "Profile synced",
+          refresh: "Profile refreshed",
+          reset: "Profile reset",
+        }
+        toast.success(labels[action])
         await refreshAll()
       } else {
-        const err = d.detail || (d as { message?: string }).message || "Create failed"
-        toast.error(typeof err === "string" ? err : "Create failed")
+        toast.error(d.detail || d.message || `${action} failed`)
       }
     } finally {
-      setNewProjectSaving(false)
+      setProfileBusyId(null)
     }
   }
 
@@ -762,8 +750,14 @@ export function TokenManagement() {
             <Button size="sm" onClick={() => setAddOpen(true)}>
               <Plus className="h-4 w-4 mr-2" /> Add
             </Button>
-            <Button size="sm" variant="outline" onClick={openNewProject} disabled={!tokens.length} title="Create a VideoFX project for a token">
-              <FolderPlus className="h-4 w-4 mr-2" /> New project
+            <Button size="sm" variant="outline" onClick={createBrowserProfileAccount} disabled={profileBusyId === "new"} title="Create a persistent headed Chrome profile account">
+              {profileBusyId === "new" ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Plus className="h-4 w-4 mr-2" />}
+              Browser profile
+            </Button>
+            <Button size="sm" variant="outline" asChild title="Open Fluxbox desktop through noVNC">
+              <a href={buildNoVncUrl()} target="_blank" rel="noreferrer">
+                <ExternalLink className="h-4 w-4 mr-2" /> Open Fluxbox
+              </a>
             </Button>
           </div>
         </CardHeader>
@@ -778,7 +772,7 @@ export function TokenManagement() {
                   <TableHead className="text-center">Expires</TableHead>
                   <TableHead className="text-center">Credits</TableHead>
                   <TableHead className="text-center">Tier</TableHead>
-                  <TableHead className="text-center">Project ID</TableHead>
+                  <TableHead className="text-center">Profile</TableHead>
                   <TableHead className="text-center">Images</TableHead>
                   <TableHead className="text-center">Videos</TableHead>
                   <TableHead className="text-center">Errors</TableHead>
@@ -796,8 +790,11 @@ export function TokenManagement() {
                   tokens.map((t) => {
                     const imgDisp = t.image_enabled ? String(t.image_count ?? 0) : "—"
                     const vidDisp = t.video_enabled ? String(t.video_count ?? 0) : "—"
-                    const pid = t.current_project_id || ""
-                    const shortPid = pid.length > 8 ? `${pid.slice(0, 8)}…` : pid || "—"
+                    const isProfile = t.auth_mode === "browser_profile"
+                    const profileStatus = t.browser_profile_status || "not_created"
+                    const health = [t.browser_profile_cookie_status, t.browser_profile_st_status, t.browser_profile_at_status]
+                      .filter(Boolean)
+                      .join(" / ")
                     return (
                       <TableRow key={t.id}>
                         <TableCell className="text-center font-medium">{t.id}</TableCell>
@@ -822,12 +819,24 @@ export function TokenManagement() {
                         </TableCell>
                         <TableCell className="text-center">{accountTierBadge(t.user_paygate_tier)}</TableCell>
                         <TableCell className="text-center">
-                          {pid ? (
-                            <Button variant="outline" size="sm" className="h-7 text-[10px] font-mono px-2" onClick={() => copyProjectId(pid)} title={pid}>
-                              {shortPid}
-                            </Button>
+                          {isProfile ? (
+                            <div className="space-y-1">
+                              <span
+                                className={`inline-flex rounded px-2 py-0.5 text-xs ${
+                                  profileStatus === "connected"
+                                    ? "bg-green-500/15 text-green-700 dark:text-green-400"
+                                    : profileStatus === "error"
+                                      ? "bg-red-500/15 text-red-700 dark:text-red-400"
+                                      : "bg-muted text-muted-foreground"
+                                }`}
+                                title={t.browser_profile_last_error || health}
+                              >
+                                {profileStatus}
+                              </span>
+                              <div className="text-[10px] text-muted-foreground">{health || "unknown"}</div>
+                            </div>
                           ) : (
-                            <span className="text-muted-foreground">—</span>
+                            <span className="text-xs text-muted-foreground">Session token</span>
                           )}
                         </TableCell>
                         <TableCell className="text-center text-sm">{imgDisp}</TableCell>
@@ -838,6 +847,22 @@ export function TokenManagement() {
                             <Button variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={() => refreshAt(t.id)}>
                               Refresh AT
                             </Button>
+                            {isProfile ? (
+                              <>
+                                <Button variant="ghost" size="sm" className="h-7 px-2 text-xs" disabled={profileBusyId === t.id} onClick={() => browserProfileAction(t.id, "open")}>
+                                  Open
+                                </Button>
+                                <Button variant="ghost" size="sm" className="h-7 px-2 text-xs" disabled={profileBusyId === t.id} onClick={() => browserProfileAction(t.id, "sync")}>
+                                  Sync
+                                </Button>
+                                <Button variant="ghost" size="sm" className="h-7 px-2 text-xs" disabled={profileBusyId === t.id} onClick={() => browserProfileAction(t.id, "refresh")}>
+                                  Profile refresh
+                                </Button>
+                                <Button variant="ghost" size="sm" className="h-7 px-2 text-xs text-destructive" disabled={profileBusyId === t.id} onClick={() => browserProfileAction(t.id, "reset")}>
+                                  Reset
+                                </Button>
+                              </>
+                            ) : null}
                             <Button variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={() => openEdit(t)}>
                               <Pencil className="h-3 w-3 mr-1" />
                               Edit
@@ -884,14 +909,6 @@ export function TokenManagement() {
             <div>
               <Label>Remark</Label>
               <Input className="mt-1" value={addRemark} onChange={(e) => setAddRemark(e.target.value)} />
-            </div>
-            <div>
-              <Label>Project ID</Label>
-              <Input className="mt-1 font-mono text-sm" value={addProjectId} onChange={(e) => setAddProjectId(e.target.value)} />
-            </div>
-            <div>
-              <Label>Project name</Label>
-              <Input className="mt-1" value={addProjectName} onChange={(e) => setAddProjectName(e.target.value)} />
             </div>
             <div>
               <Label>Captcha proxy URL</Label>
@@ -948,14 +965,6 @@ export function TokenManagement() {
               <Input className="mt-1" value={editRemark} onChange={(e) => setEditRemark(e.target.value)} />
             </div>
             <div>
-              <Label>Project ID</Label>
-              <Input className="mt-1 font-mono text-sm" value={editProjectId} onChange={(e) => setEditProjectId(e.target.value)} />
-            </div>
-            <div>
-              <Label>Project name</Label>
-              <Input className="mt-1" value={editProjectName} onChange={(e) => setEditProjectName(e.target.value)} />
-            </div>
-            <div>
               <Label>Captcha proxy URL</Label>
               <Input className="mt-1 font-mono text-sm" value={editCaptchaProxy} onChange={(e) => setEditCaptchaProxy(e.target.value)} />
             </div>
@@ -987,52 +996,6 @@ export function TokenManagement() {
             </Button>
             <Button onClick={submitEdit} disabled={saving}>
               {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : "Save"}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog open={newProjectOpen} onOpenChange={setNewProjectOpen}>
-        <DialogContent className="max-w-md">
-          <DialogHeader>
-            <DialogTitle>New project</DialogTitle>
-          </DialogHeader>
-          <div className="space-y-4">
-            <div>
-              <Label>Token</Label>
-              <Select value={newProjectTokenId} onValueChange={setNewProjectTokenId}>
-                <SelectTrigger className="mt-1 w-full">
-                  <SelectValue placeholder="Select account" />
-                </SelectTrigger>
-                <SelectContent>
-                  {tokens.map((t) => (
-                    <SelectItem key={t.id} value={String(t.id)}>
-                      {t.email || `Token #${t.id}`}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <div>
-              <Label>Project title (optional)</Label>
-              <Input
-                className="mt-1"
-                value={newProjectTitle}
-                onChange={(e) => setNewProjectTitle(e.target.value)}
-                placeholder="Leave empty for auto name (e.g. … P3)"
-              />
-            </div>
-            <div className="flex items-center gap-2">
-              <Switch checked={newProjectSetCurrent} onCheckedChange={setNewProjectSetCurrent} />
-              <Label className="!mt-0">Set as current project for this token</Label>
-            </div>
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setNewProjectOpen(false)}>
-              Cancel
-            </Button>
-            <Button onClick={submitNewProject} disabled={newProjectSaving || !newProjectTokenId}>
-              {newProjectSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : "Create"}
             </Button>
           </DialogFooter>
         </DialogContent>

@@ -25,7 +25,7 @@ from ..core.auth import AuthManager
 from ..core.api_key_manager import ApiKeyManager
 from ..core.database import Database
 from ..core.config import config, get_yescaptcha_min_score, normalize_yescaptcha_task_type
-from ..core.models import GenerationConfig
+from ..core.models import GenerationConfig, Token
 from ..core.monitoring import build_public_health_snapshot
 from ..services.token_manager import TokenManager
 from ..services.proxy_manager import ProxyManager
@@ -33,6 +33,7 @@ from ..services.concurrency_manager import ConcurrencyManager
 from ..services.runway_service import RunwayService
 from ..services.geminigen_service import GeminiGenService
 from ..services.generation_handler import MODEL_CONFIG
+from ..services.browser_profile_service import BrowserProfileService
 
 try:
     import httpx
@@ -686,8 +687,6 @@ class LoginRequest(BaseModel):
 
 class AddTokenRequest(BaseModel):
     st: str
-    project_id: Optional[str] = None  # 用户可选输入project_id
-    project_name: Optional[str] = None
     remark: Optional[str] = None
     captcha_proxy_url: Optional[str] = None
     extension_route_key: Optional[str] = None
@@ -698,9 +697,7 @@ class AddTokenRequest(BaseModel):
 
 
 class UpdateTokenRequest(BaseModel):
-    st: str  # Session Token (必填，用于刷新AT)
-    project_id: Optional[str] = None  # 用户可选输入project_id
-    project_name: Optional[str] = None
+    st: Optional[str] = None  # Session Token; browser-profile accounts may leave this empty
     remark: Optional[str] = None
     captcha_proxy_url: Optional[str] = None
     extension_route_key: Optional[str] = None
@@ -709,6 +706,15 @@ class UpdateTokenRequest(BaseModel):
     video_enabled: Optional[bool] = None
     image_concurrency: Optional[int] = None
     video_concurrency: Optional[int] = None
+
+
+class BrowserProfileTokenRequest(BaseModel):
+    remark: Optional[str] = None
+    captcha_proxy_url: Optional[str] = None
+    image_enabled: bool = True
+    video_enabled: bool = True
+    image_concurrency: int = -1
+    video_concurrency: int = -1
 
 
 class ProxyConfigRequest(BaseModel):
@@ -1097,6 +1103,19 @@ async def get_tokens(token: str = Depends(verify_admin_token)):
         "user_paygate_tier": row.get("user_paygate_tier"),
         "current_project_id": row.get("current_project_id"),  # 🆕 项目ID
         "current_project_name": row.get("current_project_name"),  # 🆕 项目名称
+        "auth_mode": row.get("auth_mode") or "session_token",
+        "browser_profile_path": row.get("browser_profile_path"),
+        "browser_profile_status": row.get("browser_profile_status") or "not_created",
+        "browser_profile_email": row.get("browser_profile_email"),
+        "browser_profile_name": row.get("browser_profile_name"),
+        "browser_profile_login_state": row.get("browser_profile_login_state") or "unknown",
+        "browser_profile_cookie_status": row.get("browser_profile_cookie_status") or "unknown",
+        "browser_profile_st_status": row.get("browser_profile_st_status") or "unknown",
+        "browser_profile_at_status": row.get("browser_profile_at_status") or "unknown",
+        "browser_profile_last_opened_at": to_iso(row.get("browser_profile_last_opened_at")) if row.get("browser_profile_last_opened_at") else None,
+        "browser_profile_last_sync_at": to_iso(row.get("browser_profile_last_sync_at")) if row.get("browser_profile_last_sync_at") else None,
+        "browser_profile_last_refresh_at": to_iso(row.get("browser_profile_last_refresh_at")) if row.get("browser_profile_last_refresh_at") else None,
+        "browser_profile_last_error": row.get("browser_profile_last_error"),
         "captcha_proxy_url": row.get("captcha_proxy_url") or "",
         "extension_route_key": row.get("extension_route_key") or "",
         "image_enabled": bool(row.get("image_enabled")),
@@ -1123,8 +1142,8 @@ async def add_token(
     try:
         add_kwargs: Dict[str, Any] = {
             "st": request.st,
-            "project_id": request.project_id,  # 🆕 支持用户指定project_id
-            "project_name": request.project_name,
+            "project_id": None,
+            "project_name": None,
             "remark": request.remark,
             "captcha_proxy_url": request.captcha_proxy_url.strip() if request.captcha_proxy_url is not None else None,
             "image_enabled": request.image_enabled,
@@ -1155,8 +1174,6 @@ async def add_token(
                 "id": new_token.id,
                 "email": new_token.email,
                 "credits": new_token.credits,
-                "project_id": new_token.current_project_id,
-                "project_name": new_token.current_project_name
             }
         }
     except ValueError as e:
@@ -1165,7 +1182,202 @@ async def add_token(
         raise HTTPException(status_code=500, detail=f"添加Token失败: {str(e)}")
 
 
+@router.post("/api/tokens/browser-profile")
+async def add_browser_profile_token(
+    request: BrowserProfileTokenRequest,
+    token: str = Depends(verify_admin_token),
+):
+    """Create a headed browser-profile account placeholder without a real ST yet."""
+    try:
+        service = await BrowserProfileService.get_instance(db=db, flow_client=token_manager.flow_client)
+        account = Token(
+            st=service.build_placeholder_st(),
+            at=None,
+            at_expires=None,
+            email=service.build_placeholder_email(),
+            name="Browser profile",
+            remark=request.remark,
+            is_active=False,
+            credits=0,
+            current_project_id=None,
+            current_project_name=None,
+            image_enabled=request.image_enabled,
+            video_enabled=request.video_enabled,
+            image_concurrency=request.image_concurrency,
+            video_concurrency=request.video_concurrency,
+            captcha_proxy_url=request.captcha_proxy_url.strip() if request.captcha_proxy_url else None,
+            auth_mode="browser_profile",
+            browser_profile_status="not_created",
+            browser_profile_login_state="unknown",
+            browser_profile_cookie_status="unknown",
+            browser_profile_st_status="missing",
+            browser_profile_at_status="missing",
+        )
+        token_id = await db.add_token(account)
+        await db.update_token(
+            token_id,
+            email=service.build_placeholder_email(token_id),
+            browser_profile_path=str(service.profile_path_for_token(token_id)),
+        )
+        if concurrency_manager:
+            await concurrency_manager.reset_token(
+                token_id,
+                image_concurrency=request.image_concurrency,
+                video_concurrency=request.video_concurrency,
+            )
+        return {
+            "success": True,
+            "message": "Browser profile account created",
+            "token": await service.status(token_id),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Create browser profile account failed: {str(e)}")
+
+
+@router.get("/api/tokens/{token_id}/browser-profile/status")
+async def browser_profile_status(
+    token_id: int,
+    token: str = Depends(verify_admin_token),
+):
+    try:
+        service = await BrowserProfileService.get_instance(db=db, flow_client=token_manager.flow_client)
+        return {"success": True, "profile": await service.status(token_id)}
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/tokens/{token_id}/browser-profile/open")
+async def open_browser_profile(
+    token_id: int,
+    token: str = Depends(verify_admin_token),
+):
+    try:
+        service = await BrowserProfileService.get_instance(db=db, flow_client=token_manager.flow_client)
+        return {"success": True, "profile": await service.open_profile(token_id)}
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/tokens/{token_id}/browser-profile/sync")
+async def sync_browser_profile(
+    token_id: int,
+    token: str = Depends(verify_admin_token),
+):
+    try:
+        service = await BrowserProfileService.get_instance(db=db, flow_client=token_manager.flow_client)
+        profile = await service.sync_profile(token_id)
+        if profile.get("profile_status") == "connected" and profile.get("st_status") == "ok":
+            await token_manager.enable_token(token_id)
+        return {"success": True, "profile": profile}
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/tokens/{token_id}/browser-profile/refresh")
+async def refresh_browser_profile(
+    token_id: int,
+    token: str = Depends(verify_admin_token),
+):
+    try:
+        service = await BrowserProfileService.get_instance(db=db, flow_client=token_manager.flow_client)
+        profile = await service.refresh_profile(token_id)
+        if profile.get("profile_status") == "connected" and profile.get("st_status") == "ok":
+            await token_manager.enable_token(token_id)
+        return {"success": True, "profile": profile}
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/tokens/{token_id}/browser-profile/reset")
+async def reset_browser_profile(
+    token_id: int,
+    token: str = Depends(verify_admin_token),
+):
+    try:
+        service = await BrowserProfileService.get_instance(db=db, flow_client=token_manager.flow_client)
+        return {"success": True, "profile": await service.reset_profile(token_id)}
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.put("/api/tokens/{token_id}")
+async def update_token_profile_aware(
+    token_id: int,
+    request: UpdateTokenRequest,
+    token: str = Depends(verify_admin_token)
+):
+    """Update token/account metadata; ST is optional for browser-profile accounts."""
+    try:
+        existing = await token_manager.get_token(token_id)
+        if not existing:
+            raise HTTPException(status_code=404, detail="Token not found")
+
+        from datetime import datetime
+        update_kwargs: Dict[str, Any] = {
+            "token_id": token_id,
+            "remark": request.remark,
+            "captcha_proxy_url": request.captcha_proxy_url.strip() if request.captcha_proxy_url is not None else None,
+            "image_enabled": request.image_enabled,
+            "video_enabled": request.video_enabled,
+            "image_concurrency": request.image_concurrency,
+            "video_concurrency": request.video_concurrency,
+        }
+
+        st_value = (request.st or "").strip()
+        if st_value:
+            result = await token_manager.flow_client.st_to_at(st_value)
+            expires = result.get("expires")
+            at_expires = None
+            if expires:
+                try:
+                    at_expires = datetime.fromisoformat(str(expires).replace("Z", "+00:00"))
+                except Exception:
+                    at_expires = None
+            update_kwargs.update({
+                "st": st_value,
+                "at": result["access_token"],
+                "at_expires": at_expires,
+            })
+
+        if _supports_kwarg(token_manager.update_token, "extension_route_key"):
+            update_kwargs["extension_route_key"] = (
+                request.extension_route_key.strip()
+                if request.extension_route_key is not None
+                else None
+            )
+        if _supports_kwarg(token_manager.update_token, "use_extension_for_generation"):
+            if request.use_extension_for_generation is not None:
+                update_kwargs["use_extension_for_generation"] = bool(request.use_extension_for_generation)
+
+        await token_manager.update_token(**update_kwargs)
+
+        if concurrency_manager:
+            updated_token = await token_manager.get_token(token_id)
+            if updated_token:
+                await concurrency_manager.reset_token(
+                    token_id,
+                    image_concurrency=updated_token.image_concurrency,
+                    video_concurrency=updated_token.video_concurrency,
+                )
+
+        return {"success": True, "message": "Token updated successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/api/tokens/{token_id}/legacy-update-disabled")
 async def update_token(
     token_id: int,
     request: UpdateTokenRequest,
@@ -1411,6 +1623,7 @@ async def list_token_projects(
     token: str = Depends(verify_admin_token)
 ):
     """List VideoFX projects stored for a token."""
+    raise HTTPException(status_code=410, detail="Project management has been removed")
     t = await token_manager.get_token(token_id)
     if not t:
         raise HTTPException(status_code=404, detail="Token not found")
@@ -1425,6 +1638,7 @@ async def create_token_project(
     token: str = Depends(verify_admin_token)
 ):
     """Create a new VideoFX project for an existing token."""
+    raise HTTPException(status_code=410, detail="Project management has been removed")
     t = await token_manager.get_token(token_id)
     if not t:
         raise HTTPException(status_code=404, detail="Token not found")
@@ -3127,6 +3341,7 @@ async def list_managed_api_key_projects(
     token: str = Depends(verify_admin_token),
 ):
     """Paginated VideoFX projects scoped to a managed API key + per-account current project cursors."""
+    raise HTTPException(status_code=410, detail="Project management has been removed")
     detail = await db.get_api_key_detail(key_id)
     if not detail:
         raise HTTPException(status_code=404, detail="Managed API key not found")
@@ -3206,6 +3421,7 @@ async def create_managed_api_key_project(
     token: str = Depends(verify_admin_token),
 ):
     """Create a VideoFX project for a token assigned to this managed key; tags projects.api_key_id."""
+    raise HTTPException(status_code=410, detail="Project management has been removed")
     detail = await db.get_api_key_detail(key_id)
     if not detail:
         raise HTTPException(status_code=404, detail="Managed API key not found")

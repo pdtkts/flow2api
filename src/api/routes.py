@@ -1333,8 +1333,6 @@ def _enrich_payload_with_direct_url(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _with_projectid(payload: Dict[str, Any], project_id: Optional[str]) -> Dict[str, Any]:
-    if project_id and not payload.get("projectid"):
-        payload["projectid"] = project_id
     return payload
 
 
@@ -1616,16 +1614,7 @@ def _inject_projectid_into_openai_sse_chunk(
     chunk: str,
     project_id: Optional[str],
 ) -> str:
-    if not project_id or not chunk.startswith("data: "):
-        return chunk
-    payload_text = chunk[6:].strip()
-    if payload_text == "[DONE]":
-        return chunk
-    payload = _parse_handler_result(payload_text)
-    if not isinstance(payload, dict):
-        return chunk
-    payload = _with_projectid(payload, project_id)
-    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+    return chunk
 
 
 async def _build_image_parts_from_uri(
@@ -1963,19 +1952,6 @@ async def _select_random_active_project_for_api_key(
         raise HTTPException(status_code=400, detail="No accounts assigned to this API key")
 
     handler = _ensure_generation_handler()
-    projects = await handler.db.list_projects_by_api_key(auth_ctx.key_id, limit=1000, offset=0)
-    projects_by_token: Dict[int, List[Project]] = {}
-    for project in projects:
-        token_id = int(project.token_id)
-        if not bool(project.is_active) or token_id not in auth_ctx.allowed_accounts:
-            continue
-        projects_by_token.setdefault(token_id, []).append(project)
-
-    if not projects_by_token:
-        raise HTTPException(
-            status_code=400,
-            detail="No active project found for this API key's allowed accounts",
-        )
 
     model_config = MODEL_CONFIG.get(model) or {}
     generation_type = model_config.get("type")
@@ -1986,7 +1962,7 @@ async def _select_random_active_project_for_api_key(
     token_candidates: List[Dict[str, Any]] = []
     for token in active_tokens:
         token_id = int(token.id)
-        if token_id not in projects_by_token:
+        if token_id not in auth_ctx.allowed_accounts:
             continue
         if for_image_generation and not token.image_enabled:
             continue
@@ -2012,7 +1988,7 @@ async def _select_random_active_project_for_api_key(
     if not token_candidates:
         raise HTTPException(
             status_code=400,
-            detail="No eligible token with active project is available for this model",
+            detail="No eligible assigned account is available for this model",
         )
 
     token_candidates.sort(
@@ -2024,8 +2000,7 @@ async def _select_random_active_project_for_api_key(
         )
     )
     selected_token_id = int(token_candidates[0]["token_id"])
-    selected_project = random.choice(projects_by_token[selected_token_id])
-    return ({selected_token_id}, selected_project.project_id)
+    return ({selected_token_id}, None)
 
 
 def _require_managed_projects_read(auth_ctx: AuthContext) -> None:
@@ -2075,6 +2050,7 @@ async def list_flow_projects(
     auth_ctx: AuthContext = Depends(verify_api_key_flexible),
 ):
     """List VideoFX projects visible to this managed API key (optional filter by account / token id)."""
+    raise HTTPException(status_code=410, detail="Project management APIs have been removed")
     if auth_ctx.key_id is None:
         raise HTTPException(status_code=403, detail="Managed API key required")
     _require_managed_projects_read(auth_ctx)
@@ -2111,6 +2087,7 @@ async def get_flow_project(
     auth_ctx: AuthContext = Depends(verify_api_key_flexible),
 ):
     """Return one VideoFX project row if it belongs to this managed API key."""
+    raise HTTPException(status_code=410, detail="Project management APIs have been removed")
     if auth_ctx.key_id is None:
         raise HTTPException(status_code=403, detail="Managed API key required")
     _require_managed_projects_read(auth_ctx)
@@ -2130,6 +2107,7 @@ async def create_flow_project(
     auth_ctx: AuthContext = Depends(verify_api_key_flexible),
 ):
     """Create VideoFX project(s) for managed key assigned account(s)."""
+    raise HTTPException(status_code=410, detail="Project management APIs have been removed")
     if auth_ctx.key_id is None:
         raise HTTPException(status_code=403, detail="Managed API key required")
     _require_managed_projects_write(auth_ctx)

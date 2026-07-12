@@ -265,33 +265,6 @@ class TokenManager:
             credits = 0
             user_paygate_tier = None
 
-        base_project_name = self._normalize_project_name_base(project_name)
-        project_pool_size = self._get_project_pool_size()
-        pooled_projects: List[Project] = []
-
-        if project_id:
-            first_project_name = self._build_project_name(1, base_project_name)
-            debug_logger.log_info(f"[ADD_TOKEN] Using provided project_id as pooled project #1: {project_id}")
-            pooled_projects.append(Project(
-                project_id=project_id,
-                token_id=0,
-                project_name=first_project_name,
-                tool_name="PINHOLE"
-            ))
-        else:
-            try:
-                first_project_name = self._build_project_name(1, base_project_name)
-                first_project_id = await self.flow_client.create_project(st, first_project_name)
-                debug_logger.log_info(f"[ADD_TOKEN] Created pooled project #1: {first_project_name} (ID: {first_project_id})")
-                pooled_projects.append(Project(
-                    project_id=first_project_id,
-                    token_id=0,
-                    project_name=first_project_name,
-                    tool_name="PINHOLE"
-                ))
-            except Exception as e:
-                raise ValueError(f"??????: {str(e)}")
-
         token = Token(
             st=st,
             at=at,
@@ -302,8 +275,8 @@ class TokenManager:
             is_active=True,
             credits=credits,
             user_paygate_tier=user_paygate_tier,
-            current_project_id=pooled_projects[0].project_id,
-            current_project_name=pooled_projects[0].project_name,
+            current_project_id=None,
+            current_project_name=None,
             image_enabled=image_enabled,
             video_enabled=video_enabled,
             image_concurrency=image_concurrency,
@@ -315,15 +288,8 @@ class TokenManager:
         token_id = await self.db.add_token(token)
         token.id = token_id
 
-        pooled_projects[0].token_id = token_id
-        pooled_projects[0].id = await self.db.add_project(pooled_projects[0])
-
-        while len(pooled_projects) < project_pool_size:
-            new_project = await self._create_project_for_token(token, len(pooled_projects) + 1, base_project_name)
-            pooled_projects.append(new_project)
-
         debug_logger.log_info(
-            f"[ADD_TOKEN] Token added successfully (ID: {token_id}, Email: {email}, pooled_projects={len(pooled_projects)})"
+            f"[ADD_TOKEN] Token added successfully (ID: {token_id}, Email: {email}, auth_mode=session_token)"
         )
         return token
     async def update_token(
@@ -670,6 +636,36 @@ class TokenManager:
         try:
             from ..core.config import config
             captcha_mode = str(config.captcha_method or "").strip()
+
+            if getattr(token, "auth_mode", "session_token") == "browser_profile":
+                try:
+                    from .browser_profile_service import BrowserProfileService
+
+                    profile_service = await BrowserProfileService.get_instance(
+                        db=self.db,
+                        flow_client=self.flow_client,
+                    )
+                    profile = await profile_service.refresh_profile(token_id)
+                    updated = await self.db.get_token(token_id)
+                    if (
+                        updated
+                        and updated.st
+                        and profile.get("profile_status") == "connected"
+                        and profile.get("st_status") == "ok"
+                    ):
+                        self._set_st_refresh_reason(token_id, "success_browser_profile")
+                        record_token_refresh("st", "success")
+                        return updated.st
+                    self._set_st_refresh_reason(token_id, "browser_profile_login_needed")
+                    record_token_refresh("st", "failure")
+                    return None
+                except Exception as profile_err:
+                    debug_logger.log_warning(
+                        f"[ST_REFRESH] Token {token_id}: browser profile ST refresh failed: {profile_err}"
+                    )
+                    self._set_st_refresh_reason(token_id, "browser_profile_error")
+                    record_token_refresh("st", "failure")
+                    return None
 
             if not token.current_project_id:
                 debug_logger.log_warning(f"[ST_REFRESH] Token {token_id} 没有 project_id，无法刷新 ST")
