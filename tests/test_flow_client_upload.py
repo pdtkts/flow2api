@@ -1,6 +1,8 @@
 import unittest
-from unittest.mock import AsyncMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
+from src.core.config import config
 from src.services.flow_client import FlowClient
 
 
@@ -127,6 +129,64 @@ class FlowClientUploadImageTests(unittest.IsolatedAsyncioTestCase):
             "projectId",
             request_calls[1]["json_data"]["clientContext"],
         )
+
+
+class FlowClientBrowserIdentityTests(unittest.IsolatedAsyncioTestCase):
+    async def test_real_browser_user_agent_uses_identity_api_and_cache(self):
+        client = FlowClient(proxy_manager=None)
+        client._get_personal_browser_identity = AsyncMock(
+            return_value=(None, "browser-runtime-ua")
+        )
+
+        self.assertEqual(await client._generate_real_browser_user_agent(), "browser-runtime-ua")
+        self.assertEqual(await client._generate_real_browser_user_agent(), "browser-runtime-ua")
+        client._get_personal_browser_identity.assert_awaited_once()
+
+    async def test_personal_request_reuses_complete_browser_fingerprint(self):
+        client = FlowClient(proxy_manager=None)
+        browser_fingerprint = {
+            "user_agent": "Mozilla/5.0 (X11; Linux x86_64) Chrome/124 Safari/537.36",
+            "accept_language": "en-US,en;q=0.9",
+            "sec_ch_ua": '"Chromium";v="124"',
+            "sec_ch_ua_mobile": "?0",
+            "sec_ch_ua_platform": '"Linux"',
+        }
+        client._get_personal_browser_identity = AsyncMock(
+            return_value=(browser_fingerprint, browser_fingerprint["user_agent"])
+        )
+
+        captured = {}
+        response = SimpleNamespace(status_code=200, headers={}, text="{}", json=lambda: {})
+        session = SimpleNamespace()
+
+        async def post(_url, **kwargs):
+            captured.update(kwargs)
+            return response
+
+        session.post = post
+
+        class FakeAsyncSession:
+            async def __aenter__(self):
+                return session
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return None
+
+        previous_method = config.captcha_method
+        try:
+            config.set_captcha_method("personal")
+            with patch("src.services.flow_client.AsyncSession", return_value=FakeAsyncSession()):
+                await client._make_request("POST", "https://example.test/api", json_data={})
+        finally:
+            config.set_captcha_method(previous_method)
+
+        headers = captured["headers"]
+        self.assertEqual(headers["User-Agent"], browser_fingerprint["user_agent"])
+        self.assertEqual(headers["Accept-Language"], browser_fingerprint["accept_language"])
+        self.assertEqual(headers["sec-ch-ua"], browser_fingerprint["sec_ch_ua"])
+        self.assertEqual(headers["sec-ch-ua-mobile"], "?0")
+        self.assertEqual(headers["sec-ch-ua-platform"], '"Linux"')
+        client._get_personal_browser_identity.assert_awaited_once()
 
 
 if __name__ == "__main__":

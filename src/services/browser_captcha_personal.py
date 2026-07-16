@@ -10969,6 +10969,23 @@ class BrowserCaptchaService:
             return None
         return dict(self._last_fingerprint)
 
+    async def get_current_user_agent(self) -> Optional[str]:
+        """Return the best available User-Agent for this browser runtime."""
+        fingerprint = self.get_last_fingerprint()
+        if isinstance(fingerprint, dict):
+            user_agent = str(fingerprint.get("user_agent") or "").strip()
+            if user_agent:
+                return user_agent
+
+        runtime_profile = self._get_runtime_surface_profile()
+        if isinstance(runtime_profile, dict):
+            user_agent = str(runtime_profile.get("userAgent") or "").strip()
+            if user_agent:
+                return user_agent
+
+        live_user_agent, _ = await self._get_live_browser_runtime_identity()
+        return str(live_user_agent or "").strip() or None
+
     async def _clear_browser_cache(self):
         """清理浏览器全部缓存"""
         if not self.browser:
@@ -13213,6 +13230,39 @@ class _PersonalBrowserPoolService:
             fingerprint = worker.get_last_fingerprint()
             if fingerprint:
                 return fingerprint
+        return None
+
+    async def get_current_user_agent(self) -> Optional[str]:
+        """Return a browser User-Agent, preferring the last successful worker."""
+        fingerprint = self.get_last_fingerprint()
+        if isinstance(fingerprint, dict):
+            user_agent = str(fingerprint.get("user_agent") or "").strip()
+            if user_agent:
+                return user_agent
+
+        candidate_indexes: list[int] = []
+        if (
+            self._last_successful_worker_index is not None
+            and 0 <= self._last_successful_worker_index < len(self._workers)
+        ):
+            candidate_indexes.append(self._last_successful_worker_index)
+        candidate_indexes.extend(
+            index for index in range(len(self._workers)) if index not in candidate_indexes
+        )
+
+        for worker_index in candidate_indexes:
+            worker = self._workers[worker_index]
+            try:
+                user_agent = await worker.get_current_user_agent()
+            except Exception as exc:
+                debug_logger.log_warning(
+                    f"[BrowserCaptchaPool] Failed to read User-Agent from worker "
+                    f"{worker_index + 1}: {exc}"
+                )
+                continue
+            normalized_user_agent = str(user_agent or "").strip()
+            if normalized_user_agent:
+                return normalized_user_agent
         return None
 
     async def get_custom_token(

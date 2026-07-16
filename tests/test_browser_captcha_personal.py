@@ -209,6 +209,44 @@ class BrowserCaptchaPersonalEnvironmentTests(unittest.TestCase):
             self.assertIn(marker, source)
 
 
+class BrowserCaptchaPersonalIdentityTests(unittest.IsolatedAsyncioTestCase):
+    async def test_single_browser_user_agent_priority(self):
+        service = BrowserCaptchaService(browser_instance_id=1, max_resident_tabs_override=5)
+        service._last_fingerprint = {"user_agent": " fingerprint-ua "}
+        service._runtime_surface_profile = {"userAgent": "profile-ua"}
+        service._get_live_browser_runtime_identity = AsyncMock(
+            return_value=("live-ua", "Chrome/124")
+        )
+
+        self.assertEqual(await service.get_current_user_agent(), "fingerprint-ua")
+        service._get_live_browser_runtime_identity.assert_not_awaited()
+
+        service._last_fingerprint = None
+        self.assertEqual(await service.get_current_user_agent(), "profile-ua")
+        service._get_live_browser_runtime_identity.assert_not_awaited()
+
+        service._runtime_surface_profile = {}
+        self.assertEqual(await service.get_current_user_agent(), "live-ua")
+        service._get_live_browser_runtime_identity.assert_awaited_once()
+
+    async def test_pool_prefers_last_successful_worker_and_recovers_from_failure(self):
+        first = types.SimpleNamespace(
+            get_last_fingerprint=lambda: None,
+            get_current_user_agent=AsyncMock(return_value="first-worker-ua"),
+        )
+        preferred = types.SimpleNamespace(
+            get_last_fingerprint=lambda: None,
+            get_current_user_agent=AsyncMock(side_effect=RuntimeError("worker unavailable")),
+        )
+        pool = _PersonalBrowserPoolService()
+        pool._workers = [first, preferred]
+        pool._last_successful_worker_index = 1
+
+        self.assertEqual(await pool.get_current_user_agent(), "first-worker-ua")
+        preferred.get_current_user_agent.assert_awaited_once()
+        first.get_current_user_agent.assert_awaited_once()
+
+
 class BrowserCaptchaPersonalPoolTests(unittest.IsolatedAsyncioTestCase):
     def test_pool_tab_limits_use_browser_count_times_per_worker_tabs(self):
         pool = _PersonalBrowserPoolService()

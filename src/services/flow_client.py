@@ -152,57 +152,50 @@ class FlowClient:
         # 发车策略改为“请求到就发”：
         # 不在 flow2api 本地对提交做批次整形或排队，避免把同批请求打成阶梯。
 
+    async def _get_personal_browser_identity(
+        self,
+    ) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
+        """Return the latest Personal browser fingerprint and User-Agent."""
+        try:
+            from .browser_captcha_personal import BrowserCaptchaService
+
+            service = await BrowserCaptchaService.get_instance(self.db)
+            if service is None:
+                return None, None
+
+            fingerprint: Optional[Dict[str, Any]] = None
+            fingerprint_getter = getattr(service, "get_last_fingerprint", None)
+            if callable(fingerprint_getter):
+                raw_fingerprint = fingerprint_getter()
+                if isinstance(raw_fingerprint, dict):
+                    fingerprint = dict(raw_fingerprint)
+
+            fingerprint_user_agent = None
+            if fingerprint is not None:
+                fingerprint_user_agent = str(fingerprint.get("user_agent") or "").strip() or None
+
+            current_user_agent = fingerprint_user_agent
+            if not current_user_agent:
+                user_agent_getter = getattr(service, "get_current_user_agent", None)
+                if callable(user_agent_getter):
+                    current_user_agent = str(await user_agent_getter() or "").strip() or None
+
+            return fingerprint, current_user_agent
+        except Exception as e:
+            debug_logger.log_warning(f"[FlowClient] Failed to get Personal captcha browser identity: {e}")
+            return None, None
+
     async def _generate_real_browser_user_agent(self) -> Optional[str]:
         """Return the latest Personal captcha browser User-Agent when available."""
         cached_user_agent = self._user_agent_cache.get("_real_ua")
         if isinstance(cached_user_agent, str) and cached_user_agent.strip():
             return cached_user_agent.strip()
 
-        try:
-            from .browser_captcha_personal import BrowserCaptchaService
-
-            service = await BrowserCaptchaService.get_instance(self.db)
-            if service is None:
-                return None
-
-            user_agent: Optional[str] = None
-            fingerprint_getter = getattr(service, "get_last_fingerprint", None)
-            if callable(fingerprint_getter):
-                fingerprint = fingerprint_getter()
-                if isinstance(fingerprint, dict):
-                    fingerprint_user_agent = fingerprint.get("user_agent")
-                    if isinstance(fingerprint_user_agent, str) and fingerprint_user_agent.strip():
-                        user_agent = fingerprint_user_agent.strip()
-
-            if not user_agent:
-                runtime_sources: List[Any] = []
-                if getattr(service, "browser", None) is not None:
-                    runtime_sources.append(service)
-
-                workers = list(getattr(service, "_workers", []) or [])
-                preferred_index = getattr(service, "_last_successful_worker_index", None)
-                if isinstance(preferred_index, int) and 0 <= preferred_index < len(workers):
-                    runtime_sources.append(workers[preferred_index])
-                runtime_sources.extend(worker for worker in workers if worker not in runtime_sources)
-
-                for runtime_source in runtime_sources:
-                    browser = getattr(runtime_source, "browser", None)
-                    identity_reader = getattr(runtime_source, "_get_live_browser_runtime_identity", None)
-                    if browser is None or getattr(browser, "stopped", False) or not callable(identity_reader):
-                        continue
-                    live_user_agent, _ = await identity_reader()
-                    if isinstance(live_user_agent, str) and live_user_agent.strip():
-                        user_agent = live_user_agent.strip()
-                        break
-
-            if user_agent:
-                self._user_agent_cache["_real_ua"] = user_agent
-                debug_logger.log_info("[FlowClient] Using User-Agent from Personal captcha browser runtime")
-                return user_agent
-        except Exception as e:
-            debug_logger.log_warning(f"[FlowClient] Failed to get Personal captcha browser User-Agent: {e}")
-
-        return None
+        _, user_agent = await self._get_personal_browser_identity()
+        if user_agent:
+            self._user_agent_cache["_real_ua"] = user_agent
+            debug_logger.log_info("[FlowClient] Using User-Agent from Personal captcha browser runtime")
+        return user_agent
 
     def _generate_user_agent(self, account_id: str = None) -> str:
         """基于账号ID生成固定的 User-Agent
@@ -414,7 +407,14 @@ class FlowClient:
             not fingerprint_user_agent
             and str(getattr(config, "captcha_method", "")).strip().lower() == "personal"
         ):
-            fingerprint_user_agent = await self._generate_real_browser_user_agent()
+            browser_fingerprint, browser_user_agent = await self._get_personal_browser_identity()
+            if not isinstance(fingerprint, dict) and isinstance(browser_fingerprint, dict):
+                fingerprint = browser_fingerprint
+            if isinstance(fingerprint, dict):
+                fingerprint_user_agent = str(fingerprint.get("user_agent") or "").strip() or None
+            fingerprint_user_agent = fingerprint_user_agent or browser_user_agent
+            if fingerprint_user_agent:
+                self._user_agent_cache["_real_ua"] = fingerprint_user_agent
 
         headers.update({
             "Content-Type": "application/json",
