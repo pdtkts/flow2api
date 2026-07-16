@@ -183,7 +183,10 @@ class FlowClientBrowserIdentityTests(unittest.IsolatedAsyncioTestCase):
         headers = captured["headers"]
         self.assertEqual(headers["User-Agent"], browser_fingerprint["user_agent"])
         self.assertEqual(headers["Accept-Language"], browser_fingerprint["accept_language"])
-        self.assertEqual(headers["sec-ch-ua"], browser_fingerprint["sec_ch_ua"])
+        self.assertEqual(
+            headers["sec-ch-ua"],
+            '"Google Chrome";v="124", "Chromium";v="124", "Not)A;Brand";v="24"',
+        )
         self.assertEqual(headers["sec-ch-ua-mobile"], "?0")
         self.assertEqual(headers["sec-ch-ua-platform"], '"Linux"')
         client._get_personal_browser_identity.assert_awaited_once()

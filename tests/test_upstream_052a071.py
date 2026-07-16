@@ -31,8 +31,8 @@ from src.services.token_manager import TokenManager
 
 
 class Upstream052ConfigTests(unittest.TestCase):
-    def test_s7_is_the_new_default(self):
-        self.assertEqual(DEFAULT_YESCAPTCHA_TASK_TYPE, "RecaptchaV3TaskProxylessM1S7")
+    def test_yescaptcha_default_reflects_latest_integrated_upstream(self):
+        self.assertEqual(DEFAULT_YESCAPTCHA_TASK_TYPE, "RecaptchaV3TaskProxylessM1S9")
 
     def test_browser_retry_settings_are_bounded(self):
         cfg = Config()
@@ -102,11 +102,12 @@ class BrowserEnvironmentPatchTests(unittest.TestCase):
         self.assertIn("class _CompatTransaction", patch_source)
         self.assertNotIn(".connection.send(", service_source)
 
-    def test_personal_capabilities_cookie_cache_and_forced_headless(self):
+    def test_personal_capabilities_cookie_cache_and_configurable_headless(self):
         browser_captcha_personal.set_cached_session_cookies({"SID": "secret"})
         self.assertEqual(browser_captcha_personal.get_cached_session_cookies(), {"SID": "secret"})
-        service = browser_captcha_personal.BrowserCaptchaService()
-        self.assertTrue(service.headless)
+        with patch.dict("os.environ", {"PERSONAL_BROWSER_HEADLESS": "true"}):
+            service = browser_captcha_personal.BrowserCaptchaService()
+            self.assertTrue(service.headless)
         tab = MagicMock()
         tab.target_id = "test-target"
         profile = service._build_tab_fingerprint_spoof_config(tab)

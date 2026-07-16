@@ -1410,6 +1410,7 @@ class TokenPoolLease:
     token_id: Optional[int]
     slot_id: Optional[str]
     worker_index: Optional[int]
+    solve_bundle: Optional[Dict[str, Any]]
     created_at: float
     expires_at: float
 
@@ -1455,7 +1456,7 @@ class BrowserCaptchaService:
         max_resident_tabs_override: Optional[int] = None,
     ):
         """初始化服务"""
-        self.headless = True
+        self.headless = bool(getattr(config, "personal_headless", False))
         self.browser = None
         self._initialized = False
         self.website_key = "6LdsFiUsAAAAAIjVDZcuLhaHiDn5nnHVXVRQGeMV"
@@ -2798,6 +2799,10 @@ class BrowserCaptchaService:
 
         normalized_user_agent = str(user_agent or "").strip() or None
         normalized_product = str(product or "").strip() or None
+        if normalized_user_agent:
+            normalized_user_agent = normalized_user_agent.replace("HeadlessChrome/", "Chrome/")
+        if normalized_product:
+            normalized_product = normalized_product.replace("HeadlessChrome/", "Chrome/")
         return normalized_user_agent, normalized_product
 
     def _get_runtime_surface_profile(self) -> Dict[str, Any]:
@@ -10254,6 +10259,16 @@ class BrowserCaptchaService:
                     const ua = navigator.userAgent || "";
                     const lang = navigator.language || "";
                     const languages = Array.isArray(navigator.languages) ? navigator.languages.slice() : [];
+                    const normalizedLanguages = languages
+                        .map((item) => String(item || "").trim().split(";")[0].trim())
+                        .filter(Boolean);
+                    const acceptLanguage = normalizedLanguages.length
+                        ? normalizedLanguages.slice(0, 3).map((item, index) => {
+                            if (index === 0) return item;
+                            const q = Math.max(0.1, 1 - (index * 0.1)).toFixed(1);
+                            return `${item};q=${q}`;
+                        }).join(",")
+                        : (lang || "");
                     const uaData = navigator.userAgentData || null;
                     let secChUa = "";
                     let secChUaMobile = "";
@@ -10273,7 +10288,7 @@ class BrowserCaptchaService:
 
                     return {
                         user_agent: ua,
-                        accept_language: lang,
+                        accept_language: acceptLanguage,
                         sec_ch_ua: secChUa,
                         sec_ch_ua_mobile: secChUaMobile,
                         sec_ch_ua_platform: secChUaPlatform,
@@ -10291,9 +10306,9 @@ class BrowserCaptchaService:
                         screen_avail_height: Number(screen.availHeight || 0),
                     };
                 }
-            """, label="extract_tab_fingerprint", timeout_seconds=8.0)
+            """, label="extract_tab_fingerprint", timeout_seconds=8.0, return_by_value=True)
             if not isinstance(fingerprint, dict):
-                return None
+                fingerprint = {}
 
             result: Dict[str, Any] = {"proxy_url": self._proxy_url}
             for key in (
@@ -10327,6 +10342,40 @@ class BrowserCaptchaService:
                 value = fingerprint.get(key)
                 if isinstance(value, (int, float)) and float(value) > 0:
                     result[key] = int(value) if float(value).is_integer() else float(value)
+            if not str(result.get("user_agent") or "").strip():
+                fallback_ua = await self._tab_evaluate(
+                    tab,
+                    "navigator.userAgent || ''",
+                    label="extract_tab_fingerprint:fallback_ua",
+                    timeout_seconds=3.0,
+                    return_by_value=True,
+                )
+                fallback_lang = await self._tab_evaluate(
+                    tab,
+                    """
+                    (() => {
+                        const lang = navigator.language || "";
+                        const languages = Array.isArray(navigator.languages)
+                            ? navigator.languages.slice(0, 3).map((item) => String(item || "").trim().split(";")[0].trim())
+                            : [];
+                        if (!languages.length) return lang;
+                        return languages.map((item, index) => {
+                            const value = String(item || "").trim();
+                            if (!value) return "";
+                            if (index === 0) return value;
+                            const q = Math.max(0.1, 1 - (index * 0.1)).toFixed(1);
+                            return `${value};q=${q}`;
+                        }).filter(Boolean).join(",");
+                    })()
+                    """,
+                    label="extract_tab_fingerprint:fallback_accept_language",
+                    timeout_seconds=3.0,
+                    return_by_value=True,
+                )
+                if isinstance(fallback_ua, str) and fallback_ua.strip():
+                    result["user_agent"] = fallback_ua.strip()
+                if isinstance(fallback_lang, str) and fallback_lang.strip():
+                    result["accept_language"] = fallback_lang.strip()
             return result
         except Exception as e:
             debug_logger.log_warning(f"[BrowserCaptcha] 提取 nodriver 指纹失败: {e}")
@@ -10349,6 +10398,43 @@ class BrowserCaptchaService:
         else:
             self._last_fingerprint = None
             self._last_fingerprint_at = 0.0
+
+    def _build_solve_bundle(
+        self,
+        *,
+        token: str,
+        project_id: str,
+        action: str,
+        token_id: Optional[int],
+        slot_id: Optional[str],
+        fingerprint: Optional[Dict[str, Any]] = None,
+        issued_at: Optional[float] = None,
+        expires_at: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        normalized_fingerprint = dict(fingerprint) if isinstance(fingerprint, dict) and fingerprint else None
+        proxy_url = str(((normalized_fingerprint or {}).get("proxy_url") or self._proxy_url or "")).strip()
+        if normalized_fingerprint is not None and proxy_url and not str(normalized_fingerprint.get("proxy_url") or "").strip():
+            normalized_fingerprint["proxy_url"] = proxy_url
+
+        session_cookies = get_cached_session_cookies()
+        issued_timestamp = float(issued_at or time.time())
+        expires_timestamp = float(
+            expires_at
+            or (issued_timestamp + float(getattr(config, "token_pool_ttl_seconds", 120) or 120))
+        )
+        return {
+            "token": token,
+            "project_id": project_id,
+            "action": action,
+            "token_id": token_id,
+            "slot_id": slot_id,
+            "worker_index": getattr(self, "_worker_index", None),
+            "fingerprint": normalized_fingerprint,
+            "proxy_url": proxy_url,
+            "session_cookies": dict(session_cookies) if session_cookies else None,
+            "issued_at": issued_timestamp,
+            "expires_at": expires_timestamp,
+        }
 
     async def _cache_session_cookies_for_computed(self, resident_info: ResidentTabInfo) -> None:
         """Cache Google-family cookies for computed captcha relay consumers."""
@@ -10409,10 +10495,8 @@ class BrowserCaptchaService:
         self._remember_project_affinity(project_id, slot_id, resident_info)
         self._resident_error_streaks.pop(slot_id, None)
         self._mark_browser_health(True)
-        if resident_info.fingerprint:
-            self._remember_fingerprint(resident_info.fingerprint)
-        else:
-            resident_info.fingerprint = await self._refresh_last_fingerprint(resident_info.tab)
+        resident_info.fingerprint = await self._refresh_last_fingerprint(resident_info.tab)
+        self._remember_fingerprint(resident_info.fingerprint)
         try:
             await self._cache_session_cookies_for_computed(resident_info)
         except Exception:
@@ -10862,6 +10946,29 @@ class BrowserCaptchaService:
         if not token:
             return None, None, None
         return token, slot_id, token_id
+
+    async def get_token_bundle(
+        self,
+        project_id: str,
+        action: str = "IMAGE_GENERATION",
+        token_id: Optional[int] = None,
+    ) -> Optional[Dict[str, Any]]:
+        token, slot_id = await self._get_token_direct(
+            project_id,
+            action=action,
+            token_id=token_id,
+            return_slot_id=True,
+        )
+        if not token:
+            return None
+        return self._build_solve_bundle(
+            token=token,
+            project_id=project_id,
+            action=action,
+            token_id=token_id,
+            slot_id=slot_id,
+            fingerprint=self.get_last_fingerprint(),
+        )
 
     async def _create_resident_tab(
         self,
@@ -12484,16 +12591,19 @@ class _PersonalBrowserPoolService:
         token_id = bucket_meta.get("token_id")
 
         try:
-            token, slot_id = await self._get_token_direct(
+            solve_bundle = await self._get_token_bundle_direct(
                 project_id,
                 action=action,
                 token_id=token_id,
-                return_slot_id=True,
                 allow_affinity=False,
                 remember_affinity=False,
             )
+            if not isinstance(solve_bundle, dict):
+                return
+            token = str(solve_bundle.get("token") or "").strip()
             if not token:
                 return
+            slot_id = str(solve_bundle.get("slot_id") or "").strip() or None
 
             created_at = time.time()
             lease = TokenPoolLease(
@@ -12504,6 +12614,7 @@ class _PersonalBrowserPoolService:
                 token_id=token_id,
                 slot_id=slot_id,
                 worker_index=self._parse_worker_index_from_slot_id(slot_id),
+                solve_bundle=dict(solve_bundle),
                 created_at=created_at,
                 expires_at=created_at + float(getattr(config, "token_pool_ttl_seconds", 120) or 120),
             )
@@ -13066,6 +13177,67 @@ class _PersonalBrowserPoolService:
 
         return (None, None) if return_slot_id else None
 
+    async def _get_token_bundle_direct(
+        self,
+        project_id: str,
+        action: str = "IMAGE_GENERATION",
+        token_id: Optional[int] = None,
+        *,
+        allow_affinity: bool = True,
+        remember_affinity: bool = True,
+    ) -> Optional[Dict[str, Any]]:
+        await self._ensure_workers()
+        if not self._workers:
+            return None
+
+        excluded_indexes: set[int] = set()
+        max_attempts = min(len(self._workers), 3)
+        for _ in range(max_attempts):
+            worker_index = None
+            worker = None
+            try:
+                worker_index, worker = await self._acquire_worker(
+                    project_id=project_id,
+                    token_id=token_id,
+                    excluded_indexes=excluded_indexes,
+                    ensure_workers=False,
+                    allow_affinity=allow_affinity,
+                )
+                excluded_indexes.add(worker_index)
+                solve_bundle = await worker.get_token_bundle(
+                    project_id,
+                    action=action,
+                    token_id=token_id,
+                )
+            except Exception as e:
+                worker_label = worker_index + 1 if worker_index is not None else "unknown"
+                debug_logger.log_warning(
+                    f"[BrowserCaptchaPool] 浏览器实例打码(bundle)失败，尝试切换其他实例 (worker={worker_label}): {e}"
+                )
+                if BrowserCaptchaService._is_memory_pressure_browser_launch_error(e):
+                    await self._reclaim_pool_memory_pressure(
+                        reason=f"direct_token_bundle:{project_id or '<empty>'}",
+                        exclude_indexes=excluded_indexes,
+                    )
+                continue
+            finally:
+                await self._release_worker_reservation(worker_index)
+
+            if not isinstance(solve_bundle, dict) or not str(solve_bundle.get("token") or "").strip():
+                continue
+
+            slot_id = str(solve_bundle.get("slot_id") or "").strip() or None
+            self._last_successful_worker_index = worker_index
+            if remember_affinity:
+                self._remember_affinity(
+                    project_id=project_id,
+                    token_id=token_id,
+                    slot_id=slot_id,
+                    worker_index=worker_index,
+                )
+            return solve_bundle
+        return None
+
     async def get_token(
         self,
         project_id: str,
@@ -13140,6 +13312,77 @@ class _PersonalBrowserPoolService:
             worker_index=lease.worker_index,
         )
         return lease.token, lease.slot_id, lease.token_id
+
+    async def get_token_bundle(
+        self,
+        project_id: str,
+        action: str = "IMAGE_GENERATION",
+        token_id: Optional[int] = None,
+    ) -> Optional[Dict[str, Any]]:
+        if not self._is_token_pool_enabled():
+            return await self._get_token_bundle_direct(
+                project_id,
+                action=action,
+                token_id=token_id,
+            )
+
+        target_size = self._get_token_pool_bucket_target_size(
+            project_id=project_id,
+            action=action,
+        )
+        if target_size <= 0:
+            return await self._get_token_bundle_direct(
+                project_id,
+                action=action,
+                token_id=token_id,
+            )
+
+        bucket_key = self._build_token_pool_bucket_key(
+            project_id=project_id,
+            action=action,
+            token_id=token_id,
+        )
+        lease = await self._wait_for_token_pool_token(
+            bucket_key=bucket_key,
+            project_id=project_id,
+            action=action,
+            token_id=token_id,
+        )
+        if lease is None:
+            bucket_snapshot = self._summarize_token_pool_bucket(bucket_key, now_value=time.time())
+            raise TokenPoolTimeoutError(
+                "token 池等待超时且未命中可用 token "
+                f"(action_bucket={bucket_snapshot['action']}, project_id={project_id or '<empty>'}, "
+                f"token_id={token_id}, action={action}, ready={bucket_snapshot['ready_count']}, "
+                f"waiting={bucket_snapshot['waiting_requests']}, inflight={bucket_snapshot['refill_inflight']})"
+            )
+
+        if lease.worker_index is not None:
+            self._last_successful_worker_index = lease.worker_index
+        self._remember_affinity(
+            project_id=project_id,
+            token_id=token_id if lease.token_id == token_id else None,
+            slot_id=lease.slot_id,
+            worker_index=lease.worker_index,
+        )
+        if isinstance(lease.solve_bundle, dict) and lease.solve_bundle:
+            return dict(lease.solve_bundle)
+
+        worker_fingerprint = self.get_last_fingerprint()
+        proxy_url = str((worker_fingerprint or {}).get("proxy_url") or "").strip()
+        return {
+            "token": lease.token,
+            "project_id": lease.project_id,
+            "action": lease.action,
+            "token_id": lease.token_id,
+            "slot_id": lease.slot_id,
+            "worker_index": lease.worker_index,
+            "fingerprint": dict(worker_fingerprint) if isinstance(worker_fingerprint, dict) and worker_fingerprint else None,
+            "proxy_url": proxy_url,
+            "session_cookies": None,
+            "issued_at": lease.created_at,
+            "expires_at": lease.expires_at,
+        }
 
     async def report_flow_error(
         self,

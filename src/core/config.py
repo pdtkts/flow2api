@@ -4,7 +4,7 @@ import tomli
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 
-DEFAULT_YESCAPTCHA_TASK_TYPE = "RecaptchaV3TaskProxylessM1S7"
+DEFAULT_YESCAPTCHA_TASK_TYPE = "RecaptchaV3TaskProxylessM1S9"
 YESCAPTCHA_TASK_TYPE_OPTIONS = {
     "RecaptchaV3TaskProxyless": None,
     "RecaptchaV3TaskProxylessM1": None,
@@ -1097,6 +1097,14 @@ class Config:
             return max(60, int(value))
         except Exception:
             return 600
+
+    @property
+    def personal_headless(self) -> bool:
+        """Whether the built-in Personal browser should run headless."""
+        env_value = os.getenv("PERSONAL_BROWSER_HEADLESS")
+        if env_value is not None:
+            return str(env_value).strip().lower() in {"1", "true", "yes", "on"}
+        return bool(self._config.get("captcha", {}).get("personal_headless", False))
 
     def set_personal_max_resident_tabs(self, value: int):
         """设置内置浏览器打码单实例共享标签页上限"""

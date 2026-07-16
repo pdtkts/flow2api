@@ -1563,7 +1563,13 @@ class GenerationHandler:
                 error_msg = generation_result.get("error_message") or "生成未成功完成"
                 debug_logger.log_warning(f"[GENERATION] 生成未成功，不扣次数: {error_msg}")
                 if token:
-                    await self.token_manager.record_error(token.id)
+                    error = Exception(error_msg)
+                    if self._should_count_token_error(error):
+                        await self.token_manager.record_error(token.id)
+                    else:
+                        debug_logger.log_info(
+                            f"[GENERATION] 跳过 token 错误计数: token_id={token.id}, reason={error_msg[:200]}"
+                        )
                 duration = time.time() - start_time
                 record_generation_result(generation_type, "failed", duration)
                 perf_trace["status"] = "failed"
@@ -1676,8 +1682,12 @@ class GenerationHandler:
             error_msg = f"生成失败: {str(e)}"
             debug_logger.log_error(f"[GENERATION] ❌ {error_msg}")
             if token:
-                # 记录错误（所有错误统一处理，不再特殊处理429）
-                await self.token_manager.record_error(token.id)
+                if self._should_count_token_error(e):
+                    await self.token_manager.record_error(token.id)
+                else:
+                    debug_logger.log_info(
+                        f"[GENERATION] 跳过 token 错误计数: token_id={token.id}, reason={str(e)[:200]}"
+                    )
 
             # 先将最终失败状态落库，再返回错误响应，避免日志停在 102。
             duration = time.time() - start_time
@@ -1712,6 +1722,33 @@ class GenerationHandler:
                 )
                 pending_token_state["active"] = False
 
+
+    def _should_count_token_error(self, error: Exception) -> bool:
+        """Return whether a failure should count against the account token."""
+        error_text = str(error or "").strip().lower()
+        if not error_text:
+            return True
+
+        non_token_fault_markers = (
+            "failed to obtain recaptcha token",
+            "recaptcha evaluation failed",
+            "recaptcha 验证失败",
+            "recaptcha 错误",
+            "public_error_unusual_activity",
+            "too much traffic",
+            "error_no_slot_available",
+            "打码服务资源不足",
+            "打码服务资源阻塞",
+            "yescaptcha",
+            "capsolver",
+            "capmonster",
+            "ezcaptcha",
+        )
+        if any(marker in error_text for marker in non_token_fault_markers):
+            return False
+        if "没有可用的token进行" in error_text:
+            return False
+        return True
 
     def _get_no_token_error_message(self, generation_type: str) -> str:
         """获取无可用Token时的详细错误信息"""
