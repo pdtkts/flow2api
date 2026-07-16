@@ -1504,6 +1504,24 @@ class FlowClient:
             timeout=self._get_control_plane_timeout(),
         )
 
+    async def get_media(self, at: str, media_name: str) -> Dict[str, Any]:
+        """Fetch a generated media resource, including base64 video fallback data."""
+        normalized_at = str(at or "").strip()
+        normalized_media_name = str(media_name or "").strip()
+        if not normalized_at:
+            raise ValueError("get_media: AT token is required")
+        if not normalized_media_name:
+            raise ValueError("get_media: media_name is required")
+
+        return await self._make_request(
+            method="GET",
+            url=f"{self.api_base_url}/media/{quote(normalized_media_name, safe='')}",
+            headers=self._build_labs_request_context_headers(None),
+            use_at=True,
+            at_token=normalized_at,
+            timeout=max(60, int(self.timeout or 120)),
+        )
+
     # ========== 余额查询 (使用AT) ==========
 
     async def get_credits(self, at: str) -> dict:

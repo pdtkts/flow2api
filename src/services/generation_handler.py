@@ -1034,7 +1034,15 @@ class GenerationHandler:
             generation_result["error_status_code"] = 200
             generation_result["error_extra"] = {}
 
-    async def _resolve_video_asset(self, token: Token, operation: Dict[str, Any]) -> Dict[str, Any]:
+    async def _resolve_video_asset(
+        self,
+        token: Token,
+        operation: Dict[str, Any],
+        *,
+        api_key_id: Optional[int] = None,
+        project_id: Optional[str] = None,
+        response_state: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         operation_body = operation.get("operation") if isinstance(operation.get("operation"), dict) else {}
         metadata = operation_body.get("metadata") if isinstance(operation_body.get("metadata"), dict) else {}
         video_info = metadata.get("video") if isinstance(metadata.get("video"), dict) else {}
@@ -1051,11 +1059,46 @@ class GenerationHandler:
             or operation.get("videoUrl")
             or ""
         )
+        media_fetch_error = None
+        video_is_cached = False
         if media_name and getattr(token, "st", None):
             try:
                 video_url = await self.flow_client.get_media_url_redirect(token.st, str(media_name)) or video_url
             except Exception as exc:
                 debug_logger.log_warning(f"[VIDEO] media redirect resolution failed: {type(exc).__name__}")
+        if not video_url and media_name and getattr(token, "at", None):
+            try:
+                media_result = await self.flow_client.get_media(token.at, str(media_name))
+                media_video = media_result.get("video") if isinstance(media_result, dict) else None
+                encoded_video = (
+                    media_video.get("encodedVideo")
+                    if isinstance(media_video, dict)
+                    else None
+                ) or (media_result.get("encodedVideo") if isinstance(media_result, dict) else None)
+                if encoded_video:
+                    cached_filename = await self.file_cache.cache_base64_video(
+                        str(encoded_video),
+                        api_key_id=api_key_id,
+                        token_id=getattr(token, "id", None),
+                        flow_project_id=project_id,
+                        source_media_name=str(media_name),
+                    )
+                    video_url = self._build_cache_url(
+                        cached_filename,
+                        response_state,
+                        flow_project_id=project_id,
+                    )
+                    video_info["fifeUrl"] = video_url
+                    video_is_cached = True
+                    debug_logger.log_info(
+                        f"[VIDEO] fetched encoded video through get_media and cached: {cached_filename}"
+                    )
+                else:
+                    media_fetch_error = "get_media returned empty encodedVideo"
+                    debug_logger.log_warning(f"[VIDEO] {media_fetch_error}")
+            except Exception as exc:
+                media_fetch_error = self._normalize_error_message(exc, max_length=240)
+                debug_logger.log_warning(f"[VIDEO] get_media fallback failed: {media_fetch_error}")
         uuid_match = re.search(r"/video/([0-9a-f-]{36})", video_url or "")
         return {
             "media_name": media_name,
@@ -1065,6 +1108,8 @@ class GenerationHandler:
             "model": video_info.get("model"),
             "video_info": video_info,
             "metadata": metadata,
+            "video_is_cached": video_is_cached,
+            "media_fetch_error": media_fetch_error,
         }
 
     def _normalize_error_message(self, error_message: Any, max_length: int = 1000) -> str:
@@ -2567,12 +2612,19 @@ class GenerationHandler:
 
                 # 检查状态
                 if status == "MEDIA_GENERATION_STATUS_SUCCESSFUL":
-                    resolved_video = await self._resolve_video_asset(token, operation)
+                    resolved_video = await self._resolve_video_asset(
+                        token,
+                        operation,
+                        api_key_id=api_key_id,
+                        project_id=project_id,
+                        response_state=response_state,
+                    )
                     metadata = resolved_video["metadata"]
                     video_info = resolved_video["video_info"]
                     source_video_url = resolved_video["video_url"]
                     video_media_id = resolved_video["video_media_id"]
                     aspect_ratio = resolved_video["aspect_ratio"]
+                    video_is_cached = bool(resolved_video.get("video_is_cached"))
 
                     if not source_video_url and not video_media_id:
                         error_msg = "视频生成失败: 视频URL为空"
@@ -2679,6 +2731,7 @@ class GenerationHandler:
                                         host = "localhost" if (config.server_host or "") == "0.0.0.0" else (config.server_host or "localhost")
                                         concat_url = f"http://{host}:{config.server_port}{concat_url}"
                                     source_video_url = concat_url
+                                    video_is_cached = False
                         except Exception as e:
                             debug_logger.log_error(f"[CONCAT] 拼接失败: {str(e)}")
 
@@ -2691,24 +2744,33 @@ class GenerationHandler:
                                 token_id=token.id,
                             )
                         except Exception as resolve_error:
+                            media_fetch_error = str(resolved_video.get("media_fetch_error") or "").strip()
                             error_msg = (
                                 "Video generated successfully, but resolving the download URL failed: "
                                 f"{self._normalize_error_message(resolve_error, max_length=240)}"
                             )
+                            if media_fetch_error:
+                                error_msg += f"; get_media fallback: {media_fetch_error}"
                             debug_logger.log_error(f"[VIDEO] media redirect resolve failed: {resolve_error}")
                             await self._fail_video_task(checked_operations, error_msg)
                             self._mark_generation_failed(
                                 generation_result,
                                 error_msg,
                                 status_code=502,
-                                error_extra={"video_cache_status": "resolve_failed"},
+                                error_extra={
+                                    "video_cache_status": "resolve_failed",
+                                    "get_media_error": media_fetch_error or None,
+                                },
                             )
                             if stream:
                                 yield self._create_stream_chunk(f"Error: {error_msg}\n")
                             yield self._create_error_response(
                                 error_msg,
                                 status_code=502,
-                                extra_fields={"video_cache_status": "resolve_failed"},
+                                extra_fields={
+                                    "video_cache_status": "resolve_failed",
+                                    "get_media_error": media_fetch_error or None,
+                                },
                             )
                             return
 
@@ -2720,7 +2782,11 @@ class GenerationHandler:
                             or "Signature=" in source_video_url
                         )
                     )
-                    if not config.cache_enabled:
+                    if video_is_cached:
+                        local_url = source_video_url
+                        if stream:
+                            yield self._create_stream_chunk("Video fetched and cached successfully...\n")
+                    elif not config.cache_enabled:
                         if not source_video_is_safe:
                             error_msg = (
                                 "Video generated successfully, but file cache is disabled "

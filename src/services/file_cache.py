@@ -978,6 +978,56 @@ class FileCache:
                 raise python_download_error
             raise Exception("Video cache download failed before receiving media")
 
+    async def cache_base64_video(
+        self,
+        base64_data: str,
+        *,
+        api_key_id: Optional[int] = None,
+        token_id: Optional[int] = None,
+        flow_project_id: Optional[str] = None,
+        source_media_name: Optional[str] = None,
+    ) -> str:
+        """Decode, validate, and atomically cache a base64-encoded video."""
+        import base64
+        import uuid
+
+        raw_value = str(base64_data or "").strip()
+        if raw_value.startswith("data:"):
+            if "," not in raw_value:
+                raise ValueError("Base64 video data URL is malformed")
+            raw_value = raw_value.split(",", 1)[1]
+        compact_value = "".join(raw_value.split())
+        if not compact_value:
+            raise ValueError("Base64 video payload is empty")
+
+        project_id = str(flow_project_id or "").strip()
+        unique_id = hashlib.md5(
+            f"{api_key_id or 0}:{project_id}:{uuid.uuid4()}:{time.time()}".encode()
+        ).hexdigest()
+        filename = f"{unique_id}.mp4"
+        file_path = self.cache_dir / filename
+        try:
+            video_data = base64.b64decode(compact_value, validate=True)
+            return await self._store_download_response(
+                filename=filename,
+                file_path=file_path,
+                content=video_data,
+                content_type="video/mp4",
+                media_type="video",
+                api_key_id=api_key_id,
+                token_id=token_id,
+                flow_project_id=project_id,
+                source_url=(
+                    f"flow-media:{str(source_media_name).strip()}"
+                    if str(source_media_name or "").strip()
+                    else "flow-media:encoded-video"
+                ),
+                method_name="Flow get_media base64",
+            )
+        except Exception as exc:
+            self._safe_unlink(file_path)
+            raise Exception(f"Failed to cache base64 video: {self._normalize_cache_error(exc)}") from exc
+
     async def cache_base64_image(
         self,
         base64_data: str,
