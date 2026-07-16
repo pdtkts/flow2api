@@ -1,3 +1,5 @@
+import itertools
+import json
 import types
 import unittest
 from unittest.mock import AsyncMock, patch
@@ -6,6 +8,9 @@ from src.services.browser_captcha_personal import (
     BrowserCaptchaService,
     PERSONAL_POOL_MAX_TOTAL_RESIDENT_TABS,
     _PersonalBrowserPoolService,
+    _is_nodriver_connection_closed,
+    _is_runtime_disconnect_error,
+    _patch_nodriver_connection_instance,
 )
 
 
@@ -65,6 +70,115 @@ class _FakeWorker:
         if self._warmup_error is not None:
             raise self._warmup_error
         return [f"{self.name}:{project_id}" for project_id in project_ids[:limit]]
+
+
+class _FakeWebSocket:
+    def __init__(self, owner, *, close_code=None):
+        self.owner = owner
+        self.close_code = close_code
+        self.messages = []
+
+    async def send(self, message):
+        self.messages.append(message)
+        payload = json.loads(message)
+        transaction = self.owner.mapper[payload["id"]]
+        transaction(result={"ok": True})
+
+
+class _ConnectionWithoutClosed:
+    def __init__(self):
+        self.mapper = {}
+        self.handlers = {}
+        self.websocket = None
+        self.connect_count = 0
+        self.register_count = 0
+        self.__count__ = itertools.count(0)
+
+    async def send(self, _cdp_obj, _is_update=False):
+        raise AssertionError("original send should be patched")
+
+    async def connect(self):
+        self.connect_count += 1
+        self.websocket = _FakeWebSocket(self)
+
+    async def _register_handlers(self):
+        self.register_count += 1
+
+
+class _ConnectionWithoutWebSocket(_ConnectionWithoutClosed):
+    async def connect(self):
+        self.connect_count += 1
+
+
+class _ConnectionWithBrokenClosedProperty(_ConnectionWithoutClosed):
+    @property
+    def closed(self):
+        raise RuntimeError("connection state unavailable")
+
+
+def _fake_cdp_command():
+    result = yield {"method": "Runtime.evaluate", "params": {}}
+    return result
+
+
+class NodriverConnectionCompatibilityTests(unittest.IsolatedAsyncioTestCase):
+    async def test_send_patch_handles_connection_without_closed_attribute(self):
+        connection = _ConnectionWithoutClosed()
+
+        _patch_nodriver_connection_instance(connection)
+        result = await connection.send(_fake_cdp_command())
+
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(connection.connect_count, 1)
+        self.assertEqual(connection.register_count, 1)
+        self.assertTrue(getattr(connection, "_flow2api_send_patched", False))
+
+    async def test_missing_websocket_after_connect_cleans_mapper(self):
+        connection = _ConnectionWithoutWebSocket()
+
+        _patch_nodriver_connection_instance(connection)
+        with self.assertRaisesRegex(ConnectionError, "websocket unavailable"):
+            await connection.send(_fake_cdp_command())
+
+        self.assertEqual(connection.connect_count, 1)
+        self.assertEqual(connection.mapper, {})
+
+    def test_connection_state_falls_back_to_websocket(self):
+        connection = _ConnectionWithoutClosed()
+        self.assertTrue(_is_nodriver_connection_closed(connection))
+
+        connection.websocket = _FakeWebSocket(connection)
+        self.assertFalse(_is_nodriver_connection_closed(connection))
+
+        connection.websocket.close_code = 1000
+        self.assertTrue(_is_nodriver_connection_closed(connection))
+        self.assertTrue(
+            _is_nodriver_connection_closed(_ConnectionWithBrokenClosedProperty())
+        )
+
+    def test_invalid_connection_object_is_not_patched(self):
+        connection = types.SimpleNamespace(send=lambda *_args, **_kwargs: None)
+
+        _patch_nodriver_connection_instance(connection)
+
+        self.assertFalse(getattr(connection, "_flow2api_send_patched", False))
+
+    def test_compatibility_errors_are_runtime_disconnects(self):
+        self.assertTrue(
+            _is_runtime_disconnect_error(
+                AttributeError("connection has no attribute 'closed'")
+            )
+        )
+        self.assertTrue(
+            _is_runtime_disconnect_error(
+                AttributeError("'NoneType' object has no attribute 'send'")
+            )
+        )
+        self.assertTrue(
+            _is_runtime_disconnect_error(
+                ConnectionError("nodriver websocket unavailable after connect")
+            )
+        )
 
 
 class BrowserCaptchaPersonalEnvironmentTests(unittest.TestCase):
