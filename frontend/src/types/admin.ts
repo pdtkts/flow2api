@@ -54,8 +54,11 @@ export interface TokenRow {
   /** When false, Flow generation uses server HTTP; extension still used for captcha if method is extension. */
   use_extension_for_generation?: boolean | number | null
   protocol_mode?: "session" | "protocol" | string
+  google_cookies?: string
   has_google_cookies?: boolean
   login_account?: string
+  login_password?: string
+  proxy_url?: string
   protocol_proxy_configured?: boolean
   auto_refresh_enabled?: boolean
   refresh_interval_minutes?: number

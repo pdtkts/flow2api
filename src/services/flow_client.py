@@ -100,6 +100,8 @@ _flow_extension_upstream_req_id: contextvars.ContextVar[Optional[str]] = context
 class FlowClient:
     """VideoFX API客户端"""
 
+    FLOW_PUBLIC_API_KEY = "AIzaSyBtrm0o5ab1c-Ec8ZuLcGt3oJAA5VWt3pY"
+
     def __init__(self, proxy_manager, db=None):
         self.proxy_manager = proxy_manager
         self.db = db  # Database instance for captcha config
@@ -248,6 +250,38 @@ class FlowClient:
         """清理请求链路绑定的浏览器指纹。"""
         self._set_request_fingerprint(None)
 
+    def _get_primary_accept_language(self, fallback: str = "en-US") -> str:
+        fingerprint = self.get_request_fingerprint()
+        value = str((fingerprint or {}).get("accept_language") or "").strip()
+        return value or fallback
+
+    def _get_effective_request_user_agent(self, account_id: Optional[str] = None) -> str:
+        fingerprint = self.get_request_fingerprint()
+        value = str((fingerprint or {}).get("user_agent") or "").strip()
+        return value or self._generate_user_agent(account_id)
+
+    @staticmethod
+    def _build_flow_project_page_url(project_id: str) -> str:
+        return f"https://labs.google/fx/tools/flow/project/{project_id}"
+
+    @staticmethod
+    def _compact_json_dumps(payload: Any) -> str:
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+    def _encode_trpc_input(self, payload: Dict[str, Any]) -> str:
+        return quote(self._compact_json_dumps(payload), safe="")
+
+    async def _get_token_st_by_id(self, token_id: Optional[int]) -> Optional[str]:
+        if not token_id or self.db is None or not hasattr(self.db, "get_token"):
+            return None
+        token = await self.db.get_token(int(token_id))
+        value = str(getattr(token, "st", "") or "").strip() if token else ""
+        return value or None
+
+    @staticmethod
+    def _resolve_runtime_impersonate() -> str:
+        return "chrome124"
+
     def _set_remote_fallback_attempt(self, attempt_index: int) -> None:
         self._remote_fallback_attempt_ctx.set(int(attempt_index))
 
@@ -334,6 +368,7 @@ class FlowClient:
         url: str,
         headers: Optional[Dict] = None,
         json_data: Optional[Dict] = None,
+        raw_body: Optional[Union[str, bytes]] = None,
         use_st: bool = False,
         st_token: Optional[str] = None,
         use_at: bool = False,
@@ -343,6 +378,8 @@ class FlowClient:
         respect_fingerprint_proxy: bool = True,
         force_no_proxy: bool = False,
         allow_urllib_fallback: bool = True,
+        apply_default_client_headers: bool = True,
+        impersonate: str = "chrome124",
         token_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         """统一HTTP请求处理
@@ -417,15 +454,20 @@ class FlowClient:
             if fingerprint_user_agent:
                 self._user_agent_cache["_real_ua"] = fingerprint_user_agent
 
-        headers.update({
-            "Content-Type": "application/json",
-            "User-Agent": fingerprint_user_agent or self._generate_user_agent(account_id)
-        })
+        headers.setdefault("Content-Type", "application/json")
+        headers.setdefault("User-Agent", fingerprint_user_agent or self._generate_user_agent(account_id))
+        fingerprint_accept_language = ""
+        if isinstance(fingerprint, dict):
+            fingerprint_accept_language = str(fingerprint.get("accept_language") or "").strip()
+        headers.setdefault(
+            "Accept-Language",
+            fingerprint_accept_language or self._get_primary_accept_language(),
+        )
 
         # 若存在打码浏览器指纹，覆盖关键客户端提示头，保证提交请求与打码时一致。
         if isinstance(fingerprint, dict):
             if fingerprint.get("accept_language"):
-                headers.setdefault("Accept-Language", fingerprint["accept_language"])
+                headers["Accept-Language"] = fingerprint["accept_language"]
             if fingerprint.get("sec_ch_ua"):
                 headers["sec-ch-ua"] = fingerprint["sec_ch_ua"]
             if fingerprint.get("sec_ch_ua_mobile"):
@@ -434,8 +476,9 @@ class FlowClient:
                 headers["sec-ch-ua-platform"] = fingerprint["sec_ch_ua_platform"]
 
         # Add default Chromium/Android client headers (do not override explicitly provided values).
-        for key, value in self._default_client_headers.items():
-            headers.setdefault(key, value)
+        if apply_default_client_headers:
+            for key, value in self._default_client_headers.items():
+                headers.setdefault(key, value)
 
         # Dynamic fix for sec-ch-ua headers when fingerprint is missing to avoid UA/Platform mismatch
         if not isinstance(fingerprint, dict) or not fingerprint.get("sec_ch_ua_platform"):
@@ -472,13 +515,13 @@ class FlowClient:
                 method=method,
                 url=url,
                 headers=headers,
-                body=json_data,
+                body=raw_body if raw_body is not None else json_data,
                 proxy=proxy_url
             )
 
         start_time = time.time()
 
-        if self._should_submit_generation_via_extension(method, url, json_data):
+        if raw_body is None and self._should_submit_generation_via_extension(method, url, json_data):
             managed_api_key_id = self.get_managed_api_key_id()
             routing_token_id = token_id if token_id is not None else self.get_active_generation_token_id()
             if await self._token_allows_extension_generation(routing_token_id):
@@ -509,17 +552,20 @@ class FlowClient:
                         headers=headers,
                         proxy=proxy_url,
                         timeout=request_timeout,
-                        impersonate="chrome124"
+                        impersonate=impersonate
                     )
                 else:  # POST
-                    response = await session.post(
-                        url,
-                        headers=headers,
-                        json=json_data,
-                        proxy=proxy_url,
-                        timeout=request_timeout,
-                        impersonate="chrome124"
-                    )
+                    request_kwargs = {
+                        "headers": headers,
+                        "proxy": proxy_url,
+                        "timeout": request_timeout,
+                        "impersonate": impersonate,
+                    }
+                    if raw_body is not None:
+                        request_kwargs["data"] = raw_body
+                    else:
+                        request_kwargs["json"] = json_data
+                    response = await session.post(url, **request_kwargs)
 
                 duration_ms = (time.time() - start_time) * 1000
 
@@ -555,7 +601,7 @@ class FlowClient:
                     
                     # 失败时输出请求体和错误内容到控制台
                     debug_logger.log_error(f"[API FAILED] URL: {url}")
-                    debug_logger.log_error(f"[API FAILED] Request Body: {json_data}")
+                    debug_logger.log_error(f"[API FAILED] Request Body: {raw_body if raw_body is not None else json_data}")
                     debug_logger.log_error(f"[API FAILED] Response: {response.text}")
                     
                     self._log_recaptcha_verdict_from_response(
@@ -600,7 +646,7 @@ class FlowClient:
             # 如果不是我们自己抛出的异常，记录日志
             if "HTTP Error" not in error_msg and not any(x in error_msg for x in ["PUBLIC_ERROR", "INVALID_ARGUMENT"]):
                 debug_logger.log_error(f"[API FAILED] URL: {url}")
-                debug_logger.log_error(f"[API FAILED] Request Body: {json_data}")
+                debug_logger.log_error(f"[API FAILED] Request Body: {raw_body if raw_body is not None else json_data}")
                 debug_logger.log_error(f"[API FAILED] Exception: {error_msg}")
 
             http2_transport_error = self._is_http2_transport_error(error_msg)
@@ -643,6 +689,67 @@ class FlowClient:
                     )
 
             raise Exception(f"Flow API request failed: {error_msg}")
+
+    async def _make_text_request(
+        self,
+        method: str,
+        url: str,
+        headers: Optional[Dict] = None,
+        json_data: Optional[Dict] = None,
+        raw_body: Optional[Union[str, bytes]] = None,
+        use_st: bool = False,
+        st_token: Optional[str] = None,
+        use_at: bool = False,
+        at_token: Optional[str] = None,
+        timeout: Optional[int] = None,
+        respect_fingerprint_proxy: bool = True,
+        force_no_proxy: bool = False,
+        apply_default_client_headers: bool = True,
+        impersonate: str = "chrome124",
+    ) -> str:
+        """Execute a request whose response is text, including SSE streams."""
+        fingerprint = self.get_request_fingerprint()
+        proxy_url = None
+        if not force_no_proxy and self.proxy_manager:
+            getter = getattr(self.proxy_manager, "get_request_proxy_url", None)
+            if not callable(getter):
+                getter = getattr(self.proxy_manager, "get_proxy_url", None)
+            if callable(getter):
+                proxy_url = await getter()
+        if respect_fingerprint_proxy and isinstance(fingerprint, dict) and "proxy_url" in fingerprint:
+            proxy_url = fingerprint.get("proxy_url") or None
+
+        request_headers = dict(headers or {})
+        if use_st and st_token:
+            request_headers["Cookie"] = f"__Secure-next-auth.session-token={st_token}"
+        if use_at and at_token:
+            request_headers["authorization"] = f"Bearer {at_token}"
+        account_id = (st_token or at_token or "")[:16] or None
+        request_headers.setdefault("Content-Type", "application/json")
+        request_headers.setdefault("User-Agent", self._get_effective_request_user_agent(account_id))
+        request_headers.setdefault("Accept-Language", self._get_primary_accept_language())
+        if apply_default_client_headers:
+            for key, value in self._default_client_headers.items():
+                request_headers.setdefault(key, value)
+
+        async with AsyncSession(trust_env=False) as session:
+            request_kwargs = {
+                "headers": request_headers,
+                "proxy": proxy_url,
+                "timeout": timeout or self.timeout,
+                "impersonate": impersonate,
+            }
+            if method.upper() == "GET":
+                response = await session.get(url, **request_kwargs)
+            else:
+                if raw_body is not None:
+                    request_kwargs["data"] = raw_body
+                else:
+                    request_kwargs["json"] = json_data
+                response = await session.post(url, **request_kwargs)
+        if response.status_code >= 400:
+            raise RuntimeError(f"HTTP Error {response.status_code}: {(response.text or '')[:500]}")
+        return response.text or ""
 
     def _is_generation_request_with_recaptcha(self, url: str, json_data: Optional[Dict[str, Any]]) -> bool:
         """Best-effort detection for generation requests carrying recaptchaContext token."""
@@ -3535,6 +3642,499 @@ class FlowClient:
 
     # ========== 辅助方法 ==========
 
+    def _build_browser_style_control_headers(
+        self,
+        referer: str,
+        origin: Optional[str] = None,
+        account_id: Optional[str] = None,
+        content_type: Optional[str] = None,
+        accept_language: Optional[str] = None,
+        api_key: Optional[str] = None,
+    ) -> Dict[str, str]:
+        headers = {
+            "Accept": "*/*",
+            "Referer": referer,
+            "User-Agent": self._get_effective_request_user_agent(account_id),
+            "Accept-Language": accept_language or self._get_primary_accept_language(),
+            "sec-fetch-dest": "empty",
+            "sec-fetch-mode": "cors",
+            "sec-fetch-site": "cross-site",
+        }
+        if origin:
+            headers["Origin"] = origin
+        if content_type:
+            headers["Content-Type"] = content_type
+        if api_key:
+            headers["x-goog-api-key"] = api_key
+        return headers
+
+    async def _labs_trpc_get_with_st(
+        self,
+        path_with_query: str,
+        st: str,
+        project_id: str,
+        timeout: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        return await self._make_request(
+            "GET",
+            f"{self.labs_base_url}/trpc/{path_with_query}",
+            headers=self._build_browser_style_control_headers(
+                self._build_flow_project_page_url(project_id),
+                account_id=st[:16],
+                content_type="application/json",
+            ),
+            use_st=True,
+            st_token=st,
+            timeout=timeout or self._get_control_plane_timeout(),
+            apply_default_client_headers=False,
+            allow_urllib_fallback=False,
+            impersonate=self._resolve_runtime_impersonate(),
+        )
+
+    async def _labs_trpc_post_with_st(
+        self,
+        trpc_path: str,
+        payload: Dict[str, Any],
+        st: str,
+        project_id: str,
+        timeout: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        return await self._make_request(
+            "POST",
+            f"{self.labs_base_url}/trpc/{trpc_path}",
+            headers=self._build_browser_style_control_headers(
+                self._build_flow_project_page_url(project_id),
+                origin="https://labs.google",
+                account_id=st[:16],
+                content_type="application/json",
+            ),
+            json_data=payload,
+            use_st=True,
+            st_token=st,
+            timeout=timeout or self._get_control_plane_timeout(),
+            apply_default_client_headers=False,
+            allow_urllib_fallback=False,
+            impersonate=self._resolve_runtime_impersonate(),
+        )
+
+    async def _aisandbox_request(
+        self,
+        method: str,
+        path: str,
+        at: Optional[str],
+        *,
+        json_data: Optional[Dict[str, Any]] = None,
+        raw_body: Optional[Union[str, bytes]] = None,
+        content_type: Optional[str] = "text/plain;charset=UTF-8",
+        accept_language: Optional[str] = None,
+        api_key: Optional[str] = None,
+        timeout: Optional[int] = None,
+        account_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        return await self._make_request(
+            method,
+            f"{self.api_base_url}{path}",
+            headers=self._build_browser_style_control_headers(
+                "https://labs.google/",
+                origin="https://labs.google",
+                account_id=account_id,
+                content_type=content_type,
+                accept_language=accept_language,
+                api_key=api_key,
+            ),
+            json_data=json_data,
+            raw_body=raw_body,
+            use_at=bool(at),
+            at_token=at,
+            timeout=timeout or self._get_control_plane_timeout(),
+            apply_default_client_headers=False,
+            allow_urllib_fallback=False,
+            impersonate=self._resolve_runtime_impersonate(),
+        )
+
+    async def _warmup_flow_video_frontend_context(
+        self,
+        *,
+        at: str,
+        project_id: str,
+        token_id: Optional[int],
+        session_id: str,
+        user_paygate_tier: str,
+        prompt: str,
+        model_key: str,
+        aspect_ratio: str,
+    ) -> None:
+        page_url = self._build_flow_project_page_url(project_id)
+        session_create_time = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())
+        st = await self._get_token_st_by_id(token_id)
+        if st:
+            null_input = self._encode_trpc_input({"json": None, "meta": {"values": ["undefined"]}})
+            paths = (
+                f"flow.projectInitialData?input={self._encode_trpc_input({'json': {'projectId': project_id}})}",
+                f"general.fetchUserPreferences?input={null_input}",
+                f"videoFx.getFlowAppConfig?input={null_input}",
+                f"videoFx.getUserSettings?input={null_input}",
+            )
+            for path in paths:
+                try:
+                    await self._labs_trpc_get_with_st(path, st, project_id)
+                except Exception as exc:
+                    debug_logger.log_warning(f"[VIDEO WARMUP] Labs initialization failed ({path}): {exc}")
+            batch_log_payload = {
+                "json": {
+                    "appEvents": [
+                        {
+                            "event": "PAGE_VIEW",
+                            "eventProperties": [
+                                {"key": "URL", "stringValue": page_url},
+                                {
+                                    "key": "USER_AGENT",
+                                    "stringValue": self._get_effective_request_user_agent(st[:16]),
+                                },
+                                {"key": "IS_DESKTOP"},
+                            ],
+                            "activeExperiments": [],
+                            "eventMetadata": {"sessionId": session_id},
+                            "eventTime": session_create_time,
+                        }
+                    ]
+                }
+            }
+            try:
+                await self._labs_trpc_post_with_st(
+                    "general.submitBatchLog",
+                    batch_log_payload,
+                    st,
+                    project_id,
+                )
+            except Exception as exc:
+                debug_logger.log_warning(f"[VIDEO WARMUP] Labs submitBatchLog failed: {exc}")
+        try:
+            await self._aisandbox_request(
+                "POST",
+                ":checkAppAvailability",
+                at=None,
+                raw_body=self._compact_json_dumps({"clientContext": {"tool": "PINHOLE"}}),
+                api_key=self.FLOW_PUBLIC_API_KEY,
+                account_id=at[:16] if at else None,
+            )
+        except Exception as exc:
+            debug_logger.log_warning(f"[VIDEO WARMUP] checkAppAvailability failed: {exc}")
+
+    @staticmethod
+    def _video_aspect_ratio_to_agent_aspect_ratio(aspect_ratio: str) -> str:
+        return {
+            "VIDEO_ASPECT_RATIO_LANDSCAPE": "16:9",
+            "VIDEO_ASPECT_RATIO_PORTRAIT": "9:16",
+            "VIDEO_ASPECT_RATIO_SQUARE": "1:1",
+        }.get(str(aspect_ratio or "").strip(), "16:9")
+
+    @staticmethod
+    def _parse_sse_json_events(raw_text: str) -> List[Dict[str, Any]]:
+        events = []
+        for block in str(raw_text or "").split("\n\n"):
+            lines = [line[5:].strip() for line in block.splitlines() if line.startswith("data:")]
+            payload_text = "\n".join(lines).strip()
+            if not payload_text or payload_text == "[DONE]":
+                continue
+            try:
+                payload = json.loads(payload_text)
+            except Exception:
+                continue
+            if isinstance(payload, dict):
+                events.append(payload)
+        return events
+
+    @staticmethod
+    def _extract_agent_session_id(payload: Dict[str, Any]) -> Optional[str]:
+        for session in payload.get("sessions", []) if isinstance(payload, dict) else []:
+            if isinstance(session, dict) and session.get("agentSessionId"):
+                return str(session["agentSessionId"])
+        info = payload.get("sessionInfo") if isinstance(payload, dict) else None
+        return str(info.get("agentSessionId")) if isinstance(info, dict) and info.get("agentSessionId") else None
+
+    @staticmethod
+    def _extract_flow_entity_id(payload: Dict[str, Any]) -> Optional[str]:
+        candidates = [payload]
+        result = payload.get("result") if isinstance(payload, dict) else None
+        if isinstance(result, dict):
+            candidates.append(result)
+            data = result.get("data")
+            if isinstance(data, dict):
+                candidates.append(data)
+                node = data.get("json")
+                if isinstance(node, dict):
+                    candidates.extend([node, node.get("result")])
+        for candidate in candidates:
+            if isinstance(candidate, dict):
+                for key in ("entityId", "id", "parentEntityId"):
+                    if candidate.get(key):
+                        return str(candidate[key])
+        return None
+
+    @staticmethod
+    def _extract_turn_count(payload: Dict[str, Any]) -> int:
+        turns = payload.get("turns") if isinstance(payload, dict) else None
+        return len(turns) if isinstance(turns, list) else 0
+
+    @staticmethod
+    def _extract_generate_video_with_references_result(events: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        for event in events:
+            message = event.get("agentMessage") if isinstance(event, dict) else None
+            for agent_event in message.get("agentEvents", []) if isinstance(message, dict) else []:
+                wrapper = agent_event.get("toolResult") if isinstance(agent_event, dict) else None
+                if isinstance(wrapper, dict) and wrapper.get("toolName") == "generate_video_with_references":
+                    result = wrapper.get("toolResult")
+                    if isinstance(result, dict):
+                        return result
+        return None
+
+    async def get_flow_creation_agent_session(
+        self,
+        at: str,
+        project_id: str,
+        *,
+        account_id: Optional[str] = None,
+        allow_global_fallback: bool = True,
+    ) -> Optional[str]:
+        payload = await self._aisandbox_request(
+            "GET",
+            f"/flowCreationAgent/sessions?projectId={quote(project_id, safe='')}",
+            at,
+            content_type=None,
+            account_id=account_id,
+        )
+        session_id = self._extract_agent_session_id(payload)
+        if session_id or not allow_global_fallback:
+            return session_id
+        payload = await self._aisandbox_request("GET", "/flowCreationAgent/sessions", at, content_type=None, account_id=account_id)
+        return self._extract_agent_session_id(payload)
+
+    async def get_flow_creation_agent_session_detail(
+        self,
+        at: str,
+        agent_session_id: str,
+        *,
+        account_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        return await self._aisandbox_request(
+            "GET",
+            f"/flowCreationAgent/sessions/{quote(agent_session_id, safe='')}",
+            at,
+            content_type=None,
+            account_id=account_id,
+        )
+
+    async def create_flow_entity(self, st: str, project_id: str) -> str:
+        payload = await self._labs_trpc_post_with_st("flow.createEntity", {"json": {"projectId": project_id}}, st, project_id)
+        entity_id = self._extract_flow_entity_id(payload)
+        if not entity_id:
+            raise RuntimeError("flow.createEntity response did not include entityId")
+        return entity_id
+
+    async def copy_project_media_to_character_slot(
+        self,
+        at: str,
+        *,
+        project_id: str,
+        media_id: str,
+        entity_id: str,
+        image_reference_index: int,
+        account_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        payload = {
+            "mediaId": media_id,
+            "destinationProjectId": project_id,
+            "destinationMediaContext": {"entityContext": {"entityId": entity_id, "characterSlot": {"imageReferenceIndex": int(image_reference_index)}}},
+        }
+        return await self._aisandbox_request(
+            "POST", "/flow:copyProjectMedia", at,
+            raw_body=self._compact_json_dumps(payload), account_id=account_id,
+        )
+
+    async def stream_flow_creation_agent(
+        self,
+        at: str,
+        payload: Dict[str, Any],
+        *,
+        project_id: Optional[str] = None,
+        token_id: Optional[int] = None,
+        action: str = "VIDEO_GENERATION",
+        account_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        url = f"{self.api_base_url}/flowCreationAgent:streamChat?alt=sse"
+        headers = self._build_browser_style_control_headers(
+            "https://labs.google/", origin="https://labs.google", account_id=account_id,
+            content_type="application/json", accept_language=self._get_primary_accept_language(),
+        )
+        headers["Accept"] = "text/event-stream, text/event-stream"
+        raw_text = ""
+        if config.captcha_method == "browser" and project_id:
+            from .browser_captcha import BrowserCaptchaService
+            service = await BrowserCaptchaService.get_instance(self.db)
+            submit = getattr(service, "submit_flow_request", None)
+            if callable(submit):
+                response, _browser_ref, fingerprint = await submit(
+                    project_id=project_id, action=action, token_id=token_id,
+                    url=url, at_token=at, json_data=payload, timeout=self._get_video_submit_timeout(),
+                )
+                self._set_request_fingerprint(fingerprint or None)
+                if int(response.get("status") or 0) >= 400:
+                    raise RuntimeError(f"HTTP Error {response.get('status')}: {str(response.get('text') or '')[:500]}")
+                raw_text = str(response.get("text") or "")
+        if not raw_text:
+            raw_text = await self._make_text_request(
+                "POST", url, headers=headers, json_data=payload, use_at=True, at_token=at,
+                timeout=self._get_video_submit_timeout(), apply_default_client_headers=False,
+                impersonate=self._resolve_runtime_impersonate(),
+            )
+        return self._parse_sse_json_events(raw_text)
+
+    async def generate_omni_reference_video(
+        self,
+        at: str,
+        st: str,
+        project_id: str,
+        prompt: str,
+        aspect_ratio: str,
+        reference_media_ids: List[str],
+        model_usage_key: str = "abra_r2v_8s",
+        model_display_name: str = "Omni Flash",
+        duration: int = 8,
+        user_paygate_tier: str = "PAYGATE_TIER_ONE",
+        token_id: Optional[int] = None,
+        token_video_concurrency: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Generate Omni reference video through Flow Creation Agent."""
+        if not st:
+            raise RuntimeError("Omni reference video requires an ST token")
+        if not reference_media_ids:
+            raise RuntimeError("Omni reference video requires at least one reference image")
+
+        max_retries = self._resolve_generation_retry_budget(config.flow_max_retries)
+        retry_attempt = 0
+        last_error: Optional[Exception] = None
+        client_session_id = self._generate_session_id()
+        entity_id: Optional[str] = None
+        frontend_warmed = False
+        account_id = at[:16] if at else None
+        agent_ratio = self._video_aspect_ratio_to_agent_aspect_ratio(aspect_ratio)
+        agent_prompt = f"{prompt}\n\nUse a {agent_ratio} aspect ratio." if prompt else f"Use a {agent_ratio} aspect ratio."
+
+        while retry_attempt < max_retries:
+            browser_id = None
+            approval_browser_id = None
+            launch_ok, _, _ = await self._acquire_video_launch_gate(
+                token_id=token_id,
+                token_video_concurrency=token_video_concurrency,
+            )
+            if not launch_ok:
+                raise RuntimeError("Video launch queue wait timeout")
+            try:
+                recaptcha_token, browser_id = await self._get_recaptcha_token(
+                    project_id, action="VIDEO_GENERATION", token_id=token_id,
+                )
+            finally:
+                await self._release_video_launch_gate(token_id)
+
+            if not recaptcha_token:
+                last_error = RuntimeError("Failed to obtain reCAPTCHA token")
+                if await self._handle_missing_recaptcha_token(
+                    retry_attempt, max_retries, browser_id, project_id, "[VIDEO OMNI-R2V]",
+                ):
+                    retry_attempt += 1
+                    continue
+                raise last_error
+
+            try:
+                if not entity_id:
+                    entity_id = await self.create_flow_entity(st, project_id)
+                    for index, media_id in enumerate(reference_media_ids):
+                        await self.copy_project_media_to_character_slot(
+                            at, project_id=project_id, media_id=media_id, entity_id=entity_id,
+                            image_reference_index=index, account_id=account_id,
+                        )
+
+                if not frontend_warmed:
+                    await self._warmup_flow_video_frontend_context(
+                        at=at, project_id=project_id, token_id=token_id,
+                        session_id=client_session_id, user_paygate_tier=user_paygate_tier,
+                        prompt=agent_prompt, model_key=model_usage_key, aspect_ratio=aspect_ratio,
+                    )
+                    frontend_warmed = True
+
+                agent_session_id = await self.get_flow_creation_agent_session(
+                    at, project_id, account_id=account_id, allow_global_fallback=True,
+                )
+                if not agent_session_id:
+                    raise RuntimeError("Flow Creation Agent session was not found")
+                detail = await self.get_flow_creation_agent_session_detail(
+                    at, agent_session_id, account_id=account_id,
+                )
+                turn_number = self._extract_turn_count(detail) + 1
+
+                def build_payload(text: str, captcha: str, turn: int, include_entity: bool) -> Dict[str, Any]:
+                    message: Dict[str, Any] = {"userPrompt": {"parts": [{"text": text}]}}
+                    if include_entity:
+                        message["entityReferences"] = [{"entityId": entity_id, "handle": "entity-0"}]
+                    return {
+                        "agentSessionId": agent_session_id,
+                        "agentClientContext": {
+                            "projectId": f"projects/{project_id}",
+                            "clientSessionId": client_session_id,
+                            "recaptchaContext": {"token": captcha, "applicationType": "RECAPTCHA_APPLICATION_TYPE_WEB"},
+                            "turnNumber": turn,
+                        },
+                        "userMessage": message,
+                    }
+
+                events = await self.stream_flow_creation_agent(
+                    at, build_payload(agent_prompt, recaptcha_token, turn_number, True),
+                    project_id=project_id, token_id=token_id, account_id=account_id,
+                )
+                tool_result = self._extract_generate_video_with_references_result(events)
+                if not tool_result:
+                    approval_token, approval_browser_id = await self._get_recaptcha_token(
+                        project_id, action="VIDEO_GENERATION", token_id=token_id,
+                    )
+                    if not approval_token:
+                        raise RuntimeError("Omni approval could not obtain a reCAPTCHA token")
+                    events = await self.stream_flow_creation_agent(
+                        at, build_payload("Approve", approval_token, turn_number + 1, False),
+                        project_id=project_id, token_id=token_id, account_id=account_id,
+                    )
+                    tool_result = self._extract_generate_video_with_references_result(events)
+                if not tool_result or not str(tool_result.get("media_id") or "").strip():
+                    raise RuntimeError("Creation Agent did not return generate_video_with_references media_id")
+
+                media_id = str(tool_result["media_id"]).strip()
+                resolved_project_id = str(tool_result.get("project_id") or project_id)
+                operation = {
+                    "operation": {"name": media_id}, "name": media_id, "mediaName": media_id,
+                    "projectId": resolved_project_id, "workflowId": tool_result.get("workflow_id"),
+                    "batchId": tool_result.get("batch_id"), "status": "MEDIA_GENERATION_STATUS_ACTIVE",
+                }
+                return {
+                    "operations": [operation], "agentToolResult": tool_result,
+                    "projectId": resolved_project_id, "entityId": entity_id, "entityHandle": "entity-0",
+                    "modelUsageKey": model_usage_key, "aspectRatio": tool_result.get("aspect_ratio") or aspect_ratio,
+                    "duration": duration, "modelDisplayName": model_display_name,
+                }
+            except Exception as exc:
+                last_error = exc
+                if await self._handle_retryable_generation_error(
+                    exc, retry_attempt, max_retries, browser_id, project_id,
+                    "[VIDEO OMNI-R2V]", defer_browser_error_notification=True,
+                ):
+                    max_retries = self._resolve_generation_retry_budget(max_retries, exc)
+                    retry_attempt += 1
+                    continue
+                raise
+            finally:
+                await self._notify_browser_captcha_request_finished(browser_id)
+                await self._notify_browser_captcha_request_finished(approval_browser_id)
+        raise last_error or RuntimeError("Omni reference generation failed")
+
     def _resolve_generation_retry_budget(
         self,
         base_max_retries: int,
@@ -3558,18 +4158,20 @@ class FlowClient:
         browser_id: Optional[Union[int, str]],
         project_id: str,
         log_prefix: str,
+        defer_browser_error_notification: bool = False,
     ) -> bool:
         """统一处理生成链路的重试判定与打码自愈通知。"""
         error_str = str(error)
         error_lower = error_str.lower()
         retry_reason = self._get_retry_reason(error_str)
         notify_reason = retry_reason or error_str[:120] or type(error).__name__
-        await self._notify_browser_captcha_error(
-            browser_id=browser_id,
-            project_id=project_id,
-            error_reason=notify_reason,
-            error_message=error_str,
-        )
+        if not defer_browser_error_notification:
+            await self._notify_browser_captcha_error(
+                browser_id=browser_id,
+                project_id=project_id,
+                error_reason=notify_reason,
+                error_message=error_str,
+            )
         if not retry_reason:
             return False
 

@@ -5,7 +5,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from src.api.admin import AddTokenRequest, BrowserProfileTokenRequest
+from fastapi import HTTPException
+from src.api import admin
+from src.api.admin import AddTokenRequest, BrowserProfileTokenRequest, ImportTokenItem
 from src.core.browser_runtime_status import (
     finish_runtime_prepare,
     get_runtime_status,
@@ -18,6 +20,7 @@ from src.core.model_resolver import VIDEO_BASE_MODELS, resolve_model_name
 from src.core.models import Token, TokenRefreshConfig
 from src.services import browser_captcha_personal
 from src.services.browser_captcha import TokenBrowser
+from src.services.flow_client import FlowClient
 from src.services.generation_handler import MODEL_CONFIG
 from src.services.protocol_login import (
     _validate_redirect,
@@ -57,6 +60,7 @@ class Upstream052ConfigTests(unittest.TestCase):
         self.assertEqual(request.protocol_mode, "protocol")
         self.assertEqual(request.refresh_interval_minutes, 45)
         self.assertNotIn("protocol_mode", BrowserProfileTokenRequest.model_fields)
+        self.assertIn("login_password", ImportTokenItem.model_fields)
 
 
 class BrowserRuntimeStatusTests(unittest.TestCase):
@@ -98,6 +102,79 @@ class BrowserEnvironmentPatchTests(unittest.TestCase):
         self.assertIn("class _CompatTransaction", patch_source)
         self.assertNotIn(".connection.send(", service_source)
 
+    def test_personal_capabilities_cookie_cache_and_forced_headless(self):
+        browser_captcha_personal.set_cached_session_cookies({"SID": "secret"})
+        self.assertEqual(browser_captcha_personal.get_cached_session_cookies(), {"SID": "secret"})
+        service = browser_captcha_personal.BrowserCaptchaService()
+        self.assertTrue(service.headless)
+        tab = MagicMock()
+        tab.target_id = "test-target"
+        profile = service._build_tab_fingerprint_spoof_config(tab)
+        self.assertIn("bluetoothAvailable", profile["capability"])
+        source = service._build_tab_fingerprint_spoof_source(tab)
+        for marker in ("navigator.bluetooth", "navigator.usb", "navigator.serial", "navigator.hid", "mediaCapabilities", "speechSynthesis", "wakeLock", "openDatabase"):
+            self.assertIn(marker, source)
+
+
+class CreationAgentTests(unittest.IsolatedAsyncioTestCase):
+    async def test_creation_agent_helpers_parse_sse_and_entity_ids(self):
+        client = FlowClient(MagicMock())
+        events = client._parse_sse_json_events(
+            'data: {"agentMessage":{"agentEvents":[{"toolResult":{"toolName":"generate_video_with_references","toolResult":{"media_id":"media-1"}}}]}}\n\n'
+        )
+        self.assertEqual(client._extract_generate_video_with_references_result(events)["media_id"], "media-1")
+        client._labs_trpc_post_with_st = AsyncMock(return_value={"result": {"data": {"json": {"entityId": "entity-1"}}}})
+        self.assertEqual(await client.create_flow_entity("st", "project-1"), "entity-1")
+        self.assertTrue(callable(client.generate_omni_reference_video))
+
+    async def test_video_warmup_submits_page_view_telemetry(self):
+        client = FlowClient(MagicMock())
+        client._get_token_st_by_id = AsyncMock(return_value="session-token")
+        client._labs_trpc_get_with_st = AsyncMock(return_value={})
+        client._labs_trpc_post_with_st = AsyncMock(return_value={})
+        client._aisandbox_request = AsyncMock(return_value={})
+
+        await client._warmup_flow_video_frontend_context(
+            at="access-token",
+            project_id="project-1",
+            token_id=1,
+            session_id="client-session",
+            user_paygate_tier="PAYGATE_TIER_ONE",
+            prompt="prompt",
+            model_key="abra_r2v_10s",
+            aspect_ratio="VIDEO_ASPECT_RATIO_LANDSCAPE",
+        )
+
+        args = client._labs_trpc_post_with_st.await_args.args
+        self.assertEqual(args[0], "general.submitBatchLog")
+        event = args[1]["json"]["appEvents"][0]
+        self.assertEqual(event["event"], "PAGE_VIEW")
+        self.assertEqual(event["eventMetadata"]["sessionId"], "client-session")
+
+
+class PluginSyncTests(unittest.IsolatedAsyncioTestCase):
+    async def test_plugin_check_tokens_uses_connection_token_and_filters_email(self):
+        fake_db = MagicMock()
+        fake_db.get_plugin_config = AsyncMock(return_value=MagicMock(connection_token="connection-secret"))
+        fake_db.get_all_tokens_with_stats = AsyncMock(return_value=[{
+            "id": 1,
+            "st": "st",
+            "email": "person@example.com",
+            "is_active": True,
+            "protocol_mode": "protocol",
+            "refresh_interval_minutes": 120,
+        }])
+        fake_manager = MagicMock()
+        fake_manager.needs_at_refresh.return_value = False
+        with patch.object(admin, "db", fake_db), patch.object(admin, "token_manager", fake_manager):
+            result = await admin.plugin_check_tokens(
+                {"emails": ["PERSON@example.com"]},
+                authorization="Bearer connection-secret",
+            )
+            self.assertEqual(result["tokens"][0]["email"], "person@example.com")
+            with self.assertRaises(HTTPException):
+                await admin._verify_plugin_connection_token("Bearer wrong")
+
 
 class ProtocolLoginUtilityTests(unittest.TestCase):
     def test_cookie_exports_and_cookie_headers_are_parsed(self):
@@ -137,6 +214,7 @@ class ProtocolRefreshDatabaseTests(unittest.IsolatedAsyncioTestCase):
                 protocol_mode="protocol",
                 google_cookies="SID=secret",
                 login_account="person@example.com",
+                login_password="password-secret",
                 proxy_url="http://proxy-user:proxy-pass@127.0.0.1:8080",
                 refresh_interval_minutes=45,
             )
@@ -144,6 +222,7 @@ class ProtocolRefreshDatabaseTests(unittest.IsolatedAsyncioTestCase):
             stored = await db.get_token(token_id)
             self.assertEqual(stored.protocol_mode, "protocol")
             self.assertEqual(stored.google_cookies, "SID=secret")
+            self.assertEqual(stored.login_password, "password-secret")
             self.assertEqual(stored.refresh_interval_minutes, 45)
 
             updated = await db.update_token_refresh_config(

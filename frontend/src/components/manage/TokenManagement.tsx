@@ -173,6 +173,7 @@ export function TokenManagement() {
   const [addProtocolMode, setAddProtocolMode] = useState(false)
   const [addGoogleCookies, setAddGoogleCookies] = useState("")
   const [addLoginAccount, setAddLoginAccount] = useState("")
+  const [addLoginPassword, setAddLoginPassword] = useState("")
   const [addProtocolProxy, setAddProtocolProxy] = useState("")
   const [addRefreshInterval, setAddRefreshInterval] = useState("120")
 
@@ -191,6 +192,7 @@ export function TokenManagement() {
   const [editGoogleCookies, setEditGoogleCookies] = useState("")
   const [editHasGoogleCookies, setEditHasGoogleCookies] = useState(false)
   const [editLoginAccount, setEditLoginAccount] = useState("")
+  const [editLoginPassword, setEditLoginPassword] = useState("")
   const [editProtocolProxy, setEditProtocolProxy] = useState("")
   const [editRefreshInterval, setEditRefreshInterval] = useState("120")
 
@@ -337,6 +339,13 @@ export function TokenManagement() {
       video_enabled: t.video_enabled !== false,
       image_concurrency: t.image_concurrency ?? -1,
       video_concurrency: t.video_concurrency ?? -1,
+      protocol_mode: t.protocol_mode || "session",
+      google_cookies: t.google_cookies || "",
+      login_account: t.login_account || "",
+      login_password: t.login_password || "",
+      proxy_url: t.proxy_url || "",
+      auto_refresh_enabled: t.auto_refresh_enabled !== false,
+      refresh_interval_minutes: t.refresh_interval_minutes || 120,
     }))
     const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: "application/json" })
     const url = URL.createObjectURL(blob)
@@ -389,6 +398,7 @@ export function TokenManagement() {
           protocol_mode: addProtocolMode ? "protocol" : "session",
           google_cookies: addProtocolMode ? addGoogleCookies.trim() || null : null,
           login_account: addProtocolMode ? addLoginAccount.trim() || null : null,
+          login_password: addProtocolMode ? addLoginPassword || null : null,
           proxy_url: addProtocolMode ? addProtocolProxy.trim() || null : null,
           auto_refresh_enabled: addProtocolMode,
           refresh_interval_minutes: Math.max(1, parseInt(addRefreshInterval, 10) || 120),
@@ -410,6 +420,7 @@ export function TokenManagement() {
         setAddProtocolMode(false)
         setAddGoogleCookies("")
         setAddLoginAccount("")
+        setAddLoginPassword("")
         setAddProtocolProxy("")
         setAddRefreshInterval("120")
         await refreshAll()
@@ -436,7 +447,8 @@ export function TokenManagement() {
     setEditGoogleCookies("")
     setEditHasGoogleCookies(!!row.has_google_cookies)
     setEditLoginAccount(row.login_account || "")
-    setEditProtocolProxy("")
+    setEditLoginPassword(row.login_password || "")
+    setEditProtocolProxy(row.proxy_url || "")
     setEditRefreshInterval(String(row.refresh_interval_minutes || 120))
     setEditOpen(true)
   }
@@ -465,6 +477,7 @@ export function TokenManagement() {
           protocol_mode: editProtocolMode ? "protocol" : "session",
           google_cookies: editGoogleCookies.trim() || null,
           login_account: editProtocolMode ? editLoginAccount.trim() || null : null,
+          login_password: editProtocolMode ? editLoginPassword || null : null,
           proxy_url: editProtocolProxy.trim() || null,
           auto_refresh_enabled: editProtocolMode,
           refresh_interval_minutes: Math.max(1, parseInt(editRefreshInterval, 10) || 120),
@@ -1042,6 +1055,10 @@ export function TokenManagement() {
                     <Input className="mt-1" value={addLoginAccount} onChange={(e) => setAddLoginAccount(e.target.value)} placeholder="name@example.com" />
                   </div>
                   <div>
+                    <Label>Google account password</Label>
+                    <Input className="mt-1" type="password" value={addLoginPassword} onChange={(e) => setAddLoginPassword(e.target.value)} autoComplete="new-password" />
+                  </div>
+                  <div>
                     <Label>Refresh interval (minutes)</Label>
                     <Input className="mt-1" type="number" min={1} max={10080} value={addRefreshInterval} onChange={(e) => setAddRefreshInterval(e.target.value)} />
                   </div>
@@ -1123,6 +1140,10 @@ export function TokenManagement() {
                   <div>
                     <Label>Google account hint</Label>
                     <Input className="mt-1" value={editLoginAccount} onChange={(e) => setEditLoginAccount(e.target.value)} />
+                  </div>
+                  <div>
+                    <Label>Google account password</Label>
+                    <Input className="mt-1" type="password" value={editLoginPassword} onChange={(e) => setEditLoginPassword(e.target.value)} autoComplete="new-password" />
                   </div>
                   <div>
                     <Label>Refresh interval (minutes)</Label>

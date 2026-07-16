@@ -1,4 +1,5 @@
 """FastAPI application initialization"""
+import asyncio
 import errno
 import gc
 import heapq
@@ -7,6 +8,7 @@ import shutil
 import sqlite3
 import sys
 import tempfile
+import warnings
 from datetime import datetime, timezone
 
 from fastapi import FastAPI
@@ -40,6 +42,9 @@ from .core.auth import set_api_key_manager
 from .core.logger import debug_logger
 
 
+_LOCAL_NO_PROXY_HOSTS = ("127.0.0.1", "localhost", "::1")
+
+
 def _configure_stdio() -> None:
     for stream in (getattr(sys, "stdout", None), getattr(sys, "stderr", None)):
         reconfigure = getattr(stream, "reconfigure", None)
@@ -50,7 +55,38 @@ def _configure_stdio() -> None:
                 pass
 
 
-_configure_stdio()
+def _configure_local_no_proxy() -> None:
+    for env_name in ("NO_PROXY", "no_proxy"):
+        entries = [item.strip() for item in str(os.environ.get(env_name, "") or "").replace(";", ",").split(",") if item.strip()]
+        normalized = {item.lower() for item in entries}
+        for host in _LOCAL_NO_PROXY_HOSTS:
+            if host.lower() not in normalized:
+                entries.append(host)
+                normalized.add(host.lower())
+        os.environ[env_name] = ",".join(entries)
+
+
+def _configure_asyncio_policy() -> None:
+    if os.name != "nt":
+        return
+    policy_class = getattr(asyncio, "WindowsProactorEventLoopPolicy", None)
+    if policy_class is not None and not isinstance(asyncio.get_event_loop_policy(), policy_class):
+        asyncio.set_event_loop_policy(policy_class())
+
+
+def _configure_process_runtime() -> None:
+    os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+    _configure_stdio()
+    _configure_local_no_proxy()
+    _configure_asyncio_policy()
+    warnings.filterwarnings(
+        "ignore",
+        message=r".*Proactor event loop does not implement add_reader family of methods required.*",
+        category=RuntimeWarning,
+    )
+
+
+_configure_process_runtime()
 
 
 def _normalize_host(host: str) -> str:

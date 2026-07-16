@@ -1122,6 +1122,7 @@ class Database:
                     ("protocol_mode", "TEXT NOT NULL DEFAULT 'session'"),
                     ("google_cookies", "TEXT NOT NULL DEFAULT ''"),
                     ("login_account", "TEXT NOT NULL DEFAULT ''"),
+                    ("login_password", "TEXT NOT NULL DEFAULT ''"),
                     ("proxy_url", "TEXT NOT NULL DEFAULT ''"),
                     ("auto_refresh_enabled", "BOOLEAN NOT NULL DEFAULT 1"),
                     ("refresh_interval_minutes", "INTEGER NOT NULL DEFAULT 120"),
@@ -1440,6 +1441,7 @@ class Database:
                     protocol_mode TEXT NOT NULL DEFAULT 'session',
                     google_cookies TEXT NOT NULL DEFAULT '',
                     login_account TEXT NOT NULL DEFAULT '',
+                    login_password TEXT NOT NULL DEFAULT '',
                     proxy_url TEXT NOT NULL DEFAULT '',
                     auto_refresh_enabled BOOLEAN NOT NULL DEFAULT 1,
                     refresh_interval_minutes INTEGER NOT NULL DEFAULT 120,
@@ -2069,10 +2071,10 @@ class Database:
                                    browser_profile_cookie_status, browser_profile_st_status, browser_profile_at_status,
                                    browser_profile_last_opened_at, browser_profile_last_sync_at,
                                    browser_profile_last_refresh_at, browser_profile_last_error,
-                                   protocol_mode, google_cookies, login_account, proxy_url,
+                                   protocol_mode, google_cookies, login_account, login_password, proxy_url,
                                    auto_refresh_enabled, refresh_interval_minutes,
                                    last_st_refresh_at, last_st_refresh_result)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (token.st, token.at, token.at_expires, token.email, token.name, token.remark,
                   token.is_active, token.credits, token.user_paygate_tier,
                   token.current_project_id, token.current_project_name,
@@ -2095,6 +2097,7 @@ class Database:
                   getattr(token, "protocol_mode", "session"),
                   getattr(token, "google_cookies", ""),
                   getattr(token, "login_account", ""),
+                  getattr(token, "login_password", ""),
                   getattr(token, "proxy_url", ""),
                   1 if getattr(token, "auto_refresh_enabled", True) else 0,
                   max(1, min(10080, int(getattr(token, "refresh_interval_minutes", 120) or 120))),

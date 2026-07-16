@@ -10,7 +10,7 @@ from typing import Optional, AsyncGenerator, List, Dict, Any
 from ..core.logger import debug_logger
 from ..core.config import config, get_runtime_tmp_dir
 from ..core.monitoring import record_generation_result
-from ..core.models import Task, RequestLog
+from ..core.models import RequestLog, Task, Token
 from ..core.account_tiers import (
     PAYGATE_TIER_NOT_PAID,
     get_paygate_tier_label,
@@ -1033,6 +1033,39 @@ class GenerationHandler:
             generation_result["error_emitted"] = False
             generation_result["error_status_code"] = 200
             generation_result["error_extra"] = {}
+
+    async def _resolve_video_asset(self, token: Token, operation: Dict[str, Any]) -> Dict[str, Any]:
+        operation_body = operation.get("operation") if isinstance(operation.get("operation"), dict) else {}
+        metadata = operation_body.get("metadata") if isinstance(operation_body.get("metadata"), dict) else {}
+        video_info = metadata.get("video") if isinstance(metadata.get("video"), dict) else {}
+        media_name = (
+            operation.get("mediaName")
+            or video_info.get("mediaName")
+            or video_info.get("mediaGenerationId")
+            or operation.get("name")
+            or operation_body.get("name")
+        )
+        video_url = str(
+            video_info.get("fifeUrl")
+            or video_info.get("servingBaseUri")
+            or operation.get("videoUrl")
+            or ""
+        )
+        if media_name and getattr(token, "st", None):
+            try:
+                video_url = await self.flow_client.get_media_url_redirect(token.st, str(media_name)) or video_url
+            except Exception as exc:
+                debug_logger.log_warning(f"[VIDEO] media redirect resolution failed: {type(exc).__name__}")
+        uuid_match = re.search(r"/video/([0-9a-f-]{36})", video_url or "")
+        return {
+            "media_name": media_name,
+            "video_url": video_url,
+            "video_media_id": uuid_match.group(1) if uuid_match else str(media_name or video_info.get("mediaGenerationId") or ""),
+            "aspect_ratio": video_info.get("aspectRatio", "VIDEO_ASPECT_RATIO_LANDSCAPE"),
+            "model": video_info.get("model"),
+            "video_info": video_info,
+            "metadata": metadata,
+        }
 
     def _normalize_error_message(self, error_message: Any, max_length: int = 1000) -> str:
         """归一化错误文本，避免写入超长内容。"""
@@ -2304,6 +2337,21 @@ class GenerationHandler:
                         poll_task_progress=poll_hook,
                     )
                 if video_type in {"r2v", "omni"} and reference_images:
+                    if video_type == "omni":
+                        return await self.flow_client.generate_omni_reference_video(
+                            at=token.at,
+                            st=token.st,
+                            project_id=project_id,
+                            prompt=prompt,
+                            aspect_ratio=model_config["aspect_ratio"],
+                            reference_media_ids=[item["mediaId"] for item in reference_images],
+                            model_usage_key=model_config.get("reference_model_key", "abra_r2v_8s"),
+                            model_display_name=model_config.get("reference_model_display_name", "Omni Flash"),
+                            duration=int(model_config.get("reference_duration", 8)),
+                            user_paygate_tier=normalized_tier,
+                            token_id=token.id,
+                            token_video_concurrency=token.video_concurrency,
+                        )
                     return await self.flow_client.generate_video_reference_images(
                         at=token.at,
                         project_id=project_id,
@@ -2482,17 +2530,12 @@ class GenerationHandler:
 
                 # 检查状态
                 if status == "MEDIA_GENERATION_STATUS_SUCCESSFUL":
-                    # 成功
-                    metadata = operation["operation"].get("metadata", {})
-                    video_info = metadata.get("video", {})
-                    source_video_url = video_info.get("fifeUrl")
-                    video_media_id = video_info.get("mediaGenerationId")
-                    uuid_match = re.search(r"/video/([0-9a-f-]{36})", source_video_url or "")
-                    if uuid_match:
-                        video_media_id = uuid_match.group(1)
-                    if not video_media_id and isinstance(operation, dict):
-                        video_media_id = operation.get("mediaName")
-                    aspect_ratio = video_info.get("aspectRatio", "VIDEO_ASPECT_RATIO_LANDSCAPE")
+                    resolved_video = await self._resolve_video_asset(token, operation)
+                    metadata = resolved_video["metadata"]
+                    video_info = resolved_video["video_info"]
+                    source_video_url = resolved_video["video_url"]
+                    video_media_id = resolved_video["video_media_id"]
+                    aspect_ratio = resolved_video["aspect_ratio"]
 
                     if not source_video_url and not video_media_id:
                         error_msg = "视频生成失败: 视频URL为空"

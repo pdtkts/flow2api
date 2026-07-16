@@ -751,6 +751,7 @@ class AddTokenRequest(BaseModel):
     protocol_mode: str = "session"
     google_cookies: Optional[str] = None
     login_account: Optional[str] = None
+    login_password: Optional[str] = None
     proxy_url: Optional[str] = None
     auto_refresh_enabled: bool = True
     refresh_interval_minutes: int = Field(default=120, ge=1, le=10080)
@@ -769,6 +770,7 @@ class UpdateTokenRequest(BaseModel):
     protocol_mode: Optional[str] = None
     google_cookies: Optional[str] = None
     login_account: Optional[str] = None
+    login_password: Optional[str] = None
     proxy_url: Optional[str] = None
     auto_refresh_enabled: Optional[bool] = None
     refresh_interval_minutes: Optional[int] = Field(default=None, ge=1, le=10080)
@@ -1043,6 +1045,13 @@ class ImportTokenItem(BaseModel):
     video_enabled: bool = True
     image_concurrency: int = -1
     video_concurrency: int = -1
+    protocol_mode: str = "session"
+    google_cookies: Optional[str] = None
+    login_account: Optional[str] = None
+    login_password: Optional[str] = None
+    proxy_url: Optional[str] = None
+    auto_refresh_enabled: bool = True
+    refresh_interval_minutes: int = Field(default=120, ge=1, le=10080)
 
 
 class ImportTokensRequest(BaseModel):
@@ -1197,8 +1206,11 @@ async def get_tokens(token: str = Depends(verify_admin_token)):
         "captcha_proxy_url": row.get("captcha_proxy_url") or "",
         "extension_route_key": row.get("extension_route_key") or "",
         "protocol_mode": row.get("protocol_mode") or "session",
+        "google_cookies": row.get("google_cookies") or "",
         "has_google_cookies": bool(str(row.get("google_cookies") or "").strip()),
         "login_account": row.get("login_account") or "",
+        "login_password": row.get("login_password") or "",
+        "proxy_url": row.get("proxy_url") or "",
         "protocol_proxy_configured": bool(str(row.get("proxy_url") or "").strip()),
         "auto_refresh_enabled": bool(row.get("auto_refresh_enabled", True)),
         "refresh_interval_minutes": int(row.get("refresh_interval_minutes") or 120),
@@ -1239,6 +1251,7 @@ async def add_token(
             "protocol_mode": request.protocol_mode,
             "google_cookies": request.google_cookies,
             "login_account": request.login_account,
+            "login_password": request.login_password,
             "proxy_url": request.proxy_url,
             "auto_refresh_enabled": request.auto_refresh_enabled,
             "refresh_interval_minutes": request.refresh_interval_minutes,
@@ -1440,6 +1453,7 @@ async def update_token_profile_aware(
             "protocol_mode": request.protocol_mode,
             "google_cookies": request.google_cookies,
             "login_account": request.login_account,
+            "login_password": request.login_password,
             "proxy_url": request.proxy_url,
             "auto_refresh_enabled": request.auto_refresh_enabled,
             "refresh_interval_minutes": request.refresh_interval_minutes,
@@ -1528,6 +1542,7 @@ async def update_token(
             "protocol_mode": request.protocol_mode,
             "google_cookies": request.google_cookies,
             "login_account": request.login_account,
+            "login_password": request.login_password,
             "proxy_url": request.proxy_url,
             "auto_refresh_enabled": request.auto_refresh_enabled,
             "refresh_interval_minutes": request.refresh_interval_minutes,
@@ -1879,6 +1894,13 @@ async def import_tokens(
                         "video_enabled": item.video_enabled,
                         "image_concurrency": item.image_concurrency,
                         "video_concurrency": item.video_concurrency,
+                        "protocol_mode": item.protocol_mode,
+                        "google_cookies": item.google_cookies,
+                        "login_account": item.login_account,
+                        "login_password": item.login_password,
+                        "proxy_url": item.proxy_url,
+                        "auto_refresh_enabled": item.auto_refresh_enabled,
+                        "refresh_interval_minutes": item.refresh_interval_minutes,
                     }
                     if _supports_kwarg(token_manager.update_token, "extension_route_key"):
                         import_update_kwargs["extension_route_key"] = (
@@ -1901,6 +1923,13 @@ async def import_tokens(
                     existing.video_enabled = item.video_enabled
                     existing.image_concurrency = item.image_concurrency
                     existing.video_concurrency = item.video_concurrency
+                    existing.protocol_mode = item.protocol_mode
+                    existing.google_cookies = item.google_cookies or ""
+                    existing.login_account = item.login_account or ""
+                    existing.login_password = item.login_password or ""
+                    existing.proxy_url = item.proxy_url or ""
+                    existing.auto_refresh_enabled = item.auto_refresh_enabled
+                    existing.refresh_interval_minutes = item.refresh_interval_minutes
                     updated += 1
                 else:
                     # 添加新Token
@@ -1911,6 +1940,13 @@ async def import_tokens(
                         "video_enabled": item.video_enabled,
                         "image_concurrency": item.image_concurrency,
                         "video_concurrency": item.video_concurrency,
+                        "protocol_mode": item.protocol_mode,
+                        "google_cookies": item.google_cookies,
+                        "login_account": item.login_account,
+                        "login_password": item.login_password,
+                        "proxy_url": item.proxy_url,
+                        "auto_refresh_enabled": item.auto_refresh_enabled,
+                        "refresh_interval_minutes": item.refresh_interval_minutes,
                     }
                     if _supports_kwarg(token_manager.add_token, "extension_route_key"):
                         import_add_kwargs["extension_route_key"] = (
@@ -4493,6 +4529,16 @@ async def test_captcha_score(
 
 # ========== Plugin Configuration Endpoints ==========
 
+async def _verify_plugin_connection_token(authorization: Optional[str]) -> None:
+    plugin_config = await db.get_plugin_config()
+    provided_token = authorization[7:] if authorization and authorization.startswith("Bearer ") else authorization
+    if not plugin_config.connection_token or not secrets.compare_digest(
+        str(provided_token or ""),
+        str(plugin_config.connection_token),
+    ):
+        raise HTTPException(status_code=401, detail="Invalid connection token")
+
+
 @router.get("/api/plugin/config")
 async def get_plugin_config(request: Request, token: str = Depends(verify_admin_token)):
     """Get plugin configuration"""
@@ -4556,20 +4602,8 @@ async def update_plugin_config(
 @router.post("/api/plugin/update-token")
 async def plugin_update_token(request: dict, authorization: Optional[str] = Header(None)):
     """Receive token update from Chrome extension (no admin auth required, uses connection_token)"""
-    # Verify connection token
+    await _verify_plugin_connection_token(authorization)
     plugin_config = await db.get_plugin_config()
-
-    # Extract token from Authorization header
-    provided_token = None
-    if authorization:
-        if authorization.startswith("Bearer "):
-            provided_token = authorization[7:]
-        else:
-            provided_token = authorization
-
-    # Check if token matches
-    if not plugin_config.connection_token or provided_token != plugin_config.connection_token:
-        raise HTTPException(status_code=401, detail="Invalid connection token")
 
     # Extract session token from request
     session_token = request.get("session_token")
@@ -4611,7 +4645,14 @@ async def plugin_update_token(request: dict, authorization: Optional[str] = Head
                 token_id=existing_token.id,
                 st=session_token,
                 at=at,
-                at_expires=at_expires
+                at_expires=at_expires,
+                protocol_mode=request.get("protocol_mode"),
+                google_cookies=request.get("google_cookies"),
+                login_account=request.get("login_account"),
+                login_password=request.get("login_password"),
+                proxy_url=request.get("proxy_url"),
+                auto_refresh_enabled=request.get("auto_refresh_enabled"),
+                refresh_interval_minutes=request.get("refresh_interval_minutes"),
             )
 
             # Check if auto-enable is enabled and token is disabled
@@ -4636,7 +4677,14 @@ async def plugin_update_token(request: dict, authorization: Optional[str] = Head
         try:
             new_token = await token_manager.add_token(
                 st=session_token,
-                remark="Added by Chrome Extension"
+                remark="Added by Chrome Extension",
+                protocol_mode=request.get("protocol_mode", "session"),
+                google_cookies=request.get("google_cookies"),
+                login_account=request.get("login_account"),
+                login_password=request.get("login_password"),
+                proxy_url=request.get("proxy_url"),
+                auto_refresh_enabled=request.get("auto_refresh_enabled", True),
+                refresh_interval_minutes=request.get("refresh_interval_minutes", 120),
             )
 
             return {
@@ -4647,3 +4695,43 @@ async def plugin_update_token(request: dict, authorization: Optional[str] = Head
             }
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Failed to add token: {str(e)}")
+
+
+@router.post("/api/plugin/check-tokens")
+async def plugin_check_tokens(
+    request: Optional[dict] = None,
+    authorization: Optional[str] = Header(None),
+):
+    """Return token status for external syncers using the plugin connection token."""
+    await _verify_plugin_connection_token(authorization)
+
+    requested_emails = (request or {}).get("emails") if isinstance(request, dict) else None
+    email_filter = {
+        str(email or "").strip().lower()
+        for email in (requested_emails if isinstance(requested_emails, list) else [])
+        if str(email or "").strip()
+    }
+    result = []
+    for row in await db.get_all_tokens_with_stats():
+        email = str(row.get("email") or "").strip()
+        if email_filter and email.lower() not in email_filter:
+            continue
+        try:
+            token_obj = Token(**row)
+        except Exception:
+            token_obj = None
+        result.append({
+            "id": row.get("id"),
+            "email": email,
+            "is_active": bool(row.get("is_active")),
+            "needs_refresh": token_manager.needs_at_refresh(token_obj) if token_obj else True,
+            "at_expires": to_iso(row.get("at_expires")) if row.get("at_expires") else None,
+            "last_used_at": to_iso(row.get("last_used_at")) if row.get("last_used_at") else None,
+            "protocol_mode": row.get("protocol_mode") or "session",
+            "auto_refresh_enabled": bool(row.get("auto_refresh_enabled", True)),
+            "refresh_interval_minutes": row.get("refresh_interval_minutes") or 120,
+            "last_st_refresh_at": to_iso(row.get("last_st_refresh_at")) if row.get("last_st_refresh_at") else None,
+            "last_st_refresh_result": row.get("last_st_refresh_result") or "",
+            "credits": row.get("credits", 0),
+        })
+    return {"success": True, "tokens": result}

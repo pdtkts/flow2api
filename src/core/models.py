@@ -65,6 +65,7 @@ class Token(BaseModel):
     protocol_mode: Literal["session", "protocol"] = "session"
     google_cookies: str = Field(default="", repr=False)
     login_account: str = ""
+    login_password: str = Field(default="", repr=False)
     proxy_url: str = Field(default="", repr=False)
     auto_refresh_enabled: bool = True
     refresh_interval_minutes: int = Field(default=120, ge=1, le=10080)

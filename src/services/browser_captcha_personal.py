@@ -66,6 +66,23 @@ PERSONAL_GOOGLE_FAMILY_COOKIE_MIRROR_URLS = (
     "https://www.google.com/",
     "https://www.recaptcha.net/",
 )
+_recaptcha_session_cookies: Optional[Dict[str, str]] = None
+_recaptcha_session_cookies_fetched_at: float = 0.0
+_RECAPTCHA_SESSION_COOKIES_TTL = 3600.0
+
+
+def get_cached_session_cookies() -> Optional[Dict[str, str]]:
+    if not _recaptcha_session_cookies:
+        return None
+    if time.time() - _recaptcha_session_cookies_fetched_at > _RECAPTCHA_SESSION_COOKIES_TTL:
+        return None
+    return dict(_recaptcha_session_cookies)
+
+
+def set_cached_session_cookies(cookies: Dict[str, str]) -> None:
+    global _recaptcha_session_cookies, _recaptcha_session_cookies_fetched_at
+    _recaptcha_session_cookies = dict(cookies)
+    _recaptcha_session_cookies_fetched_at = time.time()
 PERSONAL_HEADLESS_VISIBLE_SPOOF_SOURCE = r"""
 (() => {
     const marker = "__personalHeadlessVisibleSpoofInstalled__";
@@ -1438,7 +1455,7 @@ class BrowserCaptchaService:
         max_resident_tabs_override: Optional[int] = None,
     ):
         """初始化服务"""
-        self.headless = bool(getattr(config, "personal_headless", False))  # 是否无头由配置控制
+        self.headless = True
         self.browser = None
         self._initialized = False
         self.website_key = "6LdsFiUsAAAAAIjVDZcuLhaHiDn5nnHVXVRQGeMV"
@@ -3552,9 +3569,14 @@ class BrowserCaptchaService:
         def signed_unit(index: int, scale: float) -> float:
             return round((((digest[index] / 255.0) * 2.0) - 1.0) * scale, 8)
 
+        runtime_profile = dict(self._runtime_surface_profile or {})
+        window_profile = runtime_profile.get("window") or {}
+        viewport_width = int(window_profile.get("innerWidth", 1280) or 1280)
+        viewport_height = int(window_profile.get("innerHeight", 720) or 720)
+
         return {
             "seed": hashlib.md5(seed_material).hexdigest()[:16],
-            "runtime": dict(self._runtime_surface_profile or {}),
+            "runtime": runtime_profile,
             "canvas": {
                 "rgba": [
                     non_zero_byte_delta(0),
@@ -3575,6 +3597,18 @@ class BrowserCaptchaService:
                 "byteDelta": non_zero_byte_delta(9),
                 "stride": 17 + (digest[10] % 13),
             },
+            "capability": {
+                "bluetoothAvailable": bool(digest[11] < 51),
+                "usbDeviceCount": digest[12] % 4,
+                "serialPortCount": digest[13] % 3,
+                "hidDeviceCount": digest[14] % 4,
+                "mediaCodecSmooth": bool(digest[15] < 230),
+                "speechVoiceCount": 2 + (digest[16] % 4),
+                "screenX": (digest[17] % 17) - 8,
+                "screenY": (digest[18] % 17) - 8,
+                "orientationType": "landscape-primary" if viewport_width >= viewport_height else "portrait-primary",
+                "orientationAngle": 0 if viewport_width >= viewport_height else 90,
+            },
         }
 
     def _build_tab_fingerprint_spoof_source(self, tab) -> str:
@@ -3594,6 +3628,7 @@ class BrowserCaptchaService:
     const config = __CONFIG_JSON__;
     window[marker] = config.seed;
     const runtimeProfile = config.runtime || {};
+    const capability = config.capability || {};
 
     const setValue = (target, key, value) => {
         try {
@@ -4888,6 +4923,96 @@ class BrowserCaptchaService:
             };
             setValue(window, "trustedTypes", trustedTypes);
         }
+        if (!navigator.bluetooth) {
+            const bluetooth = makeEventTargetLike({
+                getAvailability: async () => capability.bluetoothAvailable === true,
+                requestDevice: async () => { throw new DOMException("User cancelled the request.", "NotFoundError"); },
+                requestLEScan: async () => { throw new DOMException("Not supported", "NotSupportedError"); },
+                onavailabilitychanged: null,
+            });
+            defineGetter(Navigator.prototype, "bluetooth", () => bluetooth);
+            defineGetter(navigator, "bluetooth", () => bluetooth);
+        }
+        if (!navigator.usb) {
+            const usb = makeEventTargetLike({
+                getDevices: async () => Array.from({length: Number(capability.usbDeviceCount || 0)}, (_, index) => ({vendorId: 7531 + index, productId: 9021 + index, deviceName: "USB Input Device"})),
+                requestDevice: async () => { throw new DOMException("No device selected.", "NotFoundError"); },
+                onconnect: null,
+                ondisconnect: null,
+            });
+            defineGetter(Navigator.prototype, "usb", () => usb);
+            defineGetter(navigator, "usb", () => usb);
+        }
+        if (!navigator.serial) {
+            const serial = makeEventTargetLike({
+                getPorts: async () => Array.from({length: Number(capability.serialPortCount || 0)}, () => ({readable: null, writable: null})),
+                requestPort: async () => { throw new DOMException("No port selected.", "NotFoundError"); },
+                onconnect: null,
+                ondisconnect: null,
+            });
+            defineGetter(Navigator.prototype, "serial", () => serial);
+            defineGetter(navigator, "serial", () => serial);
+        }
+        if (!navigator.hid) {
+            const hid = makeEventTargetLike({
+                getDevices: async () => Array.from({length: Number(capability.hidDeviceCount || 0)}, (_, index) => ({opened: false, vendorId: 6702 + index, productId: 3310 + index, productName: "HID-compliant device", collections: []})),
+                requestDevice: async () => { throw new DOMException("No device selected.", "NotFoundError"); },
+                onconnect: null,
+                ondisconnect: null,
+            });
+            defineGetter(Navigator.prototype, "hid", () => hid);
+            defineGetter(navigator, "hid", () => hid);
+        }
+        if (!navigator.clipboard) {
+            const clipboard = {read: async () => [], readText: async () => "", write: async () => undefined, writeText: async () => undefined};
+            defineGetter(Navigator.prototype, "clipboard", () => clipboard);
+            defineGetter(navigator, "clipboard", () => clipboard);
+        }
+        if (!navigator.mediaCapabilities) {
+            const mediaCapabilities = {
+                decodingInfo: async () => ({supported: true, smooth: capability.mediaCodecSmooth !== false, powerEfficient: capability.mediaCodecSmooth !== false, keySystemAccess: null}),
+                encodingInfo: async () => ({supported: true, smooth: capability.mediaCodecSmooth !== false, powerEfficient: capability.mediaCodecSmooth !== false}),
+            };
+            defineGetter(Navigator.prototype, "mediaCapabilities", () => mediaCapabilities);
+            defineGetter(navigator, "mediaCapabilities", () => mediaCapabilities);
+        }
+        if (!navigator.serviceWorker) {
+            const registration = makeEventTargetLike({installing: null, waiting: null, active: null, scope: "", updateViaCache: "imports", unregister: async () => true, update: async () => registration});
+            const serviceWorker = makeEventTargetLike({controller: null, ready: Promise.resolve(registration), register: async () => registration, getRegistration: async () => undefined, getRegistrations: async () => [], startMessages: () => undefined});
+            defineGetter(Navigator.prototype, "serviceWorker", () => serviceWorker);
+            defineGetter(navigator, "serviceWorker", () => serviceWorker);
+        }
+        if (!navigator.mediaSession) {
+            const mediaSession = {metadata: null, playbackState: "none", setActionHandler: () => undefined, setPositionState: () => undefined};
+            defineGetter(Navigator.prototype, "mediaSession", () => mediaSession);
+            defineGetter(navigator, "mediaSession", () => mediaSession);
+        }
+        if (!navigator.wakeLock) {
+            const sentinel = makeEventTargetLike({type: "screen", released: false, release: async () => { sentinel.released = true; }, onrelease: null});
+            const wakeLock = {request: async () => sentinel};
+            defineGetter(Navigator.prototype, "wakeLock", () => wakeLock);
+            defineGetter(navigator, "wakeLock", () => wakeLock);
+        }
+        if (!navigator.presentation) {
+            const presentation = {defaultRequest: null, receiver: null, getAvailability: async () => makeEventTargetLike({value: false, onchange: null})};
+            defineGetter(Navigator.prototype, "presentation", () => presentation);
+            defineGetter(navigator, "presentation", () => presentation);
+        }
+        if (!window.openDatabase) {
+            setValue(window, "openDatabase", (name, version) => ({version: String(version || "1.0"), changeVersion: () => undefined, transaction: () => undefined, readTransaction: () => undefined}));
+        }
+        if (!window.speechSynthesis) {
+            const voices = [{name: "Microsoft David", lang: "en-US", default: true}, {name: "Microsoft Zira", lang: "en-US", default: false}];
+            setValue(window, "speechSynthesis", makeEventTargetLike({pending: false, speaking: false, paused: false, speak: () => undefined, cancel: () => undefined, pause: () => undefined, resume: () => undefined, getVoices: () => voices.slice(0, Number(capability.speechVoiceCount || 2)), onvoiceschanged: null}));
+        }
+        try {
+            defineGetter(window, "screenX", () => Number(capability.screenX || 0));
+            defineGetter(window, "screenY", () => Number(capability.screenY || 0));
+            if (window.screen) {
+                const orientation = makeEventTargetLike({type: capability.orientationType || "landscape-primary", angle: Number(capability.orientationAngle || 0), lock: async () => undefined, unlock: () => undefined});
+                defineGetter(window.screen, "orientation", () => orientation);
+            }
+        } catch (e) {}
     };
     ensureCapabilityEnvironment();
 
@@ -8975,6 +9100,7 @@ class BrowserCaptchaService:
                                 label=launch_label,
                             )
                             self._browser_process_pid = self._get_browser_process_pid(self.browser)
+                            await asyncio.sleep(0.1)
                             break
                         except Exception as start_error:
                             last_start_error = start_error
@@ -10224,6 +10350,26 @@ class BrowserCaptchaService:
             self._last_fingerprint = None
             self._last_fingerprint_at = 0.0
 
+    async def _cache_session_cookies_for_computed(self, resident_info: ResidentTabInfo) -> None:
+        """Cache Google-family cookies for computed captcha relay consumers."""
+        if not resident_info or get_cached_session_cookies() is not None:
+            return
+        cookies = await self._get_browser_cookies(
+            "computed_session_cookie_cache",
+            timeout_seconds=6.0,
+            browser_context_id=getattr(resident_info, "browser_context_id", None),
+        )
+        collected: Dict[str, str] = {}
+        allowed_names = {"SID", "SSID", "APISID", "SAPISID", "HSID", "NID", "ENID"}
+        for cookie in cookies or []:
+            name = str(getattr(cookie, "name", "") or "").strip()
+            value = str(getattr(cookie, "value", "") or "").strip()
+            domain = str(getattr(cookie, "domain", "") or "").strip().lower().lstrip(".")
+            if name and value and domain.endswith(("google.com", "recaptcha.net")) and any(key in name for key in allowed_names):
+                collected[name] = value
+        if collected:
+            set_cached_session_cookies(collected)
+
     async def _solve_with_resident_tab(
         self,
         slot_id: str,
@@ -10267,6 +10413,10 @@ class BrowserCaptchaService:
             self._remember_fingerprint(resident_info.fingerprint)
         else:
             resident_info.fingerprint = await self._refresh_last_fingerprint(resident_info.tab)
+        try:
+            await self._cache_session_cookies_for_computed(resident_info)
+        except Exception:
+            pass
         debug_logger.log_info(
             "[BrowserCaptcha] ✅ Token生成成功"
             f"（slot={slot_id}, 耗时 {duration_ms:.0f}ms, "

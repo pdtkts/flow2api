@@ -16,6 +16,7 @@ import random
 import uuid
 import hashlib
 import json
+from copy import deepcopy
 from typing import Optional, Dict, Any, List, Union
 from datetime import datetime
 from urllib.parse import urlparse, unquote, parse_qs
@@ -453,6 +454,8 @@ class TokenBrowser:
         self._pid_file = os.path.join(self._pid_dir, f"slot_{self.token_id}.pid")
         os.makedirs(self._pid_dir, exist_ok=True)
         self._shared_proxy_url: Optional[str] = None
+        self._shared_bound_token_id: Optional[int] = None
+        self._shared_bound_cookie_signature: Optional[str] = None
         self._shared_launch_count = 0
         self._shared_reuse_count = 0
         self._consecutive_browser_failures = 0
@@ -858,6 +861,8 @@ class TokenBrowser:
         self._shared_keepalive_page = None
         self._shared_browser_pid = None
         self._shared_proxy_url = None
+        self._shared_bound_token_id = None
+        self._shared_bound_cookie_signature = None
         self._consecutive_browser_failures = 0
         self._shared_reuse_count = 0
 
@@ -875,7 +880,38 @@ class TokenBrowser:
         async with self._shared_browser_lock:
             await self._recycle_browser_locked(reason=reason, rotate_profile=rotate_profile)
 
-    async def _get_or_create_shared_browser(self, token_proxy_url: Optional[str] = None) -> tuple:
+    async def _ensure_shared_token_binding(self, context, token_id: Optional[int]) -> bool:
+        try:
+            normalized_id = int(token_id) if token_id else None
+        except (TypeError, ValueError):
+            normalized_id = None
+        if normalized_id is None:
+            return True
+        token = await self.db.get_token(normalized_id) if self.db else None
+        session_token = str(getattr(token, "st", "") or "").strip() if token else ""
+        if not session_token:
+            return False
+        signature = hashlib.sha256(session_token.encode("utf-8")).hexdigest()
+        if self._shared_bound_token_id == normalized_id and self._shared_bound_cookie_signature == signature:
+            return True
+        await context.clear_cookies()
+        await context.add_cookies([{
+            "name": "__Secure-next-auth.session-token",
+            "value": session_token,
+            "url": "https://labs.google/",
+            "secure": True,
+            "httpOnly": True,
+            "sameSite": "None",
+        }])
+        self._shared_bound_token_id = normalized_id
+        self._shared_bound_cookie_signature = signature
+        return True
+
+    async def _get_or_create_shared_browser(
+        self,
+        token_proxy_url: Optional[str] = None,
+        token_id: Optional[int] = None,
+    ) -> tuple:
         """Get or create the shared browser for this slot."""
         _, expected_proxy_url, _ = await self._resolve_proxy_runtime_config(token_proxy_url=token_proxy_url)
 
@@ -908,6 +944,11 @@ class TokenBrowser:
                     has_shared_browser = False
 
             if has_shared_browser:
+                if not await self._ensure_shared_token_binding(self._shared_context, token_id):
+                    await self._recycle_browser_locked(reason="token_binding_failed", rotate_profile=False)
+                    has_shared_browser = False
+
+            if has_shared_browser:
                 self._shared_reuse_count += 1
                 debug_logger.log_info(
                     f"[BrowserCaptcha] Token-{self.token_id} reusing shared browser (reuse={self._shared_reuse_count})"
@@ -915,6 +956,9 @@ class TokenBrowser:
                 return self._shared_playwright, self._shared_browser, self._shared_context
 
             playwright, browser, context = await self._create_browser(token_proxy_url=token_proxy_url)
+            if not await self._ensure_shared_token_binding(context, token_id):
+                await self._close_browser(playwright, browser, context, browser_pid=self._extract_browser_pid(browser))
+                raise RuntimeError("failed to bind token session context")
             self._shared_playwright = playwright
             self._shared_browser = browser
             self._shared_context = context
@@ -1120,6 +1164,8 @@ class TokenBrowser:
             self._shared_keepalive_page = None
             self._shared_browser_pid = None
             self._shared_proxy_url = None
+            self._shared_bound_token_id = None
+            self._shared_bound_cookie_signature = None
         try:
             if context:
                 await asyncio.wait_for(context.close(), timeout=10)
@@ -1632,13 +1678,115 @@ class TokenBrowser:
         if not self._last_fingerprint:
             return None
         return dict(self._last_fingerprint)
+
+    @staticmethod
+    def _inject_recaptcha_token(payload: Any, token: str) -> None:
+        if isinstance(payload, dict):
+            context = payload.get("recaptchaContext")
+            if isinstance(context, dict):
+                context["token"] = token
+                context.setdefault("applicationType", "RECAPTCHA_APPLICATION_TYPE_WEB")
+            for value in payload.values():
+                TokenBrowser._inject_recaptcha_token(value, token)
+        elif isinstance(payload, list):
+            for value in payload:
+                TokenBrowser._inject_recaptcha_token(value, token)
+
+    async def submit_flow_request(
+        self,
+        project_id: str,
+        website_key: str,
+        action: str,
+        url: str,
+        at_token: str,
+        json_data: Dict[str, Any],
+        timeout: int,
+        token_proxy_url: Optional[str] = None,
+        token_id: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Solve and submit a Flow request inside the bound browser context."""
+        async with self._semaphore:
+            self._solve_inflight += 1
+            try:
+                last_error: Optional[Exception] = None
+                for attempt in range(config.browser_captcha_max_retries):
+                    page = None
+                    try:
+                        _, _, context = await self._get_or_create_shared_browser(
+                            token_proxy_url=token_proxy_url,
+                            token_id=token_id,
+                        )
+                        captcha_token = await self._execute_captcha(context, project_id, website_key, action)
+                        if not captcha_token:
+                            raise RuntimeError("failed to obtain reCAPTCHA token")
+                        payload = deepcopy(json_data)
+                        self._inject_recaptcha_token(payload, captcha_token)
+
+                        page = await context.new_page()
+                        await page.goto(
+                            f"https://labs.google/fx/tools/flow/project/{project_id}",
+                            wait_until="domcontentloaded",
+                            timeout=45000,
+                        )
+                        await self._capture_page_fingerprint(page)
+                        result = await asyncio.wait_for(
+                            page.evaluate(
+                                """
+                                async ({targetUrl, bearerToken, payload, timeoutMs}) => {
+                                  const controller = new AbortController();
+                                  const timer = setTimeout(() => controller.abort(), timeoutMs);
+                                  try {
+                                    const response = await fetch(targetUrl, {
+                                      method: 'POST',
+                                      credentials: 'include',
+                                      headers: {
+                                        'Accept': 'text/event-stream, text/event-stream, */*',
+                                        'Content-Type': 'application/json',
+                                        'Authorization': `Bearer ${bearerToken}`,
+                                      },
+                                      body: JSON.stringify(payload),
+                                      signal: controller.signal,
+                                    });
+                                    return {status: response.status, text: await response.text()};
+                                  } finally { clearTimeout(timer); }
+                                }
+                                """,
+                                {
+                                    "targetUrl": url,
+                                    "bearerToken": at_token,
+                                    "payload": payload,
+                                    "timeoutMs": max(5000, int(timeout) * 1000),
+                                },
+                            ),
+                            timeout=max(10, int(timeout) + 5),
+                        )
+                        if not isinstance(result, dict):
+                            raise RuntimeError("browser submission returned an invalid response")
+                        self._solve_count += 1
+                        return result
+                    except Exception as exc:
+                        last_error = exc
+                        self._error_count += 1
+                        if attempt < config.browser_captcha_max_retries - 1:
+                            await asyncio.sleep(1)
+                    finally:
+                        if page:
+                            try:
+                                await page.close()
+                            except Exception:
+                                pass
+                raise last_error or RuntimeError("browser Flow submission failed")
+            finally:
+                self._solve_inflight = max(0, self._solve_inflight - 1)
+                self.note_idle()
     
     async def get_token(
         self,
         project_id: str,
         website_key: str,
         action: str = "IMAGE_GENERATION",
-        token_proxy_url: Optional[str] = None
+        token_proxy_url: Optional[str] = None,
+        token_id: Optional[int] = None,
     ) -> tuple[Optional[str], Optional[str]]:
         """Get a token from the shared browser unless a fatal browser error occurs."""
         async with self._semaphore:
@@ -1649,7 +1797,10 @@ class TokenBrowser:
                 for attempt in range(max_retries):
                     try:
                         start_ts = time.time()
-                        _, _, context = await self._get_or_create_shared_browser(token_proxy_url=token_proxy_url)
+                        _, _, context = await self._get_or_create_shared_browser(
+                            token_proxy_url=token_proxy_url,
+                            token_id=token_id,
+                        )
 
                         token = await self._execute_captcha(context, project_id, website_key, action)
                         if token:
@@ -2132,7 +2283,8 @@ class BrowserCaptchaService:
                         project_id,
                         self.website_key,
                         action,
-                        token_proxy_url=token_proxy_url
+                        token_proxy_url=token_proxy_url,
+                        token_id=token_id,
                     )
                 finally:
                     await self._release_slot_reservation(browser_id)
@@ -2152,7 +2304,8 @@ class BrowserCaptchaService:
                 project_id,
                 self.website_key,
                 action,
-                token_proxy_url=token_proxy_url
+                token_proxy_url=token_proxy_url,
+                token_id=token_id,
             )
         finally:
             await self._release_slot_reservation(browser_id)
@@ -2389,6 +2542,36 @@ class BrowserCaptchaService:
             if not browser:
                 return None
             return browser.get_last_fingerprint()
+
+    async def submit_flow_request(
+        self,
+        project_id: str,
+        action: str,
+        token_id: Optional[int],
+        url: str,
+        at_token: str,
+        json_data: Dict[str, Any],
+        timeout: int,
+    ) -> tuple[Dict[str, Any], Union[int, str], Optional[Dict[str, Any]]]:
+        self._check_available()
+        token_proxy_url = await self._resolve_token_proxy_url(token_id)
+        browser_id = await self._select_browser_id(project_id)
+        try:
+            browser = await self._get_or_create_browser(browser_id)
+            response = await browser.submit_flow_request(
+                project_id=project_id,
+                website_key=self.website_key,
+                action=action,
+                url=url,
+                at_token=at_token,
+                json_data=json_data,
+                timeout=timeout,
+                token_proxy_url=token_proxy_url,
+                token_id=token_id,
+            )
+            return response, self._compose_browser_ref(browser_id, None), browser.get_last_fingerprint()
+        finally:
+            await self._release_slot_reservation(browser_id)
 
     async def report_error(
         self,
