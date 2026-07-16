@@ -242,6 +242,12 @@ export function TokenManagement() {
     loadGeminiGenAccounts()
   }, [loadStats, loadTokens, loadAtRefreshConfig, loadGeminiGenAccounts])
 
+  useEffect(() => {
+    const refreshRuntimeState = () => loadTokens()
+    window.addEventListener("focus", refreshRuntimeState)
+    return () => window.removeEventListener("focus", refreshRuntimeState)
+  }, [loadTokens])
+
   const refreshAll = async () => {
     await loadStats()
     await loadTokens()
@@ -539,7 +545,7 @@ export function TokenManagement() {
     }
   }
 
-  const browserProfileAction = async (id: number, action: "open" | "sync" | "refresh" | "reset") => {
+  const browserProfileAction = async (id: number, action: "open" | "close" | "sync" | "refresh" | "reset") => {
     if (!token) return
     if (action === "reset" && !confirm("Reset this browser profile? You will need to log in again.")) return
     setProfileBusyId(id)
@@ -550,6 +556,7 @@ export function TokenManagement() {
       if (r.ok && d.success) {
         const labels = {
           open: "Profile opened in Fluxbox",
+          close: "Profile browser closed",
           sync: "Profile synced",
           refresh: "Profile refreshed",
           reset: "Profile reset",
@@ -833,7 +840,9 @@ export function TokenManagement() {
                               >
                                 {profileStatus}
                               </span>
-                              <div className="text-[10px] text-muted-foreground">{health || "unknown"}</div>
+                              <div className="text-[10px] text-muted-foreground">
+                                {health || "unknown"} · {t.runtime_open ? "running" : "stopped"}
+                              </div>
                             </div>
                           ) : (
                             <span className="text-xs text-muted-foreground">Session token</span>
@@ -849,8 +858,16 @@ export function TokenManagement() {
                             </Button>
                             {isProfile ? (
                               <>
-                                <Button variant="ghost" size="sm" className="h-7 px-2 text-xs" disabled={profileBusyId === t.id} onClick={() => browserProfileAction(t.id, "open")}>
-                                  Open
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  className="h-7 px-2 text-xs"
+                                  disabled={profileBusyId === t.id}
+                                  onClick={() => browserProfileAction(t.id, t.runtime_open ? "close" : "open")}
+                                  title={t.runtime_open ? "Close Chromium and preserve the saved profile" : "Open the saved profile in Chromium"}
+                                >
+                                  {profileBusyId === t.id ? <Loader2 className="h-3 w-3 mr-1 animate-spin" /> : null}
+                                  {t.runtime_open ? "Close" : "Open"}
                                 </Button>
                                 <Button variant="ghost" size="sm" className="h-7 px-2 text-xs" disabled={profileBusyId === t.id} onClick={() => browserProfileAction(t.id, "sync")}>
                                   Sync

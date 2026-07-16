@@ -73,6 +73,7 @@ tests/__pycache__/
 node_modules
 tests/*
 !tests/test_client_presence.py
+!tests/test_browser_profile_lifecycle.py
 
 # Root GUI static build (keep local-only)
 /static/

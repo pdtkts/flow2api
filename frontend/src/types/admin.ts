@@ -41,6 +41,7 @@ export interface TokenRow {
   browser_profile_last_sync_at?: string | null
   browser_profile_last_refresh_at?: string | null
   browser_profile_last_error?: string | null
+  runtime_open?: boolean
   captcha_proxy_url?: string
   image_enabled: boolean
   video_enabled: boolean

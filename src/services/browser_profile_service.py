@@ -94,36 +94,86 @@ class BrowserProfileService:
             options["executable_path"] = executable_path
         return options
 
-    async def _get_runtime(self, token_id: int, *, open_url: Optional[str] = None) -> ProfileRuntime:
+    @staticmethod
+    def _runtime_is_alive(runtime: ProfileRuntime) -> bool:
+        try:
+            return not runtime.page.is_closed()
+        except Exception:
+            return False
+
+    @classmethod
+    def _is_target_closed_error(cls, exc: Exception, runtime: ProfileRuntime) -> bool:
+        if not cls._runtime_is_alive(runtime):
+            return True
+        error_name = type(exc).__name__.lower()
+        error_message = str(exc).lower()
+        return (
+            "targetclosed" in error_name
+            or "target page, context or browser has been closed" in error_message
+            or "browser has been closed" in error_message
+        )
+
+    @staticmethod
+    async def _dispose_runtime(runtime: ProfileRuntime) -> None:
+        try:
+            await runtime.context.close()
+        except Exception:
+            pass
+
+    async def is_runtime_open(self, token_id: int) -> bool:
+        stale_runtime: Optional[ProfileRuntime] = None
         async with self._runtime_lock:
-            existing = self._runtimes.get(int(token_id))
-            if existing is not None:
+            runtime = self._runtimes.get(int(token_id))
+            if runtime is not None and not self._runtime_is_alive(runtime):
+                stale_runtime = self._runtimes.pop(int(token_id), None)
+                runtime = None
+        if stale_runtime is not None:
+            await self._dispose_runtime(stale_runtime)
+        return runtime is not None
+
+    async def _get_runtime(self, token_id: int, *, open_url: Optional[str] = None) -> ProfileRuntime:
+        token_id = int(token_id)
+        async with self._runtime_lock:
+            for attempt in range(2):
+                runtime = self._runtimes.get(token_id)
+                if runtime is not None and not self._runtime_is_alive(runtime):
+                    self._runtimes.pop(token_id, None)
+                    await self._dispose_runtime(runtime)
+                    runtime = None
+
+                if runtime is None:
+                    playwright = await self._ensure_playwright()
+                    profile_path = self.profile_path_for_token(token_id)
+                    profile_path.mkdir(parents=True, exist_ok=True)
+                    context = await playwright.chromium.launch_persistent_context(
+                        str(profile_path),
+                        **self._launch_options(),
+                    )
+                    page = context.pages[0] if context.pages else await context.new_page()
+                    runtime = ProfileRuntime(context=context, page=page, lock=asyncio.Lock())
+                    self._runtimes[token_id] = runtime
+
                 if open_url:
-                    await existing.page.goto(open_url, wait_until="domcontentloaded", timeout=45000)
-                return existing
+                    try:
+                        await runtime.page.goto(open_url, wait_until="domcontentloaded", timeout=45000)
+                    except Exception as exc:
+                        if attempt == 0 and self._is_target_closed_error(exc, runtime):
+                            if self._runtimes.get(token_id) is runtime:
+                                self._runtimes.pop(token_id, None)
+                            await self._dispose_runtime(runtime)
+                            continue
+                        raise
+                return runtime
 
-            playwright = await self._ensure_playwright()
-            profile_path = self.profile_path_for_token(token_id)
-            profile_path.mkdir(parents=True, exist_ok=True)
-            context = await playwright.chromium.launch_persistent_context(
-                str(profile_path),
-                **self._launch_options(),
-            )
-            page = context.pages[0] if context.pages else await context.new_page()
-            if open_url:
-                await page.goto(open_url, wait_until="domcontentloaded", timeout=45000)
-            runtime = ProfileRuntime(context=context, page=page, lock=asyncio.Lock())
-            self._runtimes[int(token_id)] = runtime
-            return runtime
+        raise RuntimeError(f"Unable to open browser profile runtime for token {token_id}")
 
-    async def close_runtime(self, token_id: int) -> None:
+    async def close_runtime(self, token_id: int) -> bool:
         async with self._runtime_lock:
             runtime = self._runtimes.pop(int(token_id), None)
         if runtime is not None:
-            try:
-                await runtime.context.close()
-            except Exception:
-                pass
+            await self._dispose_runtime(runtime)
+            return True
+        return False
 
     def _token_status_payload(self, token: Token) -> Dict[str, Any]:
         return {
@@ -148,7 +198,9 @@ class BrowserProfileService:
         token = await self.db.get_token(int(token_id))
         if not token:
             raise ValueError("Token not found")
-        return self._token_status_payload(token)
+        payload = self._token_status_payload(token)
+        payload["runtime_open"] = await self.is_runtime_open(token_id)
+        return payload
 
     async def open_profile(self, token_id: int) -> Dict[str, Any]:
         token = await self.db.get_token(int(token_id))
@@ -158,12 +210,17 @@ class BrowserProfileService:
         now = datetime.now(timezone.utc)
         try:
             await self._get_runtime(token_id, open_url=LOGIN_URL)
+            authenticated = (
+                token.browser_profile_login_state == "logged_in"
+                and token.browser_profile_cookie_status == "ok"
+                and token.browser_profile_st_status == "ok"
+            )
             await self.db.update_token(
                 token_id,
                 auth_mode="browser_profile",
                 browser_profile_path=profile_path,
-                browser_profile_status="opened",
-                browser_profile_login_state="login_needed",
+                browser_profile_status="connected" if authenticated else "opened",
+                browser_profile_login_state="logged_in" if authenticated else "login_needed",
                 browser_profile_last_opened_at=now,
                 browser_profile_last_error=None,
             )
@@ -178,6 +235,16 @@ class BrowserProfileService:
             raise
         updated = await self.db.get_token(token_id)
         return self._token_status_payload(updated)
+
+    async def close_profile(self, token_id: int) -> Dict[str, Any]:
+        token = await self.db.get_token(int(token_id))
+        if not token:
+            raise ValueError("Token not found")
+        await self.close_runtime(token_id)
+        updated = await self.db.get_token(int(token_id))
+        payload = self._token_status_payload(updated)
+        payload["runtime_open"] = False
+        return payload
 
     async def _collect_cookies(self, runtime: ProfileRuntime) -> list[dict[str, Any]]:
         cookies = await runtime.context.cookies(

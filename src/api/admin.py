@@ -1065,6 +1065,12 @@ async def change_password(
 async def get_tokens(token: str = Depends(verify_admin_token)):
     """Get all tokens with statistics"""
     token_rows = await db.get_all_tokens_with_stats()
+    profile_service = await BrowserProfileService.get_instance(db=db, flow_client=token_manager.flow_client)
+    runtime_states = {
+        int(row["id"]): await profile_service.is_runtime_open(int(row["id"]))
+        for row in token_rows
+        if row.get("id") is not None and (row.get("auth_mode") or "session_token") == "browser_profile"
+    }
     to_iso = lambda value: value.isoformat() if hasattr(value, "isoformat") else value
     now = datetime.now(timezone.utc)
 
@@ -1116,6 +1122,7 @@ async def get_tokens(token: str = Depends(verify_admin_token)):
         "browser_profile_last_sync_at": to_iso(row.get("browser_profile_last_sync_at")) if row.get("browser_profile_last_sync_at") else None,
         "browser_profile_last_refresh_at": to_iso(row.get("browser_profile_last_refresh_at")) if row.get("browser_profile_last_refresh_at") else None,
         "browser_profile_last_error": row.get("browser_profile_last_error"),
+        "runtime_open": runtime_states.get(int(row.get("id") or 0), False),
         "captcha_proxy_url": row.get("captcha_proxy_url") or "",
         "extension_route_key": row.get("extension_route_key") or "",
         "image_enabled": bool(row.get("image_enabled")),
@@ -1256,6 +1263,20 @@ async def open_browser_profile(
     try:
         service = await BrowserProfileService.get_instance(db=db, flow_client=token_manager.flow_client)
         return {"success": True, "profile": await service.open_profile(token_id)}
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/tokens/{token_id}/browser-profile/close")
+async def close_browser_profile(
+    token_id: int,
+    token: str = Depends(verify_admin_token),
+):
+    try:
+        service = await BrowserProfileService.get_instance(db=db, flow_client=token_manager.flow_client)
+        return {"success": True, "profile": await service.close_profile(token_id)}
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
