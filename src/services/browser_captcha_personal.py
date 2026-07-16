@@ -847,15 +847,51 @@ def _patch_nodriver_connection_instance(connection_instance):
         debug_logger.log_warning(f"[BrowserCaptcha] 加载 nodriver.connection 失败，跳过连接补丁: {e}")
         return
 
+    class _CompatTransaction:
+        """Fallback for nodriver releases whose Transaction signature changed."""
+
+        def __init__(self, cdp_generator, tx_id: int):
+            method, *params = next(cdp_generator).values()
+            params = params.pop() if params else {}
+            self.id = tx_id
+            self.message = json.dumps({"method": method, "params": params, "id": tx_id})
+            self._cdp_generator = cdp_generator
+            self._future = asyncio.get_running_loop().create_future()
+
+        def __call__(self, **response):
+            if self._future.done():
+                return
+            if "error" in response:
+                self._future.set_exception(RuntimeError(str(response["error"])))
+                return
+            try:
+                self._cdp_generator.send(response.get("result"))
+            except StopIteration as exc:
+                self._future.set_result(exc.value)
+            except Exception as exc:
+                self._future.set_exception(exc)
+
+        def __await__(self):
+            return self._future.__await__()
+
+        def done(self) -> bool:
+            return self._future.done()
+
+        def cancel(self):
+            self._future.cancel()
+
     async def patched_send(self, cdp_obj, _is_update=False):
         if _is_nodriver_connection_closed(self):
             await self.connect()
         if not _is_update:
             await self._register_handlers()
 
-        transaction = nodriver_connection_module.Transaction(cdp_obj)
         tx_id = next(self.__count__)
-        transaction.id = tx_id
+        try:
+            transaction = nodriver_connection_module.Transaction(cdp_obj)
+            transaction.id = tx_id
+        except Exception:
+            transaction = _CompatTransaction(cdp_obj, tx_id)
         self.mapper[tx_id] = transaction
 
         websocket = getattr(self, "websocket", None)
@@ -2583,7 +2619,7 @@ class BrowserCaptchaService:
             from nodriver import cdp
 
             await self._run_with_timeout(
-                self.browser.connection.send(cdp.browser.get_version()),
+                self.browser.send(cdp.browser.get_version()),
                 timeout_seconds=3.0,
                 label="browser.health_probe",
             )
@@ -2722,7 +2758,7 @@ class BrowserCaptchaService:
             from nodriver import cdp
 
             version_info = await self._run_with_timeout(
-                self.browser.connection.send(cdp.browser.get_version()),
+                self.browser.send(cdp.browser.get_version()),
                 timeout_seconds=5.0,
                 label="browser.get_version:runtime_profile",
             )
@@ -2907,7 +2943,7 @@ class BrowserCaptchaService:
                 for permission_name, permission_setting in configured_permissions:
                     try:
                         await self._run_with_timeout(
-                            self.browser.connection.send(
+                            self.browser.send(
                                 cdp.browser.set_permission(
                                     permission=cdp.browser.PermissionDescriptor(name=permission_name),
                                     setting=permission_setting,
@@ -2925,7 +2961,7 @@ class BrowserCaptchaService:
                         ):
                             raise
                         await self._run_with_timeout(
-                            self.browser.connection.send(
+                            self.browser.send(
                                 cdp.browser.set_permission(
                                     permission=cdp.browser.PermissionDescriptor(name=permission_name),
                                     setting=permission_setting,
@@ -5697,7 +5733,7 @@ class BrowserCaptchaService:
                 )
 
         browser_context_id = await self._run_with_timeout(
-            browser.connection.send(
+            browser.send(
                 cdp.target.create_browser_context(
                     dispose_on_detach=True,
                 )
@@ -5710,7 +5746,7 @@ class BrowserCaptchaService:
         try:
             async def _send_create_target():
                 return await self._run_with_timeout(
-                    browser.connection.send(
+                    browser.send(
                         cdp.target.create_target(
                             initial_url,
                             browser_context_id=browser_context_id,
@@ -5797,7 +5833,7 @@ class BrowserCaptchaService:
                 from nodriver import cdp
 
                 return await self._run_with_timeout(
-                    self.browser.connection.send(
+                    self.browser.send(
                         cdp.storage.get_cookies(browser_context_id=browser_context_id)
                     ),
                     timeout_seconds or self._command_timeout_seconds,
@@ -5821,7 +5857,7 @@ class BrowserCaptchaService:
         timeout_seconds: Optional[float] = None,
     ):
         return await self._run_with_timeout(
-            self.browser.connection.send(command),
+            self.browser.send(command),
             timeout_seconds or self._command_timeout_seconds,
             label or "browser.command",
         )
@@ -6337,7 +6373,7 @@ class BrowserCaptchaService:
             from nodriver import cdp
 
             await self._run_with_timeout(
-                target_browser.connection.send(
+                target_browser.send(
                     cdp.target.dispose_browser_context(browser_context_id)
                 ),
                 timeout_seconds=5.0,
@@ -6431,7 +6467,7 @@ class BrowserCaptchaService:
             )
 
         await self._run_with_timeout(
-            self.browser.connection.send(cookie_command),
+            self.browser.send(cookie_command),
             timeout_seconds=timeout_seconds,
             label=label,
         )
@@ -6962,7 +6998,7 @@ class BrowserCaptchaService:
                     else:
                         clear_cookie_command = cdp.storage.clear_cookies(browser_context_id=browser_context_id)
                     await self._run_with_timeout(
-                        self.browser.connection.send(
+                        self.browser.send(
                             clear_cookie_command
                         ),
                         timeout_seconds=8.0,

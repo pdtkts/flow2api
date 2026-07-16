@@ -154,6 +154,8 @@ export function TokenManagement() {
   const [geminiGenLoading, setGeminiGenLoading] = useState(false)
   const [loading, setLoading] = useState(false)
   const [atAutoRefresh, setAtAutoRefresh] = useState(true)
+  const [protocolAutoRefresh, setProtocolAutoRefresh] = useState(true)
+  const [protocolRefreshInterval, setProtocolRefreshInterval] = useState("120")
 
   const [addOpen, setAddOpen] = useState(false)
   const [editOpen, setEditOpen] = useState(false)
@@ -168,6 +170,11 @@ export function TokenManagement() {
   const [addImgConc, setAddImgConc] = useState("-1")
   const [addVidConc, setAddVidConc] = useState("-1")
   const [addPreviewAt, setAddPreviewAt] = useState("")
+  const [addProtocolMode, setAddProtocolMode] = useState(false)
+  const [addGoogleCookies, setAddGoogleCookies] = useState("")
+  const [addLoginAccount, setAddLoginAccount] = useState("")
+  const [addProtocolProxy, setAddProtocolProxy] = useState("")
+  const [addRefreshInterval, setAddRefreshInterval] = useState("120")
 
   const [editId, setEditId] = useState<number | null>(null)
   const [editSt, setEditSt] = useState("")
@@ -180,6 +187,12 @@ export function TokenManagement() {
   const [editPreviewAt, setEditPreviewAt] = useState("")
   const [editUseExtensionGen, setEditUseExtensionGen] = useState(true)
   const [editProfileSaving, setEditProfileSaving] = useState(false)
+  const [editProtocolMode, setEditProtocolMode] = useState(false)
+  const [editGoogleCookies, setEditGoogleCookies] = useState("")
+  const [editHasGoogleCookies, setEditHasGoogleCookies] = useState(false)
+  const [editLoginAccount, setEditLoginAccount] = useState("")
+  const [editProtocolProxy, setEditProtocolProxy] = useState("")
+  const [editRefreshInterval, setEditRefreshInterval] = useState("120")
 
   const [importFile, setImportFile] = useState<File | null>(null)
   const [profileBusyId, setProfileBusyId] = useState<number | "new" | null>(null)
@@ -207,11 +220,22 @@ export function TokenManagement() {
 
   const loadAtRefreshConfig = useCallback(async () => {
     if (!token) return
-    const { ok, data } = await adminJson<{ success?: boolean; config?: { at_auto_refresh_enabled?: boolean } }>(
+    const { ok, data } = await adminJson<{
+      success?: boolean
+      config?: {
+        at_auto_refresh_enabled?: boolean
+        protocol_refresh_enabled?: boolean
+        refresh_interval_minutes?: number
+      }
+    }>(
       "/api/token-refresh/config",
       token
     )
-    if (ok && data?.config) setAtAutoRefresh(!!data.config.at_auto_refresh_enabled)
+    if (ok && data?.config) {
+      setAtAutoRefresh(!!data.config.at_auto_refresh_enabled)
+      setProtocolAutoRefresh(data.config.protocol_refresh_enabled !== false)
+      setProtocolRefreshInterval(String(data.config.refresh_interval_minutes ?? 120))
+    }
   }, [token])
 
   const loadGeminiGenAccounts = useCallback(async () => {
@@ -269,6 +293,33 @@ export function TokenManagement() {
       setAtAutoRefresh(prev)
       toast.error(d.detail || d.message || "Failed")
     }
+  }
+
+  const updateProtocolRefreshConfig = async (enabled: boolean, intervalValue: string) => {
+    if (!token) return
+    const interval = Math.max(1, Math.min(10080, Number.parseInt(intervalValue, 10) || 120))
+    const previousEnabled = protocolAutoRefresh
+    const previousInterval = protocolRefreshInterval
+    setProtocolAutoRefresh(enabled)
+    setProtocolRefreshInterval(String(interval))
+    const { ok, data } = await adminJson<{
+      success?: boolean
+      config?: { protocol_refresh_enabled?: boolean; refresh_interval_minutes?: number }
+      detail?: string
+      message?: string
+    }>("/api/token-refresh/config", token, {
+      method: "POST",
+      body: JSON.stringify({ enabled, refresh_interval_minutes: interval }),
+    })
+    if (ok && data?.success) {
+      setProtocolAutoRefresh(data.config?.protocol_refresh_enabled !== false)
+      setProtocolRefreshInterval(String(data.config?.refresh_interval_minutes ?? interval))
+      toast.success("Protocol ST refresh settings updated")
+      return
+    }
+    setProtocolAutoRefresh(previousEnabled)
+    setProtocolRefreshInterval(previousInterval)
+    toast.error(data?.detail || data?.message || "Failed to update protocol refresh settings")
   }
 
   const exportTokens = () => {
@@ -335,6 +386,12 @@ export function TokenManagement() {
           video_enabled: addVideoEn,
           image_concurrency: parseInt(addImgConc, 10) || -1,
           video_concurrency: parseInt(addVidConc, 10) || -1,
+          protocol_mode: addProtocolMode ? "protocol" : "session",
+          google_cookies: addProtocolMode ? addGoogleCookies.trim() || null : null,
+          login_account: addProtocolMode ? addLoginAccount.trim() || null : null,
+          proxy_url: addProtocolMode ? addProtocolProxy.trim() || null : null,
+          auto_refresh_enabled: addProtocolMode,
+          refresh_interval_minutes: Math.max(1, parseInt(addRefreshInterval, 10) || 120),
         }),
       })
       if (!r) return
@@ -350,6 +407,11 @@ export function TokenManagement() {
         setAddImgConc("-1")
         setAddVidConc("-1")
         setAddPreviewAt("")
+        setAddProtocolMode(false)
+        setAddGoogleCookies("")
+        setAddLoginAccount("")
+        setAddProtocolProxy("")
+        setAddRefreshInterval("120")
         await refreshAll()
       } else toast.error(d.detail || d.message || "Add failed")
     } finally {
@@ -370,6 +432,12 @@ export function TokenManagement() {
     setEditUseExtensionGen(
       !(row.use_extension_for_generation === false || row.use_extension_for_generation === 0)
     )
+    setEditProtocolMode(row.protocol_mode === "protocol")
+    setEditGoogleCookies("")
+    setEditHasGoogleCookies(!!row.has_google_cookies)
+    setEditLoginAccount(row.login_account || "")
+    setEditProtocolProxy("")
+    setEditRefreshInterval(String(row.refresh_interval_minutes || 120))
     setEditOpen(true)
   }
 
@@ -394,6 +462,12 @@ export function TokenManagement() {
           image_concurrency: editImgConc ? parseInt(editImgConc, 10) : null,
           video_concurrency: editVidConc ? parseInt(editVidConc, 10) : null,
           use_extension_for_generation: editUseExtensionGen,
+          protocol_mode: editProtocolMode ? "protocol" : "session",
+          google_cookies: editGoogleCookies.trim() || null,
+          login_account: editProtocolMode ? editLoginAccount.trim() || null : null,
+          proxy_url: editProtocolProxy.trim() || null,
+          auto_refresh_enabled: editProtocolMode,
+          refresh_interval_minutes: Math.max(1, parseInt(editRefreshInterval, 10) || 120),
         }),
       })
       if (!r) return
@@ -745,6 +819,24 @@ export function TokenManagement() {
               <span className="text-xs text-muted-foreground">Auto refresh AT</span>
               <Switch checked={atAutoRefresh} onCheckedChange={onToggleAtAutoRefresh} />
             </div>
+            <div className="flex items-center gap-2" title="Refresh protocol-mode ST values from stored Google cookies">
+              <span className="text-xs text-muted-foreground">Auto refresh protocol ST</span>
+              <Switch
+                checked={protocolAutoRefresh}
+                onCheckedChange={(enabled) => updateProtocolRefreshConfig(enabled, protocolRefreshInterval)}
+              />
+              <Input
+                type="number"
+                min={1}
+                max={10080}
+                className="h-8 w-20"
+                value={protocolRefreshInterval}
+                onChange={(event) => setProtocolRefreshInterval(event.target.value)}
+                onBlur={() => updateProtocolRefreshConfig(protocolAutoRefresh, protocolRefreshInterval)}
+                aria-label="Protocol refresh interval in minutes"
+              />
+              <span className="text-xs text-muted-foreground">min</span>
+            </div>
             <Button size="icon" variant="outline" onClick={() => refreshAll()} disabled={loading} title="Refresh">
               <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
             </Button>
@@ -931,6 +1023,35 @@ export function TokenManagement() {
               <Label>Captcha proxy URL</Label>
               <Input className="mt-1 font-mono text-sm" value={addCaptchaProxy} onChange={(e) => setAddCaptchaProxy(e.target.value)} />
             </div>
+            <div className="space-y-3 border-t pt-3">
+              <div className="flex items-start gap-3">
+                <Switch checked={addProtocolMode} onCheckedChange={setAddProtocolMode} className="mt-0.5" />
+                <div>
+                  <Label className="!mt-0">Protocol ST refresh</Label>
+                  <p className="text-xs text-muted-foreground">Use exported Google cookies to renew the Labs session token automatically.</p>
+                </div>
+              </div>
+              {addProtocolMode ? (
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <div className="sm:col-span-2">
+                    <Label>Google cookies</Label>
+                    <Textarea className="mt-1 font-mono text-xs" rows={3} value={addGoogleCookies} onChange={(e) => setAddGoogleCookies(e.target.value)} placeholder="Cookie JSON export or SID=...; HSID=..." />
+                  </div>
+                  <div>
+                    <Label>Google account hint</Label>
+                    <Input className="mt-1" value={addLoginAccount} onChange={(e) => setAddLoginAccount(e.target.value)} placeholder="name@example.com" />
+                  </div>
+                  <div>
+                    <Label>Refresh interval (minutes)</Label>
+                    <Input className="mt-1" type="number" min={1} max={10080} value={addRefreshInterval} onChange={(e) => setAddRefreshInterval(e.target.value)} />
+                  </div>
+                  <div className="sm:col-span-2">
+                    <Label>Protocol proxy URL (optional)</Label>
+                    <Input className="mt-1 font-mono text-sm" value={addProtocolProxy} onChange={(e) => setAddProtocolProxy(e.target.value)} />
+                  </div>
+                </div>
+              ) : null}
+            </div>
             <div className="flex flex-col gap-3 border-t pt-3">
               <div className="flex items-center gap-3">
                 <Switch checked={addImageEn} onCheckedChange={setAddImageEn} />
@@ -984,6 +1105,35 @@ export function TokenManagement() {
             <div>
               <Label>Captcha proxy URL</Label>
               <Input className="mt-1 font-mono text-sm" value={editCaptchaProxy} onChange={(e) => setEditCaptchaProxy(e.target.value)} />
+            </div>
+            <div className="space-y-3 border-t pt-3">
+              <div className="flex items-start gap-3">
+                <Switch checked={editProtocolMode} onCheckedChange={setEditProtocolMode} className="mt-0.5" />
+                <div>
+                  <Label className="!mt-0">Protocol ST refresh</Label>
+                  <p className="text-xs text-muted-foreground">Cookie values are write-only and never returned by the API.</p>
+                </div>
+              </div>
+              {editProtocolMode ? (
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <div className="sm:col-span-2">
+                    <Label>Replace Google cookies</Label>
+                    <Textarea className="mt-1 font-mono text-xs" rows={3} value={editGoogleCookies} onChange={(e) => setEditGoogleCookies(e.target.value)} placeholder={editHasGoogleCookies ? "Cookies are configured; leave blank to keep them" : "Cookie JSON export or SID=...; HSID=..."} />
+                  </div>
+                  <div>
+                    <Label>Google account hint</Label>
+                    <Input className="mt-1" value={editLoginAccount} onChange={(e) => setEditLoginAccount(e.target.value)} />
+                  </div>
+                  <div>
+                    <Label>Refresh interval (minutes)</Label>
+                    <Input className="mt-1" type="number" min={1} max={10080} value={editRefreshInterval} onChange={(e) => setEditRefreshInterval(e.target.value)} />
+                  </div>
+                  <div className="sm:col-span-2">
+                    <Label>Replace protocol proxy URL</Label>
+                    <Input className="mt-1 font-mono text-sm" value={editProtocolProxy} onChange={(e) => setEditProtocolProxy(e.target.value)} placeholder="Leave blank to keep the configured proxy" />
+                  </div>
+                </div>
+              ) : null}
             </div>
             <div className="flex items-start gap-3 border-t pt-3">
               <Switch checked={editUseExtensionGen} onCheckedChange={setEditUseExtensionGen} className="mt-0.5" />

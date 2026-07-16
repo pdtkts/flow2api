@@ -684,7 +684,35 @@ MODEL_CONFIG = {
         "min_images": 0,
         "max_images": 3,
         "upsample": {"resolution": "VIDEO_RESOLUTION_1080P", "model_key": "veo_3_1_upsampler_1080p"}
-    }
+    },
+    "omni": {
+        "type": "video",
+        "video_type": "omni",
+        "model_key": "abra_t2v_8s",
+        "reference_model_key": "abra_r2v_8s",
+        "aspect_ratio": "VIDEO_ASPECT_RATIO_LANDSCAPE",
+        "supports_images": True,
+        "min_images": 0,
+        "max_images": 3,
+        "use_v2_model_config": True,
+        "allow_tier_upgrade": False,
+        "reference_duration": 8,
+        "reference_model_display_name": "Omni Flash",
+    },
+    "omni_portrait": {
+        "type": "video",
+        "video_type": "omni",
+        "model_key": "abra_t2v_8s",
+        "reference_model_key": "abra_r2v_8s",
+        "aspect_ratio": "VIDEO_ASPECT_RATIO_PORTRAIT",
+        "supports_images": True,
+        "min_images": 0,
+        "max_images": 3,
+        "use_v2_model_config": True,
+        "allow_tier_upgrade": False,
+        "reference_duration": 8,
+        "reference_model_display_name": "Omni Flash",
+    },
 }
 
 
@@ -2182,6 +2210,14 @@ class GenerationHandler:
                     return
 
             # ========== 上传图片 ==========
+            if video_type == "omni" and max_images is not None and image_count > max_images:
+                error_msg = f"Omni supports at most {max_images} reference images; received {image_count}"
+                if stream:
+                    yield self._create_stream_chunk(f"{error_msg}\n")
+                self._mark_generation_failed(generation_result, error_msg)
+                yield self._create_error_response(error_msg, status_code=400)
+                return
+
             start_media_id = None
             end_media_id = None
             reference_images = []
@@ -2210,7 +2246,7 @@ class GenerationHandler:
                     debug_logger.log_info(f"[I2V] 上传首尾帧: {start_media_id}, {end_media_id}")
 
             # R2V: 多图处理
-            elif video_type == "r2v" and images:
+            elif video_type in {"r2v", "omni"} and images:
                 if stream:
                     yield self._create_stream_chunk(f"上传 {image_count} 张参考图片...\n")
 
@@ -2267,12 +2303,16 @@ class GenerationHandler:
                         token_video_concurrency=token.video_concurrency,
                         poll_task_progress=poll_hook,
                     )
-                if video_type == "r2v" and reference_images:
+                if video_type in {"r2v", "omni"} and reference_images:
                     return await self.flow_client.generate_video_reference_images(
                         at=token.at,
                         project_id=project_id,
                         prompt=prompt,
-                        model_key=model_config["model_key"],
+                        model_key=(
+                            model_config.get("reference_model_key", "abra_r2v_8s")
+                            if video_type == "omni"
+                            else model_config["model_key"]
+                        ),
                         aspect_ratio=model_config["aspect_ratio"],
                         reference_images=reference_images,
                         user_paygate_tier=normalized_tier,

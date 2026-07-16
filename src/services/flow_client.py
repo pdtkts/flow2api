@@ -1114,7 +1114,7 @@ class FlowClient:
                 "toolName": "PINHOLE"
             }
         }
-        max_retries = config.flow_max_retries
+        max_retries = self._resolve_generation_retry_budget(config.flow_max_retries)
         request_timeout = max(self._get_control_plane_timeout(), min(self.timeout, 15))
         last_error: Optional[Exception] = None
 
@@ -1323,7 +1323,7 @@ class FlowClient:
                 "tool": "ASSET_MANAGER"
             }
         }
-        max_retries = config.flow_max_retries
+        max_retries = self._resolve_generation_retry_budget(config.flow_max_retries)
         last_error: Optional[Exception] = None
 
         for retry_attempt in range(max_retries):
@@ -1432,7 +1432,7 @@ class FlowClient:
         url = f"{self.api_base_url}/projects/{project_id}/flowMedia:batchGenerateImages"
 
         # 403/reCAPTCHA 重试逻辑
-        max_retries = config.flow_max_retries
+        max_retries = self._resolve_generation_retry_budget(config.flow_max_retries)
         last_error = None
         perf_trace: Dict[str, Any] = {
             "max_retries": max_retries,
@@ -1634,7 +1634,7 @@ class FlowClient:
         url = f"{self.api_base_url}/flow/upsampleImage"
 
         # 403/reCAPTCHA/500 重试逻辑 - 使用配置的最大重试次数
-        max_retries = config.flow_max_retries
+        max_retries = self._resolve_generation_retry_budget(config.flow_max_retries)
         last_error = None
 
         for retry_attempt in range(max_retries):
@@ -2398,7 +2398,7 @@ class FlowClient:
         url = f"{self.api_base_url}/video:batchAsyncGenerateVideoText"
 
         # 403/reCAPTCHA 重试逻辑 - 使用配置的最大重试次数
-        max_retries = config.flow_max_retries
+        max_retries = self._resolve_generation_retry_budget(config.flow_max_retries)
         last_error = None
         
         for retry_attempt in range(max_retries):
@@ -2560,7 +2560,7 @@ class FlowClient:
         url = f"{self.api_base_url}/video:batchAsyncGenerateVideoReferenceImages"
 
         # 403/reCAPTCHA 重试逻辑 - 使用配置的最大重试次数
-        max_retries = config.flow_max_retries
+        max_retries = self._resolve_generation_retry_budget(config.flow_max_retries)
         last_error = None
         
         for retry_attempt in range(max_retries):
@@ -2731,7 +2731,7 @@ class FlowClient:
         url = f"{self.api_base_url}/video:batchAsyncGenerateVideoStartAndEndImage"
 
         # 403/reCAPTCHA 重试逻辑 - 使用配置的最大重试次数
-        max_retries = config.flow_max_retries
+        max_retries = self._resolve_generation_retry_budget(config.flow_max_retries)
         last_error = None
         
         for retry_attempt in range(max_retries):
@@ -2900,7 +2900,7 @@ class FlowClient:
         url = f"{self.api_base_url}/video:batchAsyncGenerateVideoStartImage"
 
         # 403/reCAPTCHA 重试逻辑 - 使用配置的最大重试次数
-        max_retries = config.flow_max_retries
+        max_retries = self._resolve_generation_retry_budget(config.flow_max_retries)
         last_error = None
         
         for retry_attempt in range(max_retries):
@@ -3273,7 +3273,7 @@ class FlowClient:
         url = f"{self.api_base_url}/video:batchAsyncGenerateVideoUpsampleVideo"
 
         # 403/reCAPTCHA 重试逻辑 - 使用配置的最大重试次数
-        max_retries = config.flow_max_retries
+        max_retries = self._resolve_generation_retry_budget(config.flow_max_retries)
         last_error = None
         
         for retry_attempt in range(max_retries):
@@ -3428,7 +3428,7 @@ class FlowClient:
 
         media_refs = self._operations_to_media_refs(operations)
         json_data = {"media": media_refs} if media_refs else {"operations": operations}
-        max_retries = config.flow_max_retries
+        max_retries = self._resolve_generation_retry_budget(config.flow_max_retries)
         last_error: Optional[Exception] = None
 
         for retry_attempt in range(max_retries):
@@ -3534,6 +3534,21 @@ class FlowClient:
         )
 
     # ========== 辅助方法 ==========
+
+    def _resolve_generation_retry_budget(
+        self,
+        base_max_retries: int,
+        error: Optional[Union[Exception, str]] = None,
+    ) -> int:
+        """Return the bounded retry budget for generation/captcha failures."""
+        try:
+            budget = max(1, int(base_max_retries or 1))
+        except Exception:
+            budget = 1
+        error_text = str(error or "").lower()
+        if config.captcha_method == "browser" or "recaptcha evaluation failed" in error_text:
+            budget = max(budget, config.browser_captcha_generation_retries)
+        return max(1, min(20, budget))
 
     async def _handle_retryable_generation_error(
         self,

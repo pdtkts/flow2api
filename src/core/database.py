@@ -33,6 +33,7 @@ from .models import (
     GeminiGenConfig,
     GeminiGenAccount,
     GeminiGenTask,
+    TokenRefreshConfig,
 )
 
 
@@ -933,7 +934,7 @@ class Database:
                         captcha_method TEXT DEFAULT 'browser',
                         yescaptcha_api_key TEXT DEFAULT '',
                         yescaptcha_base_url TEXT DEFAULT 'https://api.yescaptcha.com',
-                        yescaptcha_task_type TEXT DEFAULT 'RecaptchaV3TaskProxylessM1',
+                        yescaptcha_task_type TEXT DEFAULT 'RecaptchaV3TaskProxylessM1S7',
                         capmonster_api_key TEXT DEFAULT '',
                         capmonster_base_url TEXT DEFAULT 'https://api.capmonster.cloud',
                         ezcaptcha_api_key TEXT DEFAULT '',
@@ -1118,6 +1119,14 @@ class Database:
                     ("captcha_proxy_url", "TEXT"),  # token级打码代理
                     ("extension_route_key", "TEXT"),  # extension 模式路由键
                     ("use_extension_for_generation", "INTEGER NOT NULL DEFAULT 1"),
+                    ("protocol_mode", "TEXT NOT NULL DEFAULT 'session'"),
+                    ("google_cookies", "TEXT NOT NULL DEFAULT ''"),
+                    ("login_account", "TEXT NOT NULL DEFAULT ''"),
+                    ("proxy_url", "TEXT NOT NULL DEFAULT ''"),
+                    ("auto_refresh_enabled", "BOOLEAN NOT NULL DEFAULT 1"),
+                    ("refresh_interval_minutes", "INTEGER NOT NULL DEFAULT 120"),
+                    ("last_st_refresh_at", "TIMESTAMP"),
+                    ("last_st_refresh_result", "TEXT NOT NULL DEFAULT ''"),
                     ("ban_reason", "TEXT"),  # 禁用原因
                     ("banned_at", "TIMESTAMP"),  # 禁用时间
                 ]
@@ -1243,7 +1252,7 @@ class Database:
                 captcha_columns_to_add = [
                     ("browser_proxy_enabled", "BOOLEAN DEFAULT 0"),
                     ("browser_proxy_url", "TEXT"),
-                    ("yescaptcha_task_type", "TEXT DEFAULT 'RecaptchaV3TaskProxylessM1'"),
+                    ("yescaptcha_task_type", "TEXT DEFAULT 'RecaptchaV3TaskProxylessM1S7'"),
                     ("capmonster_api_key", "TEXT DEFAULT ''"),
                     ("capmonster_base_url", "TEXT DEFAULT 'https://api.capmonster.cloud'"),
                     ("ezcaptcha_api_key", "TEXT DEFAULT ''"),
@@ -1428,10 +1437,31 @@ class Database:
                     browser_profile_last_sync_at TIMESTAMP,
                     browser_profile_last_refresh_at TIMESTAMP,
                     browser_profile_last_error TEXT,
+                    protocol_mode TEXT NOT NULL DEFAULT 'session',
+                    google_cookies TEXT NOT NULL DEFAULT '',
+                    login_account TEXT NOT NULL DEFAULT '',
+                    proxy_url TEXT NOT NULL DEFAULT '',
+                    auto_refresh_enabled BOOLEAN NOT NULL DEFAULT 1,
+                    refresh_interval_minutes INTEGER NOT NULL DEFAULT 120,
+                    last_st_refresh_at TIMESTAMP,
+                    last_st_refresh_result TEXT NOT NULL DEFAULT '',
                     ban_reason TEXT,
                     banned_at TIMESTAMP
                 )
             """)
+
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS token_refresh_config (
+                    id INTEGER PRIMARY KEY DEFAULT 1,
+                    enabled BOOLEAN NOT NULL DEFAULT 1,
+                    refresh_interval_minutes INTEGER NOT NULL DEFAULT 120,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            await db.execute(
+                "INSERT OR IGNORE INTO token_refresh_config "
+                "(id, enabled, refresh_interval_minutes) VALUES (1, 1, 120)"
+            )
 
             # Projects table (新增)
             await db.execute("""
@@ -1659,7 +1689,7 @@ class Database:
                     captcha_method TEXT DEFAULT 'browser',
                     yescaptcha_api_key TEXT DEFAULT '',
                     yescaptcha_base_url TEXT DEFAULT 'https://api.yescaptcha.com',
-                    yescaptcha_task_type TEXT DEFAULT 'RecaptchaV3TaskProxylessM1',
+                    yescaptcha_task_type TEXT DEFAULT 'RecaptchaV3TaskProxylessM1S7',
                     capmonster_api_key TEXT DEFAULT '',
                     capmonster_base_url TEXT DEFAULT 'https://api.capmonster.cloud',
                     ezcaptcha_api_key TEXT DEFAULT '',
@@ -2038,8 +2068,11 @@ class Database:
                                    browser_profile_email, browser_profile_name, browser_profile_login_state,
                                    browser_profile_cookie_status, browser_profile_st_status, browser_profile_at_status,
                                    browser_profile_last_opened_at, browser_profile_last_sync_at,
-                                   browser_profile_last_refresh_at, browser_profile_last_error)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                   browser_profile_last_refresh_at, browser_profile_last_error,
+                                   protocol_mode, google_cookies, login_account, proxy_url,
+                                   auto_refresh_enabled, refresh_interval_minutes,
+                                   last_st_refresh_at, last_st_refresh_result)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (token.st, token.at, token.at_expires, token.email, token.name, token.remark,
                   token.is_active, token.credits, token.user_paygate_tier,
                   token.current_project_id, token.current_project_name,
@@ -2058,7 +2091,15 @@ class Database:
                   getattr(token, "browser_profile_last_opened_at", None),
                   getattr(token, "browser_profile_last_sync_at", None),
                   getattr(token, "browser_profile_last_refresh_at", None),
-                  getattr(token, "browser_profile_last_error", None)))
+                  getattr(token, "browser_profile_last_error", None),
+                  getattr(token, "protocol_mode", "session"),
+                  getattr(token, "google_cookies", ""),
+                  getattr(token, "login_account", ""),
+                  getattr(token, "proxy_url", ""),
+                  1 if getattr(token, "auto_refresh_enabled", True) else 0,
+                  max(1, min(10080, int(getattr(token, "refresh_interval_minutes", 120) or 120))),
+                  getattr(token, "last_st_refresh_at", None),
+                  getattr(token, "last_st_refresh_result", "")))
             await db.commit()
             token_id = cursor.lastrowid
 
@@ -6563,3 +6604,45 @@ class Database:
             )
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
+
+    async def get_token_refresh_config(self) -> TokenRefreshConfig:
+        """Return global protocol ST refresh settings."""
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("SELECT * FROM token_refresh_config WHERE id = 1")
+            row = await cursor.fetchone()
+            return TokenRefreshConfig(**dict(row)) if row else TokenRefreshConfig()
+
+    async def update_token_refresh_config(
+        self,
+        *,
+        enabled: Optional[bool] = None,
+        refresh_interval_minutes: Optional[int] = None,
+    ) -> TokenRefreshConfig:
+        """Update global protocol ST refresh settings with bounded values."""
+        current = await self.get_token_refresh_config()
+        new_enabled = current.enabled if enabled is None else bool(enabled)
+        raw_interval = (
+            current.refresh_interval_minutes
+            if refresh_interval_minutes is None
+            else refresh_interval_minutes
+        )
+        try:
+            interval = max(1, min(10080, int(raw_interval)))
+        except Exception:
+            interval = 120
+
+        async with self._connect(write=True) as db:
+            await db.execute(
+                """
+                INSERT INTO token_refresh_config (id, enabled, refresh_interval_minutes, updated_at)
+                VALUES (1, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(id) DO UPDATE SET
+                    enabled = excluded.enabled,
+                    refresh_interval_minutes = excluded.refresh_interval_minutes,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (1 if new_enabled else 0, interval),
+            )
+            await db.commit()
+        return await self.get_token_refresh_config()

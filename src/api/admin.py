@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from fastapi import APIRouter, Depends, File, HTTPException, Header, Query, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 from typing import Optional, List, Dict, Any
 import secrets
@@ -26,6 +26,13 @@ from ..core.api_key_manager import ApiKeyManager
 from ..core.database import Database
 from ..core.config import config, get_yescaptcha_min_score, normalize_yescaptcha_task_type
 from ..core.models import GenerationConfig, Token
+from ..core.browser_runtime_status import (
+    fail_runtime_prepare,
+    finish_runtime_prepare,
+    get_runtime_status,
+    progress_runtime_prepare,
+    start_runtime_prepare,
+)
 from ..core.monitoring import build_public_health_snapshot
 from ..services.token_manager import TokenManager
 from ..services.proxy_manager import ProxyManager
@@ -50,6 +57,7 @@ concurrency_manager: Optional[ConcurrencyManager] = None
 api_key_manager: Optional[ApiKeyManager] = None
 runway_service: Optional[RunwayService] = None
 geminigen_service: Optional[GeminiGenService] = None
+captcha_runtime_prepare_tasks: Dict[str, asyncio.Task] = {}
 
 # Admin session TTLs (seconds)
 _ADMIN_SESSION_TTL_REMEMBER = 30 * 24 * 3600  # 30 days when "remember me" is on
@@ -657,6 +665,52 @@ def _supports_kwarg(fn: Any, kwarg: str) -> bool:
         return False
 
 
+def _normalize_runtime_method(method: Optional[str]) -> str:
+    normalized = str(method or "").strip().lower()
+    if normalized not in {"browser", "personal"}:
+        raise HTTPException(status_code=400, detail="Invalid runtime method")
+    return normalized
+
+
+async def _prepare_captcha_runtime(method: str) -> None:
+    runtime_method = _normalize_runtime_method(method)
+    start_runtime_prepare(runtime_method, f"Preparing {runtime_method} captcha runtime")
+    try:
+        if runtime_method == "browser":
+            from ..services.browser_captcha import BrowserCaptchaService
+
+            service = await BrowserCaptchaService.get_instance(db)
+            progress_runtime_prepare(runtime_method, "Warming headed browser slots")
+            await service.reload_browser_count()
+            await service.warmup_browser_slots()
+        else:
+            from ..services.browser_captcha_personal import BrowserCaptchaService
+
+            service = await BrowserCaptchaService.get_instance(db)
+            progress_runtime_prepare(runtime_method, "Reloading Personal browser pool")
+            await service.reload_config()
+        finish_runtime_prepare(runtime_method, f"{runtime_method.title()} captcha runtime is ready")
+    except Exception as exc:
+        fail_runtime_prepare(
+            runtime_method,
+            f"Runtime preparation failed: {type(exc).__name__}: {str(exc)[:200]}",
+        )
+    finally:
+        captcha_runtime_prepare_tasks.pop(runtime_method, None)
+
+
+def _schedule_captcha_runtime_prepare(method: str) -> bool:
+    runtime_method = _normalize_runtime_method(method)
+    existing = captcha_runtime_prepare_tasks.get(runtime_method)
+    if existing and not existing.done():
+        progress_runtime_prepare(runtime_method, "Runtime preparation is still in progress")
+        return False
+    captcha_runtime_prepare_tasks[runtime_method] = asyncio.create_task(
+        _prepare_captcha_runtime(runtime_method)
+    )
+    return True
+
+
 def set_dependencies(
     tm: TokenManager,
     pm: ProxyManager,
@@ -694,6 +748,12 @@ class AddTokenRequest(BaseModel):
     video_enabled: bool = True
     image_concurrency: int = -1
     video_concurrency: int = -1
+    protocol_mode: str = "session"
+    google_cookies: Optional[str] = None
+    login_account: Optional[str] = None
+    proxy_url: Optional[str] = None
+    auto_refresh_enabled: bool = True
+    refresh_interval_minutes: int = Field(default=120, ge=1, le=10080)
 
 
 class UpdateTokenRequest(BaseModel):
@@ -706,6 +766,12 @@ class UpdateTokenRequest(BaseModel):
     video_enabled: Optional[bool] = None
     image_concurrency: Optional[int] = None
     video_concurrency: Optional[int] = None
+    protocol_mode: Optional[str] = None
+    google_cookies: Optional[str] = None
+    login_account: Optional[str] = None
+    proxy_url: Optional[str] = None
+    auto_refresh_enabled: Optional[bool] = None
+    refresh_interval_minutes: Optional[int] = Field(default=None, ge=1, le=10080)
 
 
 class BrowserProfileTokenRequest(BaseModel):
@@ -960,6 +1026,11 @@ class ST2ATRequest(BaseModel):
     st: str
 
 
+class TokenRefreshConfigRequest(BaseModel):
+    enabled: Optional[bool] = None
+    refresh_interval_minutes: Optional[int] = Field(default=None, ge=1, le=10080)
+
+
 class ImportTokenItem(BaseModel):
     """导入Token项"""
     email: Optional[str] = None
@@ -1125,6 +1196,14 @@ async def get_tokens(token: str = Depends(verify_admin_token)):
         "runtime_open": runtime_states.get(int(row.get("id") or 0), False),
         "captcha_proxy_url": row.get("captcha_proxy_url") or "",
         "extension_route_key": row.get("extension_route_key") or "",
+        "protocol_mode": row.get("protocol_mode") or "session",
+        "has_google_cookies": bool(str(row.get("google_cookies") or "").strip()),
+        "login_account": row.get("login_account") or "",
+        "protocol_proxy_configured": bool(str(row.get("proxy_url") or "").strip()),
+        "auto_refresh_enabled": bool(row.get("auto_refresh_enabled", True)),
+        "refresh_interval_minutes": int(row.get("refresh_interval_minutes") or 120),
+        "last_st_refresh_at": to_iso(row.get("last_st_refresh_at")) if row.get("last_st_refresh_at") else None,
+        "last_st_refresh_result": row.get("last_st_refresh_result") or "",
         "image_enabled": bool(row.get("image_enabled")),
         "video_enabled": bool(row.get("video_enabled")),
         "image_concurrency": row.get("image_concurrency"),
@@ -1157,6 +1236,12 @@ async def add_token(
             "video_enabled": request.video_enabled,
             "image_concurrency": request.image_concurrency,
             "video_concurrency": request.video_concurrency,
+            "protocol_mode": request.protocol_mode,
+            "google_cookies": request.google_cookies,
+            "login_account": request.login_account,
+            "proxy_url": request.proxy_url,
+            "auto_refresh_enabled": request.auto_refresh_enabled,
+            "refresh_interval_minutes": request.refresh_interval_minutes,
         }
         if _supports_kwarg(token_manager.add_token, "extension_route_key"):
             add_kwargs["extension_route_key"] = (
@@ -1352,6 +1437,12 @@ async def update_token_profile_aware(
             "video_enabled": request.video_enabled,
             "image_concurrency": request.image_concurrency,
             "video_concurrency": request.video_concurrency,
+            "protocol_mode": request.protocol_mode,
+            "google_cookies": request.google_cookies,
+            "login_account": request.login_account,
+            "proxy_url": request.proxy_url,
+            "auto_refresh_enabled": request.auto_refresh_enabled,
+            "refresh_interval_minutes": request.refresh_interval_minutes,
         }
 
         st_value = (request.st or "").strip()
@@ -1434,6 +1525,12 @@ async def update_token(
             "video_enabled": request.video_enabled,
             "image_concurrency": request.image_concurrency,
             "video_concurrency": request.video_concurrency,
+            "protocol_mode": request.protocol_mode,
+            "google_cookies": request.google_cookies,
+            "login_account": request.login_account,
+            "proxy_url": request.proxy_url,
+            "auto_refresh_enabled": request.auto_refresh_enabled,
+            "refresh_interval_minutes": request.refresh_interval_minutes,
         }
         if _supports_kwarg(token_manager.update_token, "extension_route_key"):
             update_kwargs["extension_route_key"] = (
@@ -3779,14 +3876,17 @@ async def update_generation_timeout(
 
 @router.get("/api/token-refresh/config")
 async def get_token_refresh_config(token: str = Depends(verify_admin_token)):
-    """Get scheduled AT auto refresh configuration."""
+    """Get scheduled AT and protocol ST refresh configuration."""
     captcha_config = await db.get_captcha_config()
+    protocol_config = await db.get_token_refresh_config()
     return {
         "success": True,
         "config": {
             "at_auto_refresh_enabled": bool(
                 getattr(captcha_config, "session_refresh_scheduler_enabled", False)
-            )
+            ),
+            "protocol_refresh_enabled": protocol_config.enabled,
+            "refresh_interval_minutes": protocol_config.refresh_interval_minutes,
         }
     }
 
@@ -3803,6 +3903,25 @@ async def update_token_refresh_enabled(
     return {
         "success": True,
         "message": f"定时自动刷新已{'启用' if enabled else '禁用'}"
+    }
+
+
+@router.post("/api/token-refresh/config")
+async def update_protocol_token_refresh_config(
+    request: TokenRefreshConfigRequest,
+    token: str = Depends(verify_admin_token),
+):
+    """Update global protocol ST refresh settings."""
+    updated = await db.update_token_refresh_config(
+        enabled=request.enabled,
+        refresh_interval_minutes=request.refresh_interval_minutes,
+    )
+    return {
+        "success": True,
+        "config": {
+            "protocol_refresh_enabled": updated.enabled,
+            "refresh_interval_minutes": updated.refresh_interval_minutes,
+        },
     }
 
 
@@ -4146,24 +4265,29 @@ async def update_captcha_config(
     await db.reload_config_to_memory()
 
     # 如果使用 browser 打码，热重载浏览器数量配置
-    if captcha_method == "browser":
-        try:
-            from ..services.browser_captcha import BrowserCaptchaService
-            service = await BrowserCaptchaService.get_instance(db)
-            await service.reload_browser_count()
-        except Exception:
-            pass
-
-    # 如果使用 personal 打码，热重载配置
-    if captcha_method == "personal":
-        try:
-            from ..services.browser_captcha_personal import BrowserCaptchaService
-            service = await BrowserCaptchaService.get_instance(db)
-            await service.reload_config()
-        except Exception as e:
-            print(f"[Admin] Personal 配置热更新失败: {e}")
+    if captcha_method in {"browser", "personal"}:
+        runtime_prepare_started = _schedule_captcha_runtime_prepare(captcha_method)
+        return {
+            "success": True,
+            "message": "Captcha configuration updated successfully",
+            "runtime_prepare_started": runtime_prepare_started,
+            "runtime_status_method": captcha_method,
+        }
 
     return {"success": True, "message": "验证码配置更新成功"}
+
+
+@router.get("/api/captcha/runtime-status")
+async def get_captcha_runtime_status(
+    method: str = "browser",
+    token: str = Depends(verify_admin_token),
+):
+    runtime_method = _normalize_runtime_method(method)
+    task = captcha_runtime_prepare_tasks.get(runtime_method)
+    status = get_runtime_status(runtime_method)
+    status["method"] = runtime_method
+    status["task_running"] = bool(task and not task.done())
+    return status
 
 
 @router.get("/api/captcha/config")

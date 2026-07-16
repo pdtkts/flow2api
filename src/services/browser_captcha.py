@@ -14,6 +14,8 @@ import time
 import re
 import random
 import uuid
+import hashlib
+import json
 from typing import Optional, Dict, Any, List, Union
 from datetime import datetime
 from urllib.parse import urlparse, unquote, parse_qs
@@ -466,6 +468,111 @@ class TokenBrowser:
             "width": base_w,
             "height": base_h - random.randint(0, 80),
         }
+        self._profile_env_seed = hashlib.sha256(
+            f"{self.token_id}:{time.time_ns()}:{uuid.uuid4().hex}".encode("utf-8")
+        ).hexdigest()
+        self._profile_hardware_concurrency = random.choice([4, 6, 8, 8, 12, 16])
+        self._profile_device_memory = random.choice([4, 8, 8, 16])
+        self._profile_gpu = random.choice([
+            ("Intel Inc.", "Intel(R) UHD Graphics 620"),
+            ("NVIDIA Corporation", "NVIDIA GeForce GTX 1650"),
+            ("ATI Technologies Inc.", "AMD Radeon(TM) Graphics"),
+        ])
+
+    def _build_browser_environment_patch_config(self) -> Dict[str, Any]:
+        digest = hashlib.sha256(self._profile_env_seed.encode("utf-8")).digest()
+        width = int(self._profile_viewport["width"])
+        height = int(self._profile_viewport["height"])
+        return {
+            "seed": self._profile_env_seed[:16],
+            "width": width,
+            "height": height,
+            "hardwareConcurrency": self._profile_hardware_concurrency,
+            "deviceMemory": self._profile_device_memory,
+            "gpuVendor": self._profile_gpu[0],
+            "gpuRenderer": self._profile_gpu[1],
+            "quota": 120_000_000_000 + int(digest[0] % 20) * 1_000_000_000,
+            "usage": 8_000_000 + int(digest[1] % 20) * 250_000,
+        }
+
+    def _build_browser_environment_patch_source(self) -> str:
+        profile = json.dumps(
+            self._build_browser_environment_patch_config(),
+            ensure_ascii=True,
+            separators=(",", ":"),
+        )
+        return f"""
+(() => {{
+  const marker = '__flow2apiBrowserEnvironmentV2';
+  if (window[marker]) return;
+  const p = {profile};
+  Object.defineProperty(window, marker, {{value: p.seed, configurable: false}});
+  const getter = (target, key, value) => {{
+    try {{ Object.defineProperty(target, key, {{configurable: true, get: () => value}}); }} catch (_) {{}}
+  }};
+  getter(Navigator.prototype, 'webdriver', undefined);
+  getter(Navigator.prototype, 'language', 'en-US');
+  getter(Navigator.prototype, 'languages', ['en-US', 'en']);
+  getter(Navigator.prototype, 'hardwareConcurrency', p.hardwareConcurrency);
+  getter(Navigator.prototype, 'deviceMemory', p.deviceMemory);
+  getter(Navigator.prototype, 'maxTouchPoints', 0);
+  getter(Navigator.prototype, 'pdfViewerEnabled', true);
+  getter(Screen.prototype, 'width', p.width);
+  getter(Screen.prototype, 'height', p.height);
+  getter(Screen.prototype, 'availWidth', p.width);
+  getter(Screen.prototype, 'availHeight', Math.max(640, p.height - 40));
+  getter(window, 'innerWidth', p.width);
+  getter(window, 'innerHeight', p.height);
+  getter(window, 'outerWidth', p.width);
+  getter(window, 'outerHeight', p.height + 88);
+  getter(Document.prototype, 'hidden', false);
+  getter(Document.prototype, 'visibilityState', 'visible');
+  try {{ document.hasFocus = () => true; }} catch (_) {{}}
+
+  const mimeTypes = [{{type:'application/pdf', suffixes:'pdf', description:'Portable Document Format'}}];
+  const plugins = [{{name:'PDF Viewer', filename:'internal-pdf-viewer', description:'Portable Document Format', length:1}}];
+  plugins.item = i => plugins[Number(i)] || null;
+  plugins.namedItem = n => plugins.find(x => x.name === n) || null;
+  mimeTypes.item = i => mimeTypes[Number(i)] || null;
+  mimeTypes.namedItem = n => mimeTypes.find(x => x.type === n) || null;
+  getter(Navigator.prototype, 'plugins', plugins);
+  getter(Navigator.prototype, 'mimeTypes', mimeTypes);
+
+  const patchWebGL = proto => {{
+    if (!proto || typeof proto.getParameter !== 'function') return;
+    const original = proto.getParameter;
+    proto.getParameter = function(key) {{
+      if (key === 37445 || key === 7936) return p.gpuVendor;
+      if (key === 37446 || key === 7937) return p.gpuRenderer;
+      return original.apply(this, arguments);
+    }};
+  }};
+  patchWebGL(window.WebGLRenderingContext && WebGLRenderingContext.prototype);
+  patchWebGL(window.WebGL2RenderingContext && WebGL2RenderingContext.prototype);
+
+  if (!navigator.gpu) {{
+    const adapter = {{
+      features: new Set(['texture-compression-bc']),
+      limits: {{maxTextureDimension2D: 8192, maxBindGroups: 4}},
+      requestDevice: async () => ({{features: new Set(), limits: {{}}}}),
+      requestAdapterInfo: async () => ({{vendor:p.gpuVendor, architecture:'', device:p.gpuRenderer, description:''}}),
+    }};
+    getter(Navigator.prototype, 'gpu', {{requestAdapter: async () => adapter, getPreferredCanvasFormat: () => 'bgra8unorm'}});
+  }}
+  if (navigator.storage) {{
+    try {{ navigator.storage.estimate = async () => ({{quota:p.quota, usage:p.usage}}); }} catch (_) {{}}
+    try {{ navigator.storage.persisted = async () => false; }} catch (_) {{}}
+  }}
+  if (navigator.mediaDevices && !navigator.mediaDevices.enumerateDevices) {{
+    navigator.mediaDevices.enumerateDevices = async () => [];
+  }}
+  window.chrome = window.chrome || {{}};
+  window.chrome.runtime = window.chrome.runtime || {{}};
+  window.chrome.app = window.chrome.app || {{isInstalled:false}};
+  if (!performance.memory) getter(performance, 'memory', {{jsHeapSizeLimit:4294705152,totalJSHeapSize:32000000,usedJSHeapSize:18000000}});
+  if (document.fonts && typeof document.fonts.check !== 'function') document.fonts.check = () => true;
+}})();
+"""
 
     def _get_slot_marker(self) -> str:
         return f"--flow2api-browser-slot={self.token_id}"
@@ -717,6 +824,7 @@ class TokenBrowser:
                 viewport=viewport,
                 locale="en-US",
             )
+            await context.add_init_script(self._build_browser_environment_patch_source())
             browser_pid = self._extract_browser_pid(browser)
             if manage_slot_pid:
                 self._write_pid_file(browser_pid)
@@ -1535,7 +1643,7 @@ class TokenBrowser:
         """Get a token from the shared browser unless a fatal browser error occurs."""
         async with self._semaphore:
             self._solve_inflight += 1
-            max_retries = 3
+            max_retries = config.browser_captcha_max_retries
 
             try:
                 for attempt in range(max_retries):
@@ -1601,7 +1709,7 @@ class TokenBrowser:
         """Get a custom reCAPTCHA token using a temporary browser."""
         async with self._semaphore:
             self._solve_inflight += 1
-            max_retries = 3
+            max_retries = config.browser_captcha_max_retries
 
             try:
                 for attempt in range(max_retries):
@@ -1663,7 +1771,7 @@ class TokenBrowser:
         """Get a custom token and verify its score using a temporary browser."""
         async with self._semaphore:
             self._solve_inflight += 1
-            max_retries = 3
+            max_retries = config.browser_captcha_max_retries
 
             try:
                 for attempt in range(max_retries):
@@ -2377,4 +2485,3 @@ class BrowserCaptchaService:
             "browsers": []
         }
         return base_stats
-

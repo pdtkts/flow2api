@@ -1,7 +1,7 @@
 """Token manager for Flow2API with AT auto-refresh"""
 import asyncio
 from datetime import datetime, timedelta, timezone
-from typing import Optional, List
+from typing import Any, Awaitable, Callable, Dict, Optional, List
 from ..core.database import Database
 from ..core.config import config
 from ..core.models import Token, Project
@@ -23,6 +23,7 @@ class TokenManager:
         self._project_locks: dict[int, asyncio.Lock] = {}
         self._refresh_futures: dict[int, asyncio.Task] = {}
         self._last_st_refresh_reason: dict[int, str] = {}
+        self._protocol_refresher_task: Optional[asyncio.Task] = None
 
     def _set_st_refresh_reason(self, token_id: int, reason: str) -> None:
         self._last_st_refresh_reason[token_id] = str(reason or "").strip() or "unknown"
@@ -78,6 +79,64 @@ class TokenManager:
         """Build a project name for the pool."""
         normalized_base = self._normalize_project_name_base(base_name)
         return f"{normalized_base} P{pool_index}"
+
+    @staticmethod
+    def _normalize_protocol_mode(value: Optional[str]) -> str:
+        return "protocol" if str(value or "").strip().lower() == "protocol" else "session"
+
+    @staticmethod
+    def _normalize_refresh_interval(value: Optional[int]) -> int:
+        try:
+            return max(1, min(10080, int(value if value is not None else 120)))
+        except Exception:
+            return 120
+
+    @staticmethod
+    def _as_utc(value: Optional[datetime]) -> Optional[datetime]:
+        if value is None:
+            return None
+        return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+
+    @staticmethod
+    def _parse_at_expires(value: Optional[str]) -> Optional[datetime]:
+        if not value:
+            return None
+        try:
+            return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except Exception:
+            return None
+
+    def _normalize_token_proxy_url(self, proxy_url: Optional[str]) -> str:
+        raw = str(proxy_url or "").strip()
+        if not raw:
+            return ""
+        proxy_manager = getattr(self.flow_client, "proxy_manager", None)
+        normalize = getattr(proxy_manager, "normalize_proxy_url", None)
+        if callable(normalize):
+            return str(normalize(raw) or "")
+        return raw
+
+    async def _flow_call_for_token(
+        self,
+        token: Optional[Token],
+        call: Callable[[], Awaitable[Dict[str, Any]]],
+    ) -> Dict[str, Any]:
+        previous_fingerprint = self.flow_client.get_request_fingerprint()
+        proxy_url = str(getattr(token, "proxy_url", "") or "").strip()
+        if proxy_url:
+            fingerprint = dict(previous_fingerprint or {})
+            fingerprint["proxy_url"] = proxy_url
+            self.flow_client._set_request_fingerprint(fingerprint)
+        try:
+            return await call()
+        finally:
+            self.flow_client._set_request_fingerprint(previous_fingerprint)
+
+    async def _st_to_at_for_token(self, token: Optional[Token], st: str) -> Dict[str, Any]:
+        return await self._flow_call_for_token(token, lambda: self.flow_client.st_to_at(st))
+
+    async def _get_credits_for_token(self, token: Optional[Token], at: str) -> Dict[str, Any]:
+        return await self._flow_call_for_token(token, lambda: self.flow_client.get_credits(at))
 
     async def get_personal_warmup_project_ids(
         self,
@@ -233,7 +292,13 @@ class TokenManager:
         image_concurrency: int = -1,
         video_concurrency: int = -1,
         captcha_proxy_url: Optional[str] = None,
-        extension_route_key: Optional[str] = None
+        extension_route_key: Optional[str] = None,
+        protocol_mode: str = "session",
+        google_cookies: Optional[str] = None,
+        login_account: Optional[str] = None,
+        proxy_url: Optional[str] = None,
+        auto_refresh_enabled: bool = True,
+        refresh_interval_minutes: int = 120,
     ) -> Token:
         """Add a new token and prepare its pooled projects."""
         existing_token = await self.db.get_token_by_st(st)
@@ -241,8 +306,10 @@ class TokenManager:
             raise ValueError(f"Token ??????: {existing_token.email}?")
 
         debug_logger.log_info(f"[ADD_TOKEN] Converting ST to AT...")
+        normalized_proxy_url = self._normalize_token_proxy_url(proxy_url)
+        pending_token = Token(st=st, email="", proxy_url=normalized_proxy_url)
         try:
-            result = await self.flow_client.st_to_at(st)
+            result = await self._st_to_at_for_token(pending_token, st)
             at = result["access_token"]
             expires = result.get("expires")
             user_info = result.get("user", {})
@@ -258,7 +325,7 @@ class TokenManager:
             raise ValueError(f"ST?AT??: {str(e)}")
 
         try:
-            credits_result = await self.flow_client.get_credits(at)
+            credits_result = await self._get_credits_for_token(pending_token, at)
             credits = credits_result.get("credits", 0)
             user_paygate_tier = credits_result.get("userPaygateTier")
         except Exception:
@@ -282,7 +349,13 @@ class TokenManager:
             image_concurrency=image_concurrency,
             video_concurrency=video_concurrency,
             captcha_proxy_url=captcha_proxy_url,
-            extension_route_key=extension_route_key
+            extension_route_key=extension_route_key,
+            protocol_mode=self._normalize_protocol_mode(protocol_mode),
+            google_cookies=str(google_cookies or "").strip(),
+            login_account=str(login_account or "").strip(),
+            proxy_url=normalized_proxy_url,
+            auto_refresh_enabled=bool(auto_refresh_enabled),
+            refresh_interval_minutes=self._normalize_refresh_interval(refresh_interval_minutes),
         )
 
         token_id = await self.db.add_token(token)
@@ -308,6 +381,12 @@ class TokenManager:
         captcha_proxy_url: Optional[str] = None,
         extension_route_key: Optional[str] = None,
         use_extension_for_generation: Optional[bool] = None,
+        protocol_mode: Optional[str] = None,
+        google_cookies: Optional[str] = None,
+        login_account: Optional[str] = None,
+        proxy_url: Optional[str] = None,
+        auto_refresh_enabled: Optional[bool] = None,
+        refresh_interval_minutes: Optional[int] = None,
     ):
         """Update token (支持修改project_id和project_name)
 
@@ -341,6 +420,18 @@ class TokenManager:
             update_fields["extension_route_key"] = extension_route_key
         if use_extension_for_generation is not None:
             update_fields["use_extension_for_generation"] = 1 if use_extension_for_generation else 0
+        if protocol_mode is not None:
+            update_fields["protocol_mode"] = self._normalize_protocol_mode(protocol_mode)
+        if google_cookies is not None:
+            update_fields["google_cookies"] = str(google_cookies).strip()
+        if login_account is not None:
+            update_fields["login_account"] = str(login_account).strip()
+        if proxy_url is not None:
+            update_fields["proxy_url"] = self._normalize_token_proxy_url(proxy_url)
+        if auto_refresh_enabled is not None:
+            update_fields["auto_refresh_enabled"] = bool(auto_refresh_enabled)
+        if refresh_interval_minutes is not None:
+            update_fields["refresh_interval_minutes"] = self._normalize_refresh_interval(refresh_interval_minutes)
 
         # 检查token是否因429被禁用，如果是且未过期，则清空429状态
         token = await self.db.get_token(token_id)
@@ -594,7 +685,7 @@ class TokenManager:
 
             # 验证 AT 有效性：通过 get_credits 测试
             try:
-                credits_result = await self.flow_client.get_credits(new_at)
+                credits_result = await self._get_credits_for_token(token, new_at)
                 await self.db.update_token(
                     token_id,
                     credits=credits_result.get("credits", 0),
@@ -621,6 +712,46 @@ class TokenManager:
             record_token_refresh("at", "failure")
             return False
 
+    async def _try_protocol_refresh_st(self, token_id: int, token: Token) -> Optional[str]:
+        """Refresh ST through the allowlisted Google protocol flow when enabled."""
+        if self._normalize_protocol_mode(getattr(token, "protocol_mode", "session")) != "protocol":
+            return None
+        if not str(getattr(token, "google_cookies", "") or "").strip():
+            self._set_st_refresh_reason(token_id, "protocol_cookies_missing")
+            return None
+
+        from .protocol_login import protocol_loginer
+
+        result = await protocol_loginer.login(
+            token.google_cookies,
+            proxy=str(getattr(token, "proxy_url", "") or "").strip() or None,
+            email=str(getattr(token, "login_account", "") or token.email or "").strip() or None,
+        )
+        refreshed_at = datetime.now(timezone.utc)
+        if result.get("success") and result.get("session_token"):
+            new_st = str(result["session_token"]).strip()
+            await self.db.update_token(
+                token_id,
+                st=new_st,
+                last_st_refresh_at=refreshed_at,
+                last_st_refresh_result="success",
+            )
+            self._set_st_refresh_reason(token_id, "success_protocol")
+            record_token_refresh("st", "success")
+            debug_logger.log_info(f"[ST_REFRESH] Token {token_id}: protocol ST refresh succeeded")
+            return new_st
+
+        safe_error = str(result.get("error") or "Protocol refresh failed")[:240]
+        await self.db.update_token(
+            token_id,
+            last_st_refresh_at=refreshed_at,
+            last_st_refresh_result=safe_error,
+        )
+        self._set_st_refresh_reason(token_id, "protocol_failed")
+        record_token_refresh("st", "failure")
+        debug_logger.log_warning(f"[ST_REFRESH] Token {token_id}: protocol ST refresh failed: {safe_error}")
+        return None
+
     async def _try_refresh_st(self, token_id: int, token) -> Optional[str]:
         """尝试通过浏览器刷新 Session Token
 
@@ -636,6 +767,11 @@ class TokenManager:
         try:
             from ..core.config import config
             captcha_mode = str(config.captcha_method or "").strip()
+
+            if self._normalize_protocol_mode(getattr(token, "protocol_mode", "session")) == "protocol":
+                protocol_st = await self._try_protocol_refresh_st(token_id, token)
+                if protocol_st:
+                    return protocol_st
 
             if getattr(token, "auth_mode", "session_token") == "browser_profile":
                 try:
@@ -818,6 +954,125 @@ class TokenManager:
             self._set_st_refresh_reason(token_id, "st_refresh_exception")
             record_token_refresh("st", "failure")
             return None
+
+    async def _refresh_protocol_token(self, token: Token) -> None:
+        token_id = int(token.id)
+        refresh_lock = await self._get_token_lock(
+            self._refresh_locks,
+            self._refresh_lock_guard,
+            token_id,
+        )
+        async with refresh_lock:
+            latest = await self.db.get_token(token_id)
+            if (
+                not latest
+                or not latest.is_active
+                or not latest.auto_refresh_enabled
+                or self._normalize_protocol_mode(latest.protocol_mode) != "protocol"
+                or not latest.google_cookies.strip()
+            ):
+                return
+
+            new_st = await self._try_protocol_refresh_st(token_id, latest)
+            if not new_st:
+                return
+
+            try:
+                session = await self._st_to_at_for_token(latest, new_st)
+                new_at = str(session.get("access_token") or "").strip()
+                if not new_at:
+                    raise RuntimeError("ST-to-AT response did not include an access token")
+
+                updates: Dict[str, Any] = {
+                    "st": new_st,
+                    "at": new_at,
+                    "at_expires": self._parse_at_expires(session.get("expires")),
+                    "last_st_refresh_at": datetime.now(timezone.utc),
+                    "last_st_refresh_result": "success",
+                }
+                user = session.get("user") if isinstance(session.get("user"), dict) else {}
+                if user.get("email"):
+                    updates["email"] = user["email"]
+                if user.get("name"):
+                    updates["name"] = user["name"]
+
+                try:
+                    credits = await self._get_credits_for_token(latest, new_at)
+                    updates["credits"] = credits.get("credits", 0)
+                    updates["user_paygate_tier"] = credits.get("userPaygateTier")
+                except Exception as exc:
+                    debug_logger.log_warning(
+                        f"[PROTOCOL_REFRESH] Token {token_id}: credit refresh failed: {type(exc).__name__}"
+                    )
+
+                await self.db.update_token(token_id, **updates)
+                record_token_refresh("at", "success")
+            except Exception as exc:
+                await self.db.update_token(
+                    token_id,
+                    st=new_st,
+                    last_st_refresh_at=datetime.now(timezone.utc),
+                    last_st_refresh_result=f"at_refresh_failed:{type(exc).__name__}",
+                )
+                record_token_refresh("at", "failure")
+                debug_logger.log_error(
+                    f"[PROTOCOL_REFRESH] Token {token_id}: ST-to-AT refresh failed: {type(exc).__name__}"
+                )
+
+    async def run_protocol_refresh_once(self) -> None:
+        """Refresh every due, active protocol-mode token once."""
+        refresh_config = await self.db.get_token_refresh_config()
+        if not refresh_config.enabled:
+            return
+
+        now = datetime.now(timezone.utc)
+        for token in await self.db.get_active_tokens():
+            if (
+                not token.auto_refresh_enabled
+                or self._normalize_protocol_mode(token.protocol_mode) != "protocol"
+                or not token.google_cookies.strip()
+            ):
+                continue
+            interval = self._normalize_refresh_interval(
+                token.refresh_interval_minutes or refresh_config.refresh_interval_minutes
+            )
+            last_refresh = self._as_utc(token.last_st_refresh_at)
+            if last_refresh and now - last_refresh < timedelta(minutes=interval):
+                continue
+            try:
+                await self._refresh_protocol_token(token)
+            except Exception as exc:
+                debug_logger.log_error(
+                    f"[PROTOCOL_REFRESH] Token {token.id}: background refresh failed: {type(exc).__name__}"
+                )
+
+    async def _protocol_refresh_loop(self) -> None:
+        while True:
+            await asyncio.sleep(60)
+            try:
+                await self.run_protocol_refresh_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                debug_logger.log_error(
+                    f"[PROTOCOL_REFRESH] Background loop failed: {type(exc).__name__}"
+                )
+
+    def start_protocol_refresher(self) -> None:
+        if self._protocol_refresher_task and not self._protocol_refresher_task.done():
+            return
+        self._protocol_refresher_task = asyncio.create_task(self._protocol_refresh_loop())
+
+    async def stop_protocol_refresher(self) -> None:
+        task = self._protocol_refresher_task
+        self._protocol_refresher_task = None
+        if not task or task.done():
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
     async def ensure_project_exists(
         self,

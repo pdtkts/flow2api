@@ -60,6 +60,17 @@ class Token(BaseModel):
     # When False, Flow image/video generation HTTP uses server curl path; extension still used for captcha (if captcha_method is extension).
     use_extension_for_generation: bool = True
 
+    # Optional protocol-based ST refresh. Exported cookies are never returned by
+    # the admin list API; only their presence is exposed.
+    protocol_mode: Literal["session", "protocol"] = "session"
+    google_cookies: str = Field(default="", repr=False)
+    login_account: str = ""
+    proxy_url: str = Field(default="", repr=False)
+    auto_refresh_enabled: bool = True
+    refresh_interval_minutes: int = Field(default=120, ge=1, le=10080)
+    last_st_refresh_at: Optional[datetime] = None
+    last_st_refresh_result: str = ""
+
     # 429禁用相关
     ban_reason: Optional[str] = None  # 禁用原因: "429_rate_limit" 或 None
     banned_at: Optional[datetime] = None  # 禁用时间
@@ -262,7 +273,7 @@ class CaptchaConfig(BaseModel):
     captcha_method: str = "browser"  # yescaptcha/capmonster/ezcaptcha/capsolver/browser/personal/remote_browser
     yescaptcha_api_key: str = ""
     yescaptcha_base_url: str = "https://api.yescaptcha.com"
-    yescaptcha_task_type: str = "RecaptchaV3TaskProxylessM1"
+    yescaptcha_task_type: str = "RecaptchaV3TaskProxylessM1S7"
     capmonster_api_key: str = ""
     capmonster_base_url: str = "https://api.capmonster.cloud"
     ezcaptcha_api_key: str = ""
@@ -480,6 +491,15 @@ class GeminiGenAccount(BaseModel):
     profile_sync_status: Optional[str] = None
     profile_sync_error: Optional[str] = None
     created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+
+class TokenRefreshConfig(BaseModel):
+    """Global protocol ST refresh settings."""
+
+    id: int = 1
+    enabled: bool = True
+    refresh_interval_minutes: int = Field(default=120, ge=1, le=10080)
     updated_at: Optional[datetime] = None
 
 

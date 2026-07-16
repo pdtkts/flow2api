@@ -4,7 +4,7 @@ import tomli
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 
-DEFAULT_YESCAPTCHA_TASK_TYPE = "RecaptchaV3TaskProxylessM1"
+DEFAULT_YESCAPTCHA_TASK_TYPE = "RecaptchaV3TaskProxylessM1S7"
 YESCAPTCHA_TASK_TYPE_OPTIONS = {
     "RecaptchaV3TaskProxyless": None,
     "RecaptchaV3TaskProxylessM1": None,
@@ -199,7 +199,10 @@ class Config:
     def flow_max_retries(self) -> int:
         retries = self._config.get("flow", {}).get("max_retries", 3)
         try:
-            return max(1, int(retries))
+            normalized = max(1, min(20, int(retries)))
+            if str(self._config.get("captcha", {}).get("captcha_method", "")).strip().lower() == "browser":
+                normalized = max(normalized, self.browser_captcha_generation_retries)
+            return normalized
         except Exception:
             return 3
 
@@ -1058,6 +1061,24 @@ class Config:
             return max(1, min(50, int(value)))  # 限制在1-50之间
         except Exception:
             return 5
+
+    @property
+    def browser_captcha_max_retries(self) -> int:
+        """Maximum attempts made by browser mode for one captcha solve."""
+        value = self._config.get("captcha", {}).get("browser_captcha_max_retries", 5)
+        try:
+            return max(1, min(20, int(value)))
+        except Exception:
+            return 5
+
+    @property
+    def browser_captcha_generation_retries(self) -> int:
+        """Generation attempts allowed after upstream reCAPTCHA rejection."""
+        value = self._config.get("captcha", {}).get("browser_captcha_generation_retries", 6)
+        try:
+            return max(1, min(20, int(value)))
+        except Exception:
+            return 6
 
     @property
     def personal_project_pool_size(self) -> int:

@@ -695,6 +695,7 @@ async def lifespan(app: FastAPI):
                 debug_logger.log_error(f"[ST_SCHEDULER] task error: {e}")
 
     scheduled_st_only_refresh_handle = asyncio.create_task(scheduled_st_only_refresh_task())
+    token_manager.start_protocol_refresher()
     resumed_geminigen_tasks = await geminigen_service.resume_active_tasks()
 
     print("OK Database initialized")
@@ -710,6 +711,7 @@ async def lifespan(app: FastAPI):
     print(f"OK Request log cleanup task started (retention: {REQUEST_LOG_RETENTION_DAYS} days)")
     print("OK Scheduled token refresh task started")
     print("OK Scheduled ST-only refresh task started")
+    print("OK Protocol token refresh task started")
     if resumed_geminigen_tasks:
         print(f"OK GeminiGen active task resume started ({resumed_geminigen_tasks} task(s))")
     print(f"OK Server running on http://{config.server_host}:{config.server_port}")
@@ -744,6 +746,7 @@ async def lifespan(app: FastAPI):
         await scheduled_st_only_refresh_handle
     except asyncio.CancelledError:
         pass
+    await token_manager.stop_protocol_refresher()
     # Close browser if initialized
     if browser_service:
         await browser_service.close()
@@ -753,6 +756,7 @@ async def lifespan(app: FastAPI):
     print("OK 429 auto-unban task stopped")
     print("OK Scheduled token refresh task stopped")
     print("OK Scheduled ST-only refresh task stopped")
+    print("OK Protocol token refresh task stopped")
 
 
 # Initialize components

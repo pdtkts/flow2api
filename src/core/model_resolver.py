@@ -196,6 +196,10 @@ VIDEO_BASE_MODELS = {
         "landscape": "veo_3_1_t2v_lite_6s_landscape",
         "portrait": "veo_3_1_t2v_lite_6s_portrait",
     },
+    "omni": {
+        "landscape": "omni",
+        "portrait": "omni_portrait",
+    },
     # I2V models
     "veo_3_1_i2v_s_fast_fl": {
         "landscape": "veo_3_1_i2v_s_fast_fl",
