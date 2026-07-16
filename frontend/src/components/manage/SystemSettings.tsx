@@ -1268,8 +1268,21 @@ export function SystemSettings({ active }: { active: boolean }) {
           )}
           {m === "personal" && (
             <div className="space-y-2 border rounded-md p-3">
-              <div className="grid grid-cols-2 gap-2">
-                <div>
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                <div className="space-y-1">
+                  <Label>Browser count</Label>
+                  <Input
+                    type="number"
+                    min={1}
+                    max={20}
+                    value={captcha.browser_count}
+                    onChange={(e) => setCaptcha((c) => ({ ...c, browser_count: parseInt(e.target.value, 10) || 1 }))}
+                  />
+                  <p className="text-xs text-muted-foreground mt-1">
+                    Personal browser instances. Effective slots equal browser count × tabs per browser, capped at 50.
+                  </p>
+                </div>
+                <div className="space-y-1">
                   <Label>Project pool size</Label>
                   <Input
                     type="number"
@@ -1277,30 +1290,39 @@ export function SystemSettings({ active }: { active: boolean }) {
                     onChange={(e) => setCaptcha((c) => ({ ...c, personal_project_pool_size: parseInt(e.target.value, 10) || 4 }))}
                   />
                 </div>
-                <div>
-                  <Label>Max tabs</Label>
+                <div className="space-y-1">
+                  <Label>Max tabs per browser</Label>
                   <Input
                     type="number"
+                    min={1}
+                    max={50}
                     value={captcha.personal_max_resident_tabs}
                     onChange={(e) => setCaptcha((c) => ({ ...c, personal_max_resident_tabs: parseInt(e.target.value, 10) || 5 }))}
                   />
+                  <p className="text-xs text-muted-foreground mt-1">
+                    Each browser keeps up to this many shared captcha tabs; total effective slots are capped at 50.
+                  </p>
                 </div>
               </div>
-            <Label>Fresh restart every N solves (0 to disable)</Label>
-            <Input
-              type="number"
-              min={0}
-              value={captcha.browser_personal_fresh_restart_every_n_solves}
-              onChange={(e) =>
-                setCaptcha((c) => ({
-                  ...c,
-                  browser_personal_fresh_restart_every_n_solves: Math.max(
-                    0,
-                    parseInt(e.target.value, 10) || 0
-                  ),
-                }))
-              }
-            />
+              <Label>Fresh restart every N solves (0 to disable)</Label>
+              <Input
+                type="number"
+                min={0}
+                max={999}
+                value={captcha.browser_personal_fresh_restart_every_n_solves}
+                onChange={(e) =>
+                  setCaptcha((c) => ({
+                    ...c,
+                    browser_personal_fresh_restart_every_n_solves: Math.max(
+                      0,
+                      parseInt(e.target.value, 10) || 0
+                    ),
+                  }))
+                }
+              />
+              <p className="text-xs text-muted-foreground">
+                For high concurrency, use 0 or at least 50; values such as 5 or 10 can cause frequent restart queues.
+              </p>
               <Label>Idle TTL (s)</Label>
               <Input
                 type="number"

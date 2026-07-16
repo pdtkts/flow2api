@@ -281,7 +281,7 @@ class CaptchaConfig(BaseModel):
     browser_count: int = 1  # 浏览器打码实例数量
     browser_personal_fresh_restart_every_n_solves: int = 10  # personal 模式 fresh profile 轮换阈值，0 表示禁用
     personal_project_pool_size: int = 4  # 单个 Token 默认维护的项目池数量（仅影响项目轮换）
-    personal_max_resident_tabs: int = 5  # 内置浏览器共享打码标签页数量上限
+    personal_max_resident_tabs: int = 5  # 内置浏览器单实例共享打码标签页数量上限
     personal_idle_tab_ttl_seconds: int = 600  # 内置浏览器标签页空闲超时(秒)
     session_refresh_enabled: bool = True
     session_refresh_browser_first: bool = True
