@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, patch
 import src.api.routes as routes
 from src.api.routes import _extract_async_delivery_fields
 from src.core.config import config
+from src.core.logger import debug_logger
 from src.core.model_resolver import resolve_model_name
 from src.services.file_cache import FileCache
 from src.services.flow_client import FlowClient
@@ -1425,6 +1426,107 @@ class VeoLiteFlowClientTests(unittest.IsolatedAsyncioTestCase):
             captured_headers["Cookie"],
         )
         self.assertNotIn("Authorization", captured_headers)
+
+    async def test_media_redirect_request_logs_redact_credentials_and_signed_query(self):
+        st_token = "secret-session-token"
+        signed_url = (
+            "https://flow-content.google/video/media-1"
+            "?Expires=1781281902&KeyName=cdn-key&Signature=secret-signature&token=secret-token"
+        )
+        self.client._resolve_media_redirect_proxy = AsyncMock(
+            return_value="http://proxy-user:proxy-pass@proxy.example:8080"
+        )
+        self.client._fetch_media_redirect_location = AsyncMock(return_value=signed_url)
+
+        previous_debug = config.debug_enabled
+        try:
+            config.set_debug_enabled(True)
+            with (
+                patch.object(debug_logger, "log_request") as log_request,
+                patch.object(debug_logger, "log_info") as log_info,
+            ):
+                resolved = await self.client.resolve_media_download_url(
+                    media_id="media-1",
+                    st=st_token,
+                )
+        finally:
+            config.set_debug_enabled(previous_debug)
+
+        self.assertEqual(resolved, signed_url)
+        request_kwargs = log_request.call_args.kwargs
+        self.assertEqual(request_kwargs["headers"]["Cookie"], "<redacted>")
+        self.assertEqual(request_kwargs["proxy"], "http://proxy.example:8080")
+        self.assertEqual(
+            request_kwargs["url"],
+            f"{self.client.labs_base_url}/trpc/media.getMediaUrlRedirect",
+        )
+        logged_text = repr(log_request.call_args_list) + repr(log_info.call_args_list)
+        for secret in (st_token, "proxy-user", "proxy-pass", "secret-signature", "secret-token"):
+            self.assertNotIn(secret, logged_text)
+
+    async def test_media_redirect_response_logs_remove_signed_query(self):
+        signed_url = (
+            "https://flow-content.google/video/media-1"
+            "?Expires=1781281902&Signature=secret-signature"
+        )
+        self.client._fetch_media_redirect_location_curl = AsyncMock(
+            return_value=(307, signed_url)
+        )
+        self.client._fetch_media_redirect_location_httpx = AsyncMock()
+
+        previous_debug = config.debug_enabled
+        try:
+            config.set_debug_enabled(True)
+            with patch.object(debug_logger, "log_response") as log_response:
+                resolved = await self.client._fetch_media_redirect_location(
+                    redirect_url=f"{self.client.labs_base_url}/trpc/media.getMediaUrlRedirect?name=media-1",
+                    headers={"Cookie": "__Secure-next-auth.session-token=secret"},
+                    proxy_url=None,
+                )
+        finally:
+            config.set_debug_enabled(previous_debug)
+
+        self.assertEqual(resolved, signed_url)
+        response_kwargs = log_response.call_args.kwargs
+        self.assertEqual(
+            response_kwargs["headers"]["Location"],
+            "https://flow-content.google/video/media-1",
+        )
+        self.assertEqual(response_kwargs["body"]["transport"], "curl_cffi")
+        self.assertIsInstance(response_kwargs["duration_ms"], float)
+        self.assertNotIn("secret-signature", repr(log_response.call_args_list))
+        self.client._fetch_media_redirect_location_httpx.assert_not_awaited()
+
+    async def test_media_redirect_failure_logs_sanitize_signed_urls(self):
+        signed_url = "https://flow-content.google/video/media-1?Signature=secret-signature"
+        self.assertEqual(
+            self.client._sanitize_media_redirect_url_for_log(
+                "https://user:password@flow-content.google/video/media-1?Signature=secret"
+            ),
+            "https://flow-content.google/video/media-1",
+        )
+        self.client._fetch_media_redirect_location_curl = AsyncMock(
+            side_effect=RuntimeError(f"curl failed for {signed_url}")
+        )
+        self.client._fetch_media_redirect_location_httpx = AsyncMock(
+            side_effect=RuntimeError(f"httpx failed for {signed_url}")
+        )
+
+        with (
+            patch.object(debug_logger, "log_warning") as log_warning,
+            patch.object(debug_logger, "log_error") as log_error,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "httpx failed"):
+                await self.client._fetch_media_redirect_location(
+                    redirect_url=f"{self.client.labs_base_url}/trpc/media.getMediaUrlRedirect?name=media-1",
+                    headers={},
+                    proxy_url=None,
+                )
+
+        logged_text = repr(log_warning.call_args_list) + repr(log_error.call_args_list)
+        self.assertNotIn("secret-signature", logged_text)
+        self.assertNotIn("Signature=", logged_text)
+        self.assertIn("https://flow-content.google/video/media-1", logged_text)
 
     async def test_get_media_url_redirect_delegates_to_current_resolver(self):
         cdn_url = "https://flow-content.google/video/media-1?token=abc"

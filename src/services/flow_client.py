@@ -3,6 +3,7 @@ import asyncio
 import json
 import contextvars
 import os
+import re
 import time
 import uuid
 import random
@@ -1935,6 +1936,42 @@ class FlowClient:
         headers["User-Agent"] = fingerprint_user_agent or self._generate_user_agent(account_id)
         return headers
 
+    @staticmethod
+    def _sanitize_media_redirect_url_for_log(url: Optional[str]) -> str:
+        parsed = urlparse(str(url or "").strip())
+        host = parsed.hostname or ""
+        if not parsed.scheme or not host:
+            return "<unavailable>"
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        port = f":{parsed.port}" if parsed.port else ""
+        return f"{parsed.scheme}://{host}{port}{parsed.path}"
+
+    @staticmethod
+    def _sanitize_media_redirect_headers_for_log(headers: Dict[str, str]) -> Dict[str, str]:
+        sanitized: Dict[str, str] = {}
+        for key, value in dict(headers or {}).items():
+            if str(key).strip().lower() in {"authorization", "cookie", "proxy-authorization"}:
+                sanitized[str(key)] = "<redacted>"
+            else:
+                sanitized[str(key)] = str(value)
+        return sanitized
+
+    @classmethod
+    def _sanitize_media_redirect_error_for_log(cls, error: Exception) -> str:
+        text = str(error or "")
+
+        def sanitize_url(match) -> str:
+            return cls._sanitize_media_redirect_url_for_log(match.group(0))
+
+        text = re.sub(r"https?://[^\s\"'<>]+", sanitize_url, text)
+        text = re.sub(
+            r"(?i)(signature|token|keyname|expires)=([^&\s,]+)",
+            r"\1=<redacted>",
+            text,
+        )
+        return text[:500]
+
     async def _resolve_media_redirect_proxy(self) -> Optional[str]:
         if not self.proxy_manager:
             return None
@@ -1979,8 +2016,21 @@ class FlowClient:
             ("curl_cffi", self._fetch_media_redirect_location_curl),
             ("httpx", self._fetch_media_redirect_location_httpx),
         ):
+            attempt_started = time.perf_counter()
             try:
                 status_code, location = await request_fn(redirect_url, headers, proxy_url)
+                duration_ms = (time.perf_counter() - attempt_started) * 1000
+                safe_location = self._sanitize_media_redirect_url_for_log(location)
+                if config.debug_enabled:
+                    debug_logger.log_response(
+                        status_code=status_code,
+                        headers={"Location": safe_location},
+                        body={
+                            "transport": client_name,
+                            "redirect_received": bool(location),
+                        },
+                        duration_ms=duration_ms,
+                    )
                 if status_code in (301, 302, 303, 307, 308):
                     if location and self._is_allowed_flow_media_url(location):
                         return location
@@ -1996,8 +2046,15 @@ class FlowClient:
                 raise Exception(f"Media redirect failed with HTTP {status_code}")
             except Exception as exc:
                 last_error = exc
+                duration_ms = (time.perf_counter() - attempt_started) * 1000
+                safe_error = self._sanitize_media_redirect_error_for_log(exc)
                 debug_logger.log_warning(
-                    f"[MEDIA REDIRECT] {client_name} failed for {urlparse(redirect_url).hostname}: {exc}"
+                    f"[MEDIA REDIRECT] {client_name} failed for {urlparse(redirect_url).hostname} "
+                    f"after {duration_ms:.2f}ms: {safe_error}"
+                )
+                debug_logger.log_error(
+                    f"[MEDIA REDIRECT] request failed: transport={client_name}, "
+                    f"duration_ms={duration_ms:.2f}, error={safe_error}"
                 )
         if last_error is not None:
             raise last_error
@@ -2082,26 +2139,59 @@ class FlowClient:
         if isinstance(fingerprint, dict) and fingerprint.get("proxy_url") is not None:
             proxy_url = fingerprint.get("proxy_url") or None
 
+        total_started = time.perf_counter()
         debug_logger.log_info(
             f"[MEDIA REDIRECT] resolving media_id={media_id} via ST cookie "
             f"(proxy={_proxy_endpoint_for_log(proxy_url)})"
         )
+        if config.debug_enabled:
+            debug_logger.log_request(
+                method="GET",
+                url=self._sanitize_media_redirect_url_for_log(redirect_url),
+                headers=self._sanitize_media_redirect_headers_for_log(headers),
+                proxy=_proxy_endpoint_for_log(proxy_url),
+            )
 
         try:
-            return await self._fetch_media_redirect_location(redirect_url, headers, proxy_url)
+            location = await self._fetch_media_redirect_location(redirect_url, headers, proxy_url)
+            duration_ms = (time.perf_counter() - total_started) * 1000
+            debug_logger.log_info(
+                f"[MEDIA REDIRECT] resolved media_id={media_id}, transport=server, "
+                f"location={self._sanitize_media_redirect_url_for_log(location)}, "
+                f"duration_ms={duration_ms:.2f}"
+            )
+            return location
         except Exception as primary_error:
+            safe_primary_error = self._sanitize_media_redirect_error_for_log(primary_error)
             if token_id is not None and await self._token_allows_extension_generation(token_id):
                 try:
                     debug_logger.log_warning(
-                        f"[MEDIA REDIRECT] server redirect failed, trying extension GET: {primary_error}"
+                        "[MEDIA REDIRECT] server redirect failed, trying extension GET: "
+                        f"{safe_primary_error}"
                     )
-                    return await self._resolve_media_redirect_via_extension(
+                    location = await self._resolve_media_redirect_via_extension(
                         redirect_url,
                         st,
                         token_id,
                     )
+                    duration_ms = (time.perf_counter() - total_started) * 1000
+                    debug_logger.log_info(
+                        f"[MEDIA REDIRECT] resolved media_id={media_id}, transport=extension, "
+                        f"location={self._sanitize_media_redirect_url_for_log(location)}, "
+                        f"duration_ms={duration_ms:.2f}"
+                    )
+                    return location
                 except Exception as ext_error:
-                    debug_logger.log_error(f"[MEDIA REDIRECT] extension fallback failed: {ext_error}")
+                    debug_logger.log_error(
+                        "[MEDIA REDIRECT] extension fallback failed: "
+                        f"{self._sanitize_media_redirect_error_for_log(ext_error)}"
+                    )
+            duration_ms = (time.perf_counter() - total_started) * 1000
+            debug_logger.log_error(
+                f"[MEDIA REDIRECT] resolution failed: media_id={media_id}, "
+                f"duration_ms={duration_ms:.2f}, "
+                f"error={safe_primary_error}"
+            )
             raise Exception(
                 f"Failed to resolve media download URL: {primary_error}"
             ) from primary_error
