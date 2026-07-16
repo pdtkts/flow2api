@@ -2106,6 +2106,21 @@ class FlowClient:
                 f"Failed to resolve media download URL: {primary_error}"
             ) from primary_error
 
+    async def get_media_url_redirect(self, st: str, media_name: str) -> str:
+        """Compatibility wrapper for the upstream Flow media redirect method."""
+        normalized_media_name = str(media_name or "").strip()
+        if not normalized_media_name:
+            raise ValueError("get_media_url_redirect: media_name is required")
+
+        normalized_st = str(st or "").strip()
+        if not normalized_st:
+            raise ValueError("get_media_url_redirect: ST token is required")
+
+        return await self.resolve_media_download_url(
+            media_id=normalized_media_name,
+            st=normalized_st,
+        )
+
     def _media_to_video_operation(
         self,
         media: Dict[str, Any],

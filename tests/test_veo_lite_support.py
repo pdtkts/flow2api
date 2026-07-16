@@ -1426,6 +1426,31 @@ class VeoLiteFlowClientTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("Authorization", captured_headers)
 
+    async def test_get_media_url_redirect_delegates_to_current_resolver(self):
+        cdn_url = "https://flow-content.google/video/media-1?token=abc"
+        self.client.resolve_media_download_url = AsyncMock(return_value=cdn_url)
+
+        resolved = await self.client.get_media_url_redirect(
+            st=" st-token ",
+            media_name=" media-1 ",
+        )
+
+        self.assertEqual(resolved, cdn_url)
+        self.client.resolve_media_download_url.assert_awaited_once_with(
+            media_id="media-1",
+            st="st-token",
+        )
+
+    async def test_get_media_url_redirect_validates_required_inputs(self):
+        self.client.resolve_media_download_url = AsyncMock()
+
+        with self.assertRaisesRegex(ValueError, "media_name"):
+            await self.client.get_media_url_redirect(st="st-token", media_name=" ")
+        with self.assertRaisesRegex(ValueError, "ST token"):
+            await self.client.get_media_url_redirect(st=" ", media_name="media-1")
+
+        self.client.resolve_media_download_url.assert_not_awaited()
+
     async def test_needs_video_url_resolve_only_for_redirect_or_missing_cdn(self):
         redirect = "https://labs.google/fx/api/trpc/media.getMediaUrlRedirect?name=media-1"
         cdn = "https://flow-content.google/video/media-1?token=abc"
