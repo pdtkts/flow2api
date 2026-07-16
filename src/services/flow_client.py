@@ -5195,10 +5195,52 @@ class FlowClient:
                 return None, None
         # API打码服务
         elif captcha_method in ["yescaptcha", "capmonster", "ezcaptcha", "capsolver"]:
-            self._set_request_fingerprint(None)
-            token = await self._get_api_captcha_token(captcha_method, project_id, action)
-            if token:
-                debug_logger.log_recaptcha_token_success(token)
+            api_proxy_url = None
+            if self.proxy_manager:
+                try:
+                    api_proxy_url = await self.proxy_manager.get_request_proxy_url()
+                except Exception as e:
+                    debug_logger.log_warning(f"[reCAPTCHA] Failed to get proxy for API captcha: {e}")
+            # Keep an explicit empty value for direct mode so the later Flow request
+            # cannot select a different rotating proxy than the captcha solve used.
+            self._set_request_fingerprint({"proxy_url": api_proxy_url or ""})
+            api_result = await self._get_api_captcha_token(
+                captcha_method,
+                project_id,
+                action,
+                proxy_url=api_proxy_url,
+                proxy_resolved=True,
+            )
+            if api_result is None:
+                self._set_request_fingerprint(None)
+                return None, None
+
+            captcha_user_agent = None
+            if isinstance(api_result, tuple):
+                token = str(api_result[0] or "").strip() if api_result else ""
+                if len(api_result) > 1:
+                    captcha_user_agent = str(api_result[1] or "").strip() or None
+            else:
+                token = str(api_result or "").strip()
+
+            if not token:
+                self._set_request_fingerprint(None)
+                return None, None
+
+            if captcha_user_agent:
+                existing_fingerprint = self.get_request_fingerprint() or {}
+                existing_fingerprint["user_agent"] = captcha_user_agent
+                self._set_request_fingerprint(existing_fingerprint)
+                debug_logger.log_info(
+                    f"[reCAPTCHA {captcha_method}] Injected provider User-Agent into request fingerprint: "
+                    f"{captcha_user_agent[:80]}"
+                )
+            else:
+                debug_logger.log_warning(
+                    f"[reCAPTCHA {captcha_method}] Provider solution omitted userAgent; using request fallback identity"
+                )
+
+            debug_logger.log_recaptcha_token_success(token)
             return token, None
         else:
             debug_logger.log_info(f"[reCAPTCHA] 未知的打码方式: {captcha_method}")
@@ -5206,13 +5248,25 @@ class FlowClient:
             self._set_request_fingerprint(None)
             return None, None
 
-    async def _get_api_captcha_token(self, method: str, project_id: str, action: str = "IMAGE_GENERATION") -> Optional[str]:
+    async def _get_api_captcha_token(
+        self,
+        method: str,
+        project_id: str,
+        action: str = "IMAGE_GENERATION",
+        *,
+        proxy_url: Optional[str] = None,
+        proxy_resolved: bool = False,
+    ) -> Optional[tuple[str, Optional[str]]]:
         """通用API打码服务
         
         Args:
             method: 打码服务类型
             project_id: 项目ID
             action: reCAPTCHA action类型 (IMAGE_GENERATION 或 VIDEO_GENERATION)
+
+        Returns:
+            ``(gRecaptchaResponse, userAgent)`` when ready, otherwise ``None``.
+            ``userAgent`` may be ``None`` when a provider omits it.
         """
         # 获取配置
         if method == "yescaptcha":
@@ -5256,16 +5310,16 @@ class FlowClient:
                 # curl_cffi: SOCKS5 uses `proxy`, HTTP/HTTPS uses `proxies`
                 proxies = None
                 proxy = None
-                if self.proxy_manager:
+                if not proxy_resolved and self.proxy_manager:
                     try:
                         proxy_url = await self.proxy_manager.get_request_proxy_url()
-                        if proxy_url:
-                            if proxy_url.startswith("socks5://"):
-                                proxy = proxy_url
-                            else:
-                                proxies = {"http": proxy_url, "https": proxy_url}
                     except Exception as e:
                         debug_logger.log_warning(f"[reCAPTCHA {method}] Failed to get proxy: {e}")
+                if proxy_url:
+                    if proxy_url.startswith("socks5://"):
+                        proxy = proxy_url
+                    else:
+                        proxies = {"http": proxy_url, "https": proxy_url}
 
                 create_url = f"{base_url}/createTask"
                 create_data = {
@@ -5318,7 +5372,8 @@ class FlowClient:
                         response = solution.get('gRecaptchaResponse')
                         if response:
                             debug_logger.log_info(f"[reCAPTCHA {method}] Token获取成功")
-                            return response
+                            user_agent = str(solution.get('userAgent') or "").strip() or None
+                            return response, user_agent
 
                     await asyncio.sleep(3)
 
