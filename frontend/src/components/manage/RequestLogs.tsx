@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react"
+import { useState, useEffect, useCallback, useRef } from "react"
 import { useAuth } from "../../contexts/AuthContext"
 import { adminFetch, adminJson } from "../../lib/adminApi"
 import type { LogDetail, LogListItem, LogsListResponse } from "../../types/admin"
@@ -29,10 +29,12 @@ export function RequestLogs() {
   const [detail, setDetail] = useState<LogDetail | null>(null)
   const [hideGeneration, setHideGeneration] = useState(false)
   const [search, setSearch] = useState("")
+  const fetchInFlight = useRef(false)
 
-  const fetchLogs = useCallback(async () => {
-    if (!token) return
-    setLoading(true)
+  const fetchLogs = useCallback(async (silent = false) => {
+    if (!token || fetchInFlight.current) return
+    fetchInFlight.current = true
+    if (!silent) setLoading(true)
     try {
       const offset = page * LOG_PAGE_SIZE
       const exclude = hideGeneration ? "&exclude_operations=generate_image%2Cgenerate_video%2Cgeminigen_image%2Cgeminigen_video" : ""
@@ -51,9 +53,10 @@ export function RequestLogs() {
         setTotal(0)
       }
     } catch {
-      toast.error("Failed to load logs")
+      if (!silent) toast.error("Failed to load logs")
     } finally {
-      setLoading(false)
+      fetchInFlight.current = false
+      if (!silent) setLoading(false)
     }
   }, [token, page, hideGeneration, search])
 
@@ -62,6 +65,20 @@ export function RequestLogs() {
       void fetchLogs()
     })
   }, [fetchLogs])
+
+  useEffect(() => {
+    if (!token) return
+
+    const refreshIfVisible = () => {
+      if (document.visibilityState === "visible") void fetchLogs(true)
+    }
+    const intervalId = window.setInterval(refreshIfVisible, 2000)
+    document.addEventListener("visibilitychange", refreshIfVisible)
+    return () => {
+      window.clearInterval(intervalId)
+      document.removeEventListener("visibilitychange", refreshIfVisible)
+    }
+  }, [token, fetchLogs])
 
   const clearLogs = async () => {
     if (!token) return

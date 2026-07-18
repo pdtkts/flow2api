@@ -213,7 +213,7 @@ def _extract_log_job_id(*payloads: Any) -> str:
             except Exception:
                 return ""
         if isinstance(value, dict):
-            for key in ("job_id", "task_id", "upstream_task_id"):
+            for key in ("job_id", "request_id", "task_id", "upstream_task_id"):
                 candidate = value.get(key)
                 if isinstance(candidate, str) and candidate.strip():
                     return candidate.strip()

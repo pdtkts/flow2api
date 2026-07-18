@@ -15,6 +15,7 @@ from fastapi import HTTPException
 from PIL import Image
 
 import src.api.routes as routes
+from src.api.admin import _extract_log_job_id
 from src.api.routes import _extract_async_delivery_fields
 from src.core.account_tiers import (
     PAYGATE_TIER_ONE,
@@ -2419,6 +2420,191 @@ class Native4KGenerationEligibilityTests(unittest.IsolatedAsyncioTestCase):
                         model,
                     )
                     self.assertEqual(selected, {1})
+
+
+class _NativeLogLoadBalancer:
+    def __init__(self, token=None, events=None):
+        self.token = token
+        self.events = events if events is not None else []
+        self.release_pending = AsyncMock()
+
+    async def select_token(self, **kwargs):
+        self.events.append("select_token")
+        return self.token
+
+
+def make_native_log_handler(token=None, events=None):
+    handler = GenerationHandler.__new__(GenerationHandler)
+    handler.flow_client = SimpleNamespace(
+        clear_request_fingerprint=lambda: None,
+        set_managed_api_key_id=lambda api_key_id: None,
+        clear_managed_api_key_id=lambda: None,
+    )
+    handler.load_balancer = _NativeLogLoadBalancer(token=token, events=events)
+    handler.token_manager = SimpleNamespace(ensure_valid_token=AsyncMock(return_value=None))
+    handler._update_request_log_progress = AsyncMock()
+    return handler
+
+
+class NativeLiveRequestLogTests(unittest.IsolatedAsyncioTestCase):
+    async def test_non_stream_creates_processing_row_before_selection_and_reuses_it(self):
+        events = []
+        handler = make_native_log_handler(events=events)
+
+        async def log_request(*args, **kwargs):
+            events.append(f"log:{kwargs.get('status_code')}")
+            return 41
+
+        handler._log_request = AsyncMock(side_effect=log_request)
+        chunks = [
+            chunk
+            async for chunk in handler.handle_generation(
+                model="gemini-3.1-flash-image-landscape",
+                prompt="test prompt",
+                stream=False,
+                api_key_id=7,
+                poll_task_id="gen-public-job",
+            )
+        ]
+
+        self.assertEqual(events, ["log:102", "select_token", "log:503"])
+        self.assertTrue(chunks)
+        initial = handler._log_request.await_args_list[0].kwargs
+        final = handler._log_request.await_args_list[-1].kwargs
+        self.assertEqual(initial["request_data"]["request_id"], "gen-public-job")
+        self.assertEqual(initial["response_data"]["request_id"], "gen-public-job")
+        self.assertEqual(final["log_id"], 41)
+        self.assertEqual(final["status_text"], "failed")
+
+    async def test_stream_creates_row_before_first_client_chunk(self):
+        events = []
+        handler = make_native_log_handler(events=events)
+
+        async def log_request(*args, **kwargs):
+            events.append(f"log:{kwargs.get('status_code')}")
+            return 51
+
+        handler._log_request = AsyncMock(side_effect=log_request)
+        generation = handler.handle_generation(
+            model="gemini-3.1-flash-image-landscape",
+            prompt="test prompt",
+            stream=True,
+            api_key_id=7,
+        )
+
+        first_chunk = await anext(generation)
+        self.assertIn("data:", first_chunk)
+        self.assertEqual(events, ["log:102"])
+        await generation.aclose()
+
+    async def test_invalid_token_finalizes_existing_processing_row(self):
+        token = SimpleNamespace(id=9, email="native@example.com")
+        handler = make_native_log_handler(token=token)
+        handler._log_request = AsyncMock(return_value=61)
+
+        chunks = [
+            chunk
+            async for chunk in handler.handle_generation(
+                model="gemini-3.1-flash-image-landscape",
+                prompt="test prompt",
+                stream=False,
+                api_key_id=7,
+            )
+        ]
+
+        self.assertTrue(chunks)
+        self.assertEqual(handler._log_request.await_count, 2)
+        final = handler._log_request.await_args_list[-1].kwargs
+        self.assertEqual(final["log_id"], 61)
+        self.assertEqual(final["status_code"], 503)
+        self.assertEqual(final["status_text"], "failed")
+        handler.load_balancer.release_pending.assert_awaited_once()
+
+    async def test_token_selection_exception_finalizes_processing_row(self):
+        handler = make_native_log_handler()
+        handler._log_request = AsyncMock(return_value=66)
+        handler.load_balancer.select_token = AsyncMock(
+            side_effect=RuntimeError("selection exploded")
+        )
+
+        chunks = [
+            chunk
+            async for chunk in handler.handle_generation(
+                model="gemini-3.1-flash-image-landscape",
+                prompt="test prompt",
+                stream=False,
+                api_key_id=7,
+            )
+        ]
+
+        self.assertTrue(chunks)
+        self.assertEqual(handler._log_request.await_count, 2)
+        final = handler._log_request.await_args_list[-1].kwargs
+        self.assertEqual(final["log_id"], 66)
+        self.assertEqual(final["status_code"], 500)
+        self.assertEqual(final["status_text"], "failed")
+        self.assertIn("selection exploded", final["response_data"]["error"])
+
+    async def test_progress_payload_keeps_native_request_id(self):
+        handler = GenerationHandler.__new__(GenerationHandler)
+        handler.db = SimpleNamespace(update_request_log=AsyncMock())
+
+        await handler._update_request_log_progress(
+            {"id": 71, "request_id": "gen-live", "api_key_id": 7},
+            token_id=9,
+            status_text="video_polling",
+            progress=55,
+        )
+
+        update = handler.db.update_request_log.await_args.kwargs
+        payload = json.loads(update["response_body"])
+        self.assertEqual(payload["request_id"], "gen-live")
+        self.assertEqual(update["status_code"], 102)
+        self.assertEqual(update["progress"], 55)
+
+    async def test_non_stream_video_poll_persists_progress(self):
+        handler = GenerationHandler.__new__(GenerationHandler)
+        handler.flow_client = SimpleNamespace(
+            check_video_status=AsyncMock(return_value={"operations": []})
+        )
+        handler._update_request_log_progress = AsyncMock()
+        handler._fail_video_task = AsyncMock()
+        token = SimpleNamespace(id=9, at="at-token")
+        generation_result = handler._create_generation_result()
+
+        with patch(
+            "src.services.generation_handler.config",
+            SimpleNamespace(max_poll_attempts=1, poll_interval=0),
+        ):
+            chunks = [
+                chunk
+                async for chunk in handler._poll_video_result(
+                    token,
+                    "project-1",
+                    [{"operation": {"name": "operation-1"}}],
+                    False,
+                    generation_result=generation_result,
+                    request_log_state={"id": 81, "request_id": "gen-video"},
+                )
+            ]
+
+        self.assertTrue(chunks)
+        handler._update_request_log_progress.assert_awaited_once()
+        progress = handler._update_request_log_progress.await_args.kwargs
+        self.assertEqual(progress["status_text"], "video_polling")
+        self.assertEqual(progress["progress"], 45)
+
+    def test_admin_job_id_extraction_recognizes_native_request_id(self):
+        self.assertEqual(
+            _extract_log_job_id('{"status":"processing","request_id":"gen-native"}'),
+            "gen-native",
+        )
+        self.assertEqual(
+            _extract_log_job_id(
+                {"performance": {"request_id": "gen-native-completed"}}
+            ),
+            "gen-native-completed",
+        )
 
 
 if __name__ == "__main__":
