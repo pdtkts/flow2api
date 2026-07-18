@@ -762,10 +762,19 @@ async def _extract_prompt_and_images_from_gemini_contents(
     return prompt, images
 
 
-def _resolve_request_model(model: str, request: Any) -> str:
+def _resolve_request_model(
+    model: str,
+    request: Any,
+    images: Optional[List[bytes]] = None,
+) -> str:
     if RunwayService.is_runway_model(model) or GeminiGenService.is_geminigen_model(model):
         return model
-    resolved_model = resolve_model_name(model=model, request=request, model_config=MODEL_CONFIG)
+    resolved_model = resolve_model_name(
+        model=model,
+        request=request,
+        model_config=MODEL_CONFIG,
+        images=images,
+    )
     if resolved_model != model:
         debug_logger.log_info(f"[ROUTE] 模型名已转换: {model} → {resolved_model}")
     return resolved_model
@@ -803,7 +812,8 @@ async def _normalize_openai_request(
                     allowed_token_ids=allowed_token_ids,
                 )
             )
-        model = _resolve_request_model(request.model, request)
+        model = _resolve_request_model(request.model, request, images=images)
+        initial_image_count = len(images)
         images = await _append_openai_reference_images(
             model,
             request.messages,
@@ -811,6 +821,8 @@ async def _normalize_openai_request(
             api_key_id=api_key_id,
             allowed_token_ids=allowed_token_ids,
         )
+        if len(images) != initial_image_count:
+            model = _resolve_request_model(request.model, request, images=images)
         return NormalizedGenerationRequest(
             model=model,
             prompt=prompt,
@@ -846,12 +858,12 @@ async def _normalize_gemini_request(
     api_key_id: Optional[int] = None,
     allowed_token_ids: Optional[Set[int]] = None,
 ) -> NormalizedGenerationRequest:
-    resolved_model = _resolve_request_model(model, request)
     prompt, images = await _extract_prompt_and_images_from_gemini_contents(
         request.contents,
         api_key_id=api_key_id,
         allowed_token_ids=allowed_token_ids,
     )
+    resolved_model = _resolve_request_model(model, request, images=images)
     system_instruction = _extract_text_from_gemini_content(request.systemInstruction)
     model_config = MODEL_CONFIG.get(resolved_model)
     media_model = bool(model_config and model_config.get("type") in {"image", "video"})

@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 import sqlite3
@@ -5,15 +6,27 @@ import tempfile
 import time
 import types
 import unittest
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
+
+from PIL import Image
 
 import src.api.routes as routes
 from src.api.routes import _extract_async_delivery_fields
 from src.core.config import config
 from src.core.logger import debug_logger
-from src.core.model_resolver import resolve_model_name
+from src.core.model_resolver import get_base_model_aliases, resolve_model_name
+from src.core.models import (
+    ChatCompletionRequest,
+    ChatMessage,
+    GeminiContent,
+    GeminiFileData,
+    GeminiGenerateContentRequest,
+    GeminiInlineData,
+    GeminiPart,
+)
 from src.services.file_cache import FileCache
 from src.services.flow_client import FlowClient
 from src.services.generation_handler import MODEL_CONFIG, GenerationHandler, _needs_video_url_resolve
@@ -21,6 +34,20 @@ from src.services.generation_handler import MODEL_CONFIG, GenerationHandler, _ne
 
 def fake_mp4_bytes(size: int = 2048) -> bytes:
     return b"\x00\x00\x00\x18ftypmp42" + b"\x00" * max(0, size - 12)
+
+
+def make_image_bytes(
+    size: tuple[int, int],
+    *,
+    orientation: int | None = None,
+) -> bytes:
+    image = Image.new("RGB", size, color="white")
+    buffer = BytesIO()
+    exif = Image.Exif()
+    if orientation is not None:
+        exif[274] = orientation
+    image.save(buffer, format="JPEG", exif=exif)
+    return buffer.getvalue()
 
 
 class FlowClientTransportErrorTests(unittest.TestCase):
@@ -332,6 +359,132 @@ class VeoLiteModelResolverTests(unittest.TestCase):
 
         self.assertEqual(resolved, "veo_3_1_i2v_s_6s_1080p")
 
+    def test_resolve_quality_8s_alias_to_portrait_variant(self):
+        request = types.SimpleNamespace(
+            generationConfig=types.SimpleNamespace(aspectRatio="portrait")
+        )
+
+        resolved = resolve_model_name(
+            "veo_3_1_t2v_8s",
+            request=request,
+            model_config=MODEL_CONFIG,
+        )
+
+        self.assertEqual(resolved, "veo_3_1_t2v_portrait_8s")
+
+    def test_resolve_quality_8s_upsample_alias_to_portrait_variant(self):
+        request = types.SimpleNamespace(
+            generationConfig=types.SimpleNamespace(
+                aspectRatio="portrait",
+                imageSize="4k",
+            )
+        )
+
+        resolved = resolve_model_name(
+            "veo_3_1_i2v_s_8s",
+            request=request,
+            model_config=MODEL_CONFIG,
+        )
+
+        self.assertEqual(resolved, "veo_3_1_i2v_s_portrait_8s_4k")
+
+    def test_image_models_follow_nearest_reference_image_aspect(self):
+        cases = {
+            (1600, 900): "landscape",
+            (900, 1600): "portrait",
+            (1000, 1000): "square",
+            (1200, 900): "four-three",
+            (900, 1200): "three-four",
+        }
+
+        for size, expected in cases.items():
+            with self.subTest(size=size):
+                resolved = resolve_model_name(
+                    "gemini-3.0-pro-image",
+                    request=types.SimpleNamespace(generationConfig=None),
+                    model_config=MODEL_CONFIG,
+                    images=[make_image_bytes(size)],
+                )
+                self.assertEqual(resolved, f"gemini-3.0-pro-image-{expected}")
+
+    def test_video_inference_collapses_to_landscape_or_portrait(self):
+        cases = {
+            (1600, 900): "veo_3_1_i2v_s_8s",
+            (1000, 1000): "veo_3_1_i2v_s_8s",
+            (900, 1600): "veo_3_1_i2v_s_portrait_8s",
+        }
+
+        for size, expected in cases.items():
+            with self.subTest(size=size):
+                resolved = resolve_model_name(
+                    "veo_3_1_i2v_s_8s",
+                    request=types.SimpleNamespace(generationConfig=None),
+                    model_config=MODEL_CONFIG,
+                    images=[make_image_bytes(size)],
+                )
+                self.assertEqual(resolved, expected)
+
+    def test_explicit_aspect_ratio_overrides_reference_image(self):
+        resolved = resolve_model_name(
+            "gemini-3.0-pro-image",
+            request=types.SimpleNamespace(
+                generationConfig=types.SimpleNamespace(aspectRatio="landscape")
+            ),
+            model_config=MODEL_CONFIG,
+            images=[make_image_bytes((900, 1600))],
+        )
+
+        self.assertEqual(resolved, "gemini-3.0-pro-image-landscape")
+
+    def test_first_non_empty_image_controls_inferred_aspect(self):
+        resolved = resolve_model_name(
+            "gemini-3.0-pro-image",
+            request=types.SimpleNamespace(generationConfig=None),
+            model_config=MODEL_CONFIG,
+            images=[b"", make_image_bytes((900, 1600)), make_image_bytes((1600, 900))],
+        )
+
+        self.assertEqual(resolved, "gemini-3.0-pro-image-portrait")
+
+    def test_exif_orientation_is_applied_before_inference(self):
+        resolved = resolve_model_name(
+            "gemini-3.0-pro-image",
+            request=types.SimpleNamespace(generationConfig=None),
+            model_config=MODEL_CONFIG,
+            images=[make_image_bytes((1600, 900), orientation=6)],
+        )
+
+        self.assertEqual(resolved, "gemini-3.0-pro-image-portrait")
+
+    def test_unreadable_or_missing_images_preserve_default_aspect(self):
+        for images in (None, [], [b"not-an-image"]):
+            with self.subTest(images=images):
+                resolved = resolve_model_name(
+                    "gemini-3.0-pro-image",
+                    request=types.SimpleNamespace(generationConfig=None),
+                    model_config=MODEL_CONFIG,
+                    images=images,
+                )
+                self.assertEqual(resolved, "gemini-3.0-pro-image-landscape")
+
+    def test_missing_pillow_preserves_default_aspect(self):
+        real_import = __import__
+
+        def import_without_pillow(name, *args, **kwargs):
+            if name == "PIL":
+                raise ImportError("Pillow unavailable")
+            return real_import(name, *args, **kwargs)
+
+        with patch("builtins.__import__", side_effect=import_without_pillow):
+            resolved = resolve_model_name(
+                "gemini-3.0-pro-image",
+                request=types.SimpleNamespace(generationConfig=None),
+                model_config=MODEL_CONFIG,
+                images=[make_image_bytes((900, 1600))],
+            )
+
+        self.assertEqual(resolved, "gemini-3.0-pro-image-landscape")
+
 
 class VeoLiteGenerationHandlerTests(unittest.TestCase):
     def test_tier_two_does_not_upgrade_lite_model_to_fake_ultra(self):
@@ -393,6 +546,205 @@ class VeoLiteGenerationHandlerTests(unittest.TestCase):
     def test_direct_upsampler_keys_are_not_public_models(self):
         self.assertNotIn("veo_3_1_upsampler_4k", MODEL_CONFIG)
         self.assertNotIn("veo_3_1_upsampler_1080p", MODEL_CONFIG)
+
+    def test_explicit_8s_aliases_reuse_default_upstream_keys(self):
+        expected_model_keys = {
+            "veo_3_1_t2v_fast_8s": "veo_3_1_t2v_fast",
+            "veo_3_1_t2v_8s": "veo_3_1_t2v",
+            "veo_3_1_i2v_s_fast_8s_fl": "veo_3_1_i2v_s_fast_fl",
+            "veo_3_1_i2v_s_8s": "veo_3_1_i2v_s_fl",
+            "veo_3_1_r2v_fast_8s": "veo_3_1_r2v_fast_landscape",
+            "veo_3_1_r2v_fast_ultra_8s": "veo_3_1_r2v_fast_landscape_ultra",
+            "veo_3_1_r2v_fast_ultra_relaxed_8s": "veo_3_1_r2v_fast_landscape_ultra_relaxed",
+        }
+
+        for alias, model_key in expected_model_keys.items():
+            with self.subTest(alias=alias):
+                self.assertEqual(MODEL_CONFIG[alias]["model_key"], model_key)
+
+    def test_default_duration_models_include_complete_8s_aliases(self):
+        expected_aliases = {
+            "veo_3_1_t2v_fast_landscape_8s": "veo_3_1_t2v_fast_8s",
+            "veo_3_1_t2v_fast_portrait_8s": "veo_3_1_t2v_fast_portrait",
+            "veo_3_1_t2v_landscape_8s": "veo_3_1_t2v_8s",
+            "veo_3_1_t2v_landscape_8s_4k": "veo_3_1_t2v_8s_4k",
+            "veo_3_1_t2v_landscape_8s_1080p": "veo_3_1_t2v_8s_1080p",
+            "veo_3_1_t2v_lite_landscape_8s": "veo_3_1_t2v_lite_8s_landscape",
+            "veo_3_1_i2v_s_fast_landscape_8s_fl": "veo_3_1_i2v_s_fast_8s_fl",
+            "veo_3_1_i2v_s_landscape_8s": "veo_3_1_i2v_s_8s",
+            "veo_3_1_i2v_s_landscape_8s_4k": "veo_3_1_i2v_s_8s_4k",
+            "veo_3_1_i2v_s_landscape_8s_1080p": "veo_3_1_i2v_s_8s_1080p",
+            "veo_3_1_i2v_lite_landscape_8s": "veo_3_1_i2v_lite_8s_landscape",
+            "veo_3_1_interpolation_lite_landscape_8s": "veo_3_1_interpolation_lite_8s_landscape",
+            "veo_3_1_r2v_fast_landscape_8s": "veo_3_1_r2v_fast_8s",
+            "veo_3_1_r2v_fast_landscape_ultra_8s": "veo_3_1_r2v_fast_ultra_8s",
+            "veo_3_1_r2v_fast_landscape_ultra_relaxed_8s": "veo_3_1_r2v_fast_ultra_relaxed_8s",
+        }
+
+        for alias, target in expected_aliases.items():
+            with self.subTest(alias=alias):
+                self.assertIn(alias, MODEL_CONFIG)
+                self.assertEqual(MODEL_CONFIG[alias], MODEL_CONFIG[target])
+
+    def test_base_alias_catalog_exposes_8s_model_families(self):
+        aliases = get_base_model_aliases()
+        expected = {
+            "veo_3_1_t2v_fast_8s",
+            "veo_3_1_t2v_8s",
+            "veo_3_1_t2v_8s_4k",
+            "veo_3_1_t2v_8s_1080p",
+            "veo_3_1_t2v_lite_8s",
+            "veo_3_1_i2v_s_fast_8s_fl",
+            "veo_3_1_i2v_s_8s",
+            "veo_3_1_i2v_s_8s_4k",
+            "veo_3_1_i2v_s_8s_1080p",
+            "veo_3_1_i2v_lite_8s",
+            "veo_3_1_interpolation_lite_8s",
+            "veo_3_1_r2v_fast_8s",
+            "veo_3_1_r2v_fast_ultra_8s",
+            "veo_3_1_r2v_fast_ultra_relaxed_8s",
+        }
+
+        self.assertTrue(expected.issubset(aliases))
+
+
+class ReferenceImageRouteNormalizationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_openai_history_reference_drives_aspect_and_keeps_scope(self):
+        portrait_image = make_image_bytes((900, 1600))
+        request = ChatCompletionRequest(
+            model="gemini-3.0-pro-image",
+            messages=[
+                ChatMessage(role="user", content="Generate an image"),
+                ChatMessage(
+                    role="assistant",
+                    content="![result](https://example.com/history.png)",
+                ),
+                ChatMessage(role="user", content="Continue from the previous image"),
+            ],
+        )
+
+        with patch.object(
+            routes,
+            "retrieve_image_data",
+            new=AsyncMock(return_value=portrait_image),
+        ) as retrieve:
+            normalized = await routes._normalize_openai_request(
+                request,
+                api_key_id=17,
+                allowed_token_ids={3, 5},
+            )
+
+        self.assertEqual(normalized.model, "gemini-3.0-pro-image-portrait")
+        self.assertEqual(normalized.images, [portrait_image])
+        retrieve.assert_awaited_once_with(
+            "https://example.com/history.png",
+            api_key_id=17,
+            allowed_token_ids={3, 5},
+        )
+
+    async def test_historical_image_is_prepended_before_current_image(self):
+        landscape_image = make_image_bytes((1600, 900))
+        portrait_history = make_image_bytes((900, 1600))
+        request = ChatCompletionRequest(
+            model="gemini-3.0-pro-image",
+            messages=[
+                ChatMessage(role="user", content="Generate an image"),
+                ChatMessage(
+                    role="assistant",
+                    content="![history](https://example.com/history.png)",
+                ),
+                ChatMessage(
+                    role="user",
+                    content=[
+                        {"type": "text", "text": "Use both references"},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": "https://example.com/current.png"},
+                        },
+                    ],
+                ),
+            ],
+        )
+
+        async def retrieve_by_url(uri, **_kwargs):
+            if uri.endswith("current.png"):
+                return landscape_image
+            return portrait_history
+
+        with patch.object(
+            routes,
+            "retrieve_image_data",
+            new=AsyncMock(side_effect=retrieve_by_url),
+        ):
+            normalized = await routes._normalize_openai_request(request)
+
+        self.assertEqual(normalized.images, [portrait_history, landscape_image])
+        self.assertEqual(normalized.model, "gemini-3.0-pro-image-portrait")
+
+    async def test_gemini_inline_image_drives_aspect(self):
+        portrait_image = make_image_bytes((900, 1600))
+        request = GeminiGenerateContentRequest(
+            contents=[
+                GeminiContent(
+                    role="user",
+                    parts=[
+                        GeminiPart(text="Edit this image"),
+                        GeminiPart(
+                            inlineData=GeminiInlineData(
+                                mimeType="image/jpeg",
+                                data=base64.b64encode(portrait_image).decode("ascii"),
+                            )
+                        ),
+                    ],
+                )
+            ]
+        )
+
+        normalized = await routes._normalize_gemini_request(
+            "gemini-3.0-pro-image",
+            request,
+        )
+
+        self.assertEqual(normalized.model, "gemini-3.0-pro-image-portrait")
+        self.assertEqual(normalized.images, [portrait_image])
+
+    async def test_gemini_file_image_drives_aspect_and_keeps_scope(self):
+        portrait_image = make_image_bytes((900, 1600))
+        request = GeminiGenerateContentRequest(
+            contents=[
+                GeminiContent(
+                    role="user",
+                    parts=[
+                        GeminiPart(text="Edit this image"),
+                        GeminiPart(
+                            fileData=GeminiFileData(
+                                fileUri="https://example.com/reference.jpg",
+                                mimeType="image/jpeg",
+                            )
+                        ),
+                    ],
+                )
+            ]
+        )
+
+        with patch.object(
+            routes,
+            "retrieve_image_data",
+            new=AsyncMock(return_value=portrait_image),
+        ) as retrieve:
+            normalized = await routes._normalize_gemini_request(
+                "gemini-3.0-pro-image",
+                request,
+                api_key_id=19,
+                allowed_token_ids={7},
+            )
+
+        self.assertEqual(normalized.model, "gemini-3.0-pro-image-portrait")
+        retrieve.assert_awaited_once_with(
+            "https://example.com/reference.jpg",
+            api_key_id=19,
+            allowed_token_ids={7},
+        )
 
 
 class VideoCacheDeliveryTests(unittest.IsolatedAsyncioTestCase):
