@@ -383,6 +383,35 @@ class BrowserProfileAccountTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result[0]["runtime_open"])
         profile_service.is_runtime_open.assert_awaited_once_with(24)
 
+    async def test_admin_sync_and_refresh_are_transient_unless_runtime_is_pinned(self):
+        profile_service = SimpleNamespace(
+            sync_profile=AsyncMock(
+                return_value={"profile_status": "connected", "st_status": "ok"}
+            ),
+            refresh_profile=AsyncMock(
+                return_value={"profile_status": "connected", "st_status": "ok"}
+            ),
+        )
+        token_manager = SimpleNamespace(
+            flow_client=None,
+            enable_token=AsyncMock(),
+        )
+
+        with (
+            patch.object(
+                admin.BrowserProfileService,
+                "get_instance",
+                AsyncMock(return_value=profile_service),
+            ),
+            patch.object(admin, "token_manager", token_manager),
+        ):
+            await admin.sync_browser_profile(24, token="admin-token")
+            await admin.refresh_browser_profile(24, token="admin-token")
+
+        profile_service.sync_profile.assert_awaited_once_with(24, retain_runtime=False)
+        profile_service.refresh_profile.assert_awaited_once_with(24, retain_runtime=False)
+        self.assertEqual(token_manager.enable_token.await_count, 2)
+
 
 class BrowserProfileSchedulerTests(unittest.IsolatedAsyncioTestCase):
     async def test_token_manager_uses_transient_profile_refresh(self):

@@ -1388,7 +1388,7 @@ async def sync_browser_profile(
 ):
     try:
         service = await BrowserProfileService.get_instance(db=db, flow_client=token_manager.flow_client)
-        profile = await service.sync_profile(token_id)
+        profile = await service.sync_profile(token_id, retain_runtime=False)
         if profile.get("profile_status") == "connected" and profile.get("st_status") == "ok":
             await token_manager.enable_token(token_id)
         return {"success": True, "profile": profile}
@@ -1405,7 +1405,7 @@ async def refresh_browser_profile(
 ):
     try:
         service = await BrowserProfileService.get_instance(db=db, flow_client=token_manager.flow_client)
-        profile = await service.refresh_profile(token_id)
+        profile = await service.refresh_profile(token_id, retain_runtime=False)
         if profile.get("profile_status") == "connected" and profile.get("st_status") == "ok":
             await token_manager.enable_token(token_id)
         return {"success": True, "profile": profile}
