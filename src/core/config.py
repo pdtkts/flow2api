@@ -144,10 +144,44 @@ class Config:
         """Load configuration from setting.toml, falling back to the example file."""
         config_dir = REPO_ROOT / "config"
         config_path = config_dir / "setting.toml"
-        if not config_path.exists():
-            config_path = config_dir / "setting_example.toml"
-        with open(config_path, "rb") as f:
-            return _apply_env_overrides(tomli.load(f))
+        fallback_path = config_dir / "setting_example.toml"
+
+        if config_path.exists() and not config_path.is_file():
+            print(
+                f"[Config] {config_path} is not a regular file; "
+                f"falling back to {fallback_path.name}. Check the Docker mount or local path."
+            )
+            config_path = fallback_path
+        elif not config_path.exists():
+            config_path = fallback_path
+
+        if not config_path.is_file():
+            raise FileNotFoundError(
+                f"Configuration file is missing or unreadable: {config_path}. "
+                "Provide config/setting.toml or config/setting_example.toml."
+            )
+
+        try:
+            with open(config_path, "rb") as f:
+                loaded = tomli.load(f)
+        except OSError as exc:
+            if config_path != fallback_path and fallback_path.is_file():
+                print(
+                    f"[Config] Unable to read {config_path}; "
+                    f"falling back to {fallback_path.name}."
+                )
+                try:
+                    with open(fallback_path, "rb") as f:
+                        loaded = tomli.load(f)
+                except OSError as fallback_exc:
+                    raise FileNotFoundError(
+                        f"Configuration files are unreadable: {config_path} and {fallback_path}."
+                    ) from fallback_exc
+            else:
+                raise FileNotFoundError(
+                    f"Configuration file is unreadable: {config_path}."
+                ) from exc
+        return _apply_env_overrides(loaded)
 
     def reload_config(self):
         """Reload configuration from file"""

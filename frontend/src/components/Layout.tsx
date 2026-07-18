@@ -41,7 +41,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
               </DropdownMenuContent>
             </DropdownMenu>
 
-            <Button variant="ghost" size="sm" onClick={logout} className="h-8 gap-1">
+            <Button variant="ghost" size="sm" onClick={() => void logout()} className="h-8 gap-1">
               <LogOut className="h-3.5 w-3.5" />
               Logout
             </Button>

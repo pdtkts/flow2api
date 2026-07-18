@@ -12,7 +12,7 @@ import warnings
 from datetime import datetime, timezone
 
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse, FileResponse, JSONResponse, Response
+from fastapi.responses import HTMLResponse, FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -903,6 +903,18 @@ async def metrics():
 
 # HTML routes for frontend
 static_path = Path(__file__).parent.parent / "static"
+_SPA_NO_CACHE_HEADERS = {
+    "Cache-Control": "no-store, no-cache, must-revalidate",
+    "Pragma": "no-cache",
+    "Expires": "0",
+}
+
+
+async def _ensure_admin_spa_session(request: Request):
+    token = admin.get_admin_token_from_cookie(request)
+    if not await admin.is_admin_session_token_valid(token):
+        return RedirectResponse(url="/login", status_code=302)
+    return None
 
 # Serve static assets (js, css, images from Vite build)
 assets_path = static_path / "assets"
@@ -910,14 +922,19 @@ if assets_path.exists():
     app.mount("/assets", StaticFiles(directory=str(assets_path)), name="assets")
 
 @app.get("/{full_path:path}")
-async def serve_spa(full_path: str):
+async def serve_spa(full_path: str, request: Request):
     """Catch-all route to serve the React SPA"""
     # If the user tries to access the API directly via an undefined route, let it return 404 naturally
     # Or if it's an API route that somehow wasn't matched (though it should be matched earlier)
     if full_path.startswith("api/"):
         return HTMLResponse(content='{"detail": "Not Found"}', status_code=404)
+
+    if full_path.strip("/") in {"manage", "test"}:
+        guard_response = await _ensure_admin_spa_session(request)
+        if guard_response is not None:
+            return guard_response
         
     index_file = static_path / "index.html"
     if index_file.exists():
-        return FileResponse(str(index_file))
+        return FileResponse(str(index_file), headers=_SPA_NO_CACHE_HEADERS)
     return HTMLResponse(content="<h1>Flow2API GUI</h1><p>Frontend not found. Please build the frontend first.</p>", status_code=404)

@@ -9,7 +9,7 @@ import shutil
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from fastapi import APIRouter, Depends, File, HTTPException, Header, Query, Request, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Header, Query, Request, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
@@ -62,6 +62,7 @@ captcha_runtime_prepare_tasks: Dict[str, asyncio.Task] = {}
 # Admin session TTLs (seconds)
 _ADMIN_SESSION_TTL_REMEMBER = 30 * 24 * 3600  # 30 days when "remember me" is on
 _ADMIN_SESSION_TTL_BROWSER = 24 * 3600  # 24 hours when off
+ADMIN_SESSION_COOKIE_NAME = "admin_session"
 
 SUPPORTED_API_CAPTCHA_METHODS = {"yescaptcha", "capmonster", "ezcaptcha", "capsolver"}
 MAX_SQLITE_RESTORE_BYTES = 512 * 1024 * 1024
@@ -1071,33 +1072,85 @@ class EventCalendarUpdateRequest(BaseModel):
 
 # ========== Auth Middleware ==========
 
-async def verify_admin_token(authorization: str = Header(None)):
-    """Verify admin session token (NOT API key)"""
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Missing authorization")
+def get_admin_token_from_cookie(request: Request) -> Optional[str]:
+    token = str(request.cookies.get(ADMIN_SESSION_COOKIE_NAME) or "").strip()
+    return token or None
 
-    token = authorization[7:]
 
-    if not await db.is_admin_session_valid(token):
+def _request_uses_https(request: Request) -> bool:
+    forwarded_proto = str(request.headers.get("x-forwarded-proto") or "").split(",", 1)[0]
+    return request.url.scheme.lower() == "https" or forwarded_proto.strip().lower() == "https"
+
+
+def _set_admin_session_cookie(
+    response: Response,
+    request: Request,
+    token: str,
+    *,
+    remember_me: bool,
+) -> None:
+    response.set_cookie(
+        key=ADMIN_SESSION_COOKIE_NAME,
+        value=token,
+        max_age=_ADMIN_SESSION_TTL_REMEMBER if remember_me else None,
+        httponly=True,
+        samesite="lax",
+        secure=_request_uses_https(request),
+        path="/",
+    )
+
+
+def _clear_admin_session_cookie(response: Response, request: Request) -> None:
+    response.delete_cookie(
+        key=ADMIN_SESSION_COOKIE_NAME,
+        httponly=True,
+        samesite="lax",
+        secure=_request_uses_https(request),
+        path="/",
+    )
+
+
+async def is_admin_session_token_valid(token: Optional[str]) -> bool:
+    normalized = str(token or "").strip()
+    return bool(normalized and db and await db.is_admin_session_valid(normalized))
+
+
+async def verify_admin_token(request: Request, authorization: str = Header(None)):
+    """Verify a persistent admin session from Bearer auth or the browser cookie."""
+    header_token = ""
+    if authorization and authorization.startswith("Bearer "):
+        header_token = authorization[7:].strip()
+    cookie_token = get_admin_token_from_cookie(request) or ""
+
+    if header_token and await is_admin_session_token_valid(header_token):
+        return header_token
+    if cookie_token and await is_admin_session_token_valid(cookie_token):
+        return cookie_token
+    if header_token or cookie_token:
         raise HTTPException(status_code=401, detail="Invalid or expired admin token")
-
-    return token
+    raise HTTPException(status_code=401, detail="Missing authorization")
 
 
 # ========== Auth Endpoints ==========
 
 @router.post("/api/admin/login")
-async def admin_login(request: LoginRequest):
+async def admin_login(payload: LoginRequest, request: Request, response: Response):
     """Admin login - returns session token (NOT API key)"""
-    if not AuthManager.verify_admin(request.username, request.password):
+    if not AuthManager.verify_admin(payload.username, payload.password):
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
     # Generate independent session token
     session_token = f"admin-{secrets.token_urlsafe(32)}"
 
-    ttl = _ADMIN_SESSION_TTL_REMEMBER if request.remember_me else _ADMIN_SESSION_TTL_BROWSER
+    ttl = _ADMIN_SESSION_TTL_REMEMBER if payload.remember_me else _ADMIN_SESSION_TTL_BROWSER
     expires_at = int(time.time()) + ttl
     await db.insert_admin_session(session_token, expires_at)
+    _set_admin_session_cookie(
+        response,
+        request,
+        session_token,
+        remember_me=payload.remember_me,
+    )
 
     return {
         "success": True,
@@ -1107,26 +1160,36 @@ async def admin_login(request: LoginRequest):
 
 
 @router.post("/api/admin/logout")
-async def admin_logout(token: str = Depends(verify_admin_token)):
+async def admin_logout(
+    request: Request,
+    response: Response,
+    token: str = Depends(verify_admin_token),
+):
     """Admin logout - invalidate session token"""
-    await db.delete_admin_session(token)
+    cookie_token = get_admin_token_from_cookie(request)
+    for session_token in {token, cookie_token}:
+        if session_token:
+            await db.delete_admin_session(session_token)
+    _clear_admin_session_cookie(response, request)
     return {"success": True, "message": "退出登录成功"}
 
 
 @router.post("/api/admin/change-password")
 async def change_password(
-    request: ChangePasswordRequest,
+    payload: ChangePasswordRequest,
+    request: Request,
+    response: Response,
     token: str = Depends(verify_admin_token)
 ):
     """Change admin password"""
     # Verify old password
-    if not AuthManager.verify_admin(config.admin_username, request.old_password):
+    if not AuthManager.verify_admin(config.admin_username, payload.old_password):
         raise HTTPException(status_code=400, detail="旧密码错误")
 
     # Update password and username in database
-    update_params = {"password": request.new_password}
-    if request.username:
-        update_params["username"] = request.username
+    update_params = {"password": payload.new_password}
+    if payload.username:
+        update_params["username"] = payload.username
 
     await db.update_admin_config(**update_params)
 
@@ -1135,6 +1198,7 @@ async def change_password(
 
     # 🔑 Invalidate all admin session tokens (force re-login for security)
     await db.delete_all_admin_sessions()
+    _clear_admin_session_cookie(response, request)
 
     return {"success": True, "message": "密码修改成功,请重新登录"}
 
@@ -3058,15 +3122,19 @@ async def get_system_info(token: str = Depends(verify_admin_token)):
 # ========== Additional Routes for Frontend Compatibility ==========
 
 @router.post("/api/login")
-async def login(request: LoginRequest):
+async def login(payload: LoginRequest, request: Request, response: Response):
     """Login endpoint (alias for /api/admin/login)"""
-    return await admin_login(request)
+    return await admin_login(payload, request, response)
 
 
 @router.post("/api/logout")
-async def logout(token: str = Depends(verify_admin_token)):
+async def logout(
+    request: Request,
+    response: Response,
+    token: str = Depends(verify_admin_token),
+):
     """Logout endpoint (alias for /api/admin/logout)"""
-    return await admin_logout(token)
+    return await admin_logout(request, response, token)
 
 
 @router.get("/health")
@@ -3089,8 +3157,19 @@ async def health_check():
 
 
 @router.get("/api/stats")
-async def get_stats(token: str = Depends(verify_admin_token)):
+async def get_stats(
+    request: Request,
+    response: Response,
+    token: str = Depends(verify_admin_token),
+):
     """Get statistics for dashboard"""
+    if get_admin_token_from_cookie(request) != token:
+        _set_admin_session_cookie(
+            response,
+            request,
+            token,
+            remember_me=True,
+        )
     return await db.get_dashboard_stats()
 
 
@@ -3237,11 +3316,13 @@ async def update_admin_config(
 
 @router.post("/api/admin/password")
 async def update_admin_password(
-    request: ChangePasswordRequest,
+    payload: ChangePasswordRequest,
+    request: Request,
+    response: Response,
     token: str = Depends(verify_admin_token)
 ):
     """Update admin password"""
-    return await change_password(request, token)
+    return await change_password(payload, request, response, token)
 
 
 @router.post("/api/admin/apikey")
