@@ -114,14 +114,17 @@ def sanitize_data_for_log(data: Any, *, field_name: Any = None) -> Any:
 
 
 class SensitiveAccessLogFilter(logging.Filter):
-    """Redact sensitive query parameters before Uvicorn formats access logs."""
+    """Redact sensitive values before Uvicorn formats HTTP or WebSocket logs."""
 
     def filter(self, record: logging.LogRecord) -> bool:
         args = record.args
-        if isinstance(args, tuple) and len(args) >= 3:
-            safe_args = list(args)
-            safe_args[2] = redact_url_for_log(safe_args[2])
-            record.args = tuple(safe_args)
+        if isinstance(args, tuple):
+            record.args = tuple(
+                redact_text_for_log(value) if isinstance(value, str) else value
+                for value in args
+            )
+        elif isinstance(args, dict):
+            record.args = sanitize_data_for_log(args)
         return True
 
 class DebugLogger:

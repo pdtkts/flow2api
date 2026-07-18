@@ -5,22 +5,32 @@ from src.main import app
 from src.core.logger import SensitiveAccessLogFilter
 import uvicorn
 
-if __name__ == "__main__":
-    from src.core.config import config
 
+def build_uvicorn_log_config():
+    """Build Uvicorn logging config with secret redaction on HTTP and WebSocket logs."""
     log_config = copy.deepcopy(uvicorn.config.LOGGING_CONFIG)
-    log_config.setdefault("filters", {})["sensitive_query"] = {
+    filter_name = "sensitive_query"
+    log_config.setdefault("filters", {})[filter_name] = {
         "()": SensitiveAccessLogFilter,
     }
-    access_handler = log_config.get("handlers", {}).get("access", {})
-    access_filters = list(access_handler.get("filters", []))
-    access_filters.append("sensitive_query")
-    access_handler["filters"] = access_filters
+
+    for handler_name in ("access", "default"):
+        handler = log_config.setdefault("handlers", {}).setdefault(handler_name, {})
+        filters = list(handler.get("filters", []))
+        if filter_name not in filters:
+            filters.append(filter_name)
+        handler["filters"] = filters
+
+    return log_config
+
+
+if __name__ == "__main__":
+    from src.core.config import config
 
     uvicorn.run(
         "src.main:app",
         host=config.server_host,
         port=config.server_port,
         reload=False,
-        log_config=log_config,
+        log_config=build_uvicorn_log_config(),
     )

@@ -515,6 +515,15 @@ class ProductionHealthTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ProductionLogRedactionTests(unittest.TestCase):
+    def test_uvicorn_log_config_redacts_access_and_websocket_handlers(self):
+        from main import build_uvicorn_log_config
+
+        log_config = build_uvicorn_log_config()
+
+        self.assertIn("sensitive_query", log_config["filters"])
+        self.assertIn("sensitive_query", log_config["handlers"]["access"]["filters"])
+        self.assertIn("sensitive_query", log_config["handlers"]["default"]["filters"])
+
     def test_redacts_headers_nested_bodies_urls_and_text(self):
         secrets = ["header-secret", "cookie-secret", "query-secret", "body-secret", "password-secret"]
         headers = sanitize_headers_for_log(
@@ -554,6 +563,25 @@ class ProductionLogRedactionTests(unittest.TestCase):
                 "/captcha_ws?key=websocket-secret&instance_id=safe",
                 "1.1",
                 101,
+            ),
+            None,
+        )
+
+        self.assertTrue(SensitiveAccessLogFilter().filter(record))
+        rendered = record.getMessage()
+        self.assertNotIn("websocket-secret", rendered)
+        self.assertIn("instance_id=safe", rendered)
+
+    def test_uvicorn_default_filter_masks_websocket_key(self):
+        record = logging.LogRecord(
+            "uvicorn.error",
+            logging.INFO,
+            __file__,
+            1,
+            '%s - "WebSocket %s" [accepted]',
+            (
+                "127.0.0.1:1234",
+                "/captcha_ws?key=websocket-secret&instance_id=safe",
             ),
             None,
         )
