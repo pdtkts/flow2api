@@ -14,6 +14,7 @@ Example:
 import re
 from io import BytesIO
 from typing import Optional, Dict, Any, Tuple
+from ..core.account_tiers import is_native_4k_model
 from ..core.logger import debug_logger
 
 # ──────────────────────────────────────────────
@@ -740,19 +741,25 @@ def resolve_model_name(
     return model
 
 
-def get_base_model_aliases() -> Dict[str, str]:
+def get_base_model_aliases(*, include_4k: bool = True) -> Dict[str, str]:
     """返回所有简化模型名（别名）及其描述，用于 /v1/models 接口展示。"""
     aliases = {}
 
     for alias, base in IMAGE_BASE_MODELS.items():
         aspects = MODEL_SUPPORTED_ASPECTS.get(base, [])
-        sizes = MODEL_SUPPORTED_SIZES.get(base, [])
+        sizes = [
+            size
+            for size in MODEL_SUPPORTED_SIZES.get(base, [])
+            if include_4k or size.lower() != "4k"
+        ]
         desc_parts = [f"aspects: {', '.join(aspects)}"]
         if sizes:
             desc_parts.append(f"sizes: {', '.join(sizes)}")
         aliases[alias] = f"Image generation (alias) - {'; '.join(desc_parts)}"
 
     for alias in VIDEO_BASE_MODELS:
+        if not include_4k and is_native_4k_model(alias):
+            continue
         aliases[alias] = (
             "Video generation (alias) - supports landscape/portrait via generationConfig"
         )

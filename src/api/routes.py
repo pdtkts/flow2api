@@ -26,7 +26,12 @@ from ..core.auth import verify_api_key_flexible, verify_managed_presence_key
 from ..core.api_key_manager import AuthContext
 from ..core.logger import debug_logger
 from ..core.route_log_sanitize import dumps_for_request_log
-from ..core.account_tiers import normalize_user_paygate_tier, supports_model_for_tier
+from ..core.account_tiers import (
+    PAYGATE_TIER_TWO,
+    is_native_4k_model,
+    normalize_user_paygate_tier,
+    supports_model_for_tier,
+)
 from ..core.model_resolver import get_base_model_aliases, resolve_model_name
 from ..core.geminigen_manifest import GEMINIGEN_MODEL_MANIFEST, geminigen_manifest_entry
 from ..core.studio_model_catalog import (
@@ -305,13 +310,22 @@ def _build_model_description(model_config: Dict[str, Any]) -> str:
     return description
 
 
-async def _has_native_flow_accounts() -> bool:
+async def _get_active_native_tokens() -> List[Any]:
     if generation_handler is None:
-        return False
+        return []
     db = getattr(generation_handler, "db", None)
     if db is None:
-        return False
-    return bool(await db.get_active_tokens())
+        return []
+    return list(await db.get_active_tokens())
+
+
+def _has_active_native_ultra_account(tokens: List[Any]) -> bool:
+    return any(
+        bool(getattr(token, "is_active", True))
+        and normalize_user_paygate_tier(getattr(token, "user_paygate_tier", None))
+        == PAYGATE_TIER_TWO
+        for token in tokens
+    )
 
 
 async def _has_runway_accounts() -> bool:
@@ -336,8 +350,10 @@ async def _has_geminigen_accounts() -> bool:
 
 async def _get_openai_model_catalog() -> List[Dict[str, str]]:
     """Collect OpenAI-compatible model list entries."""
-    if not await _has_native_flow_accounts():
+    active_tokens = await _get_active_native_tokens()
+    if not active_tokens:
         return []
+    include_4k = _has_active_native_ultra_account(active_tokens)
     return [
         {
             "id": model_id,
@@ -345,6 +361,7 @@ async def _get_openai_model_catalog() -> List[Dict[str, str]]:
             "studio": native_studio_metadata(model_id, model_config),
         }
         for model_id, model_config in MODEL_CONFIG.items()
+        if include_4k or not is_native_4k_model(model_id)
     ]
 
 
@@ -391,11 +408,16 @@ async def _get_gemini_model_catalog() -> Dict[str, str]:
     """Collect Gemini-compatible model metadata for /models endpoints."""
     catalog: Dict[str, str] = {}
 
-    if await _has_native_flow_accounts():
-        for alias_id, description in get_base_model_aliases().items():
+    active_tokens = await _get_active_native_tokens()
+    if active_tokens:
+        include_4k = _has_active_native_ultra_account(active_tokens)
+        aliases = get_base_model_aliases(include_4k=include_4k)
+        for alias_id, description in aliases.items():
             catalog[alias_id] = description
 
         for model_id, model_config in MODEL_CONFIG.items():
+            if not include_4k and is_native_4k_model(model_id):
+                continue
             catalog.setdefault(model_id, _build_model_description(model_config))
 
     for model in await _get_geminigen_openai_model_catalog():
@@ -1976,6 +1998,25 @@ async def _select_random_active_project_for_api_key(
     for_video_generation = generation_type == "video"
 
     active_tokens = await handler.load_balancer.token_manager.get_active_tokens()
+    assigned_active_tokens = [
+        token for token in active_tokens if int(token.id) in auth_ctx.allowed_accounts
+    ]
+    if (
+        model in MODEL_CONFIG
+        and is_native_4k_model(model)
+        and not any(
+            supports_model_for_tier(model, token.user_paygate_tier)
+            for token in assigned_active_tokens
+        )
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Native 4K generation requires an active Ultra account assigned "
+                f"to this API key: {model}"
+            ),
+        )
+
     token_candidates: List[Dict[str, Any]] = []
     for token in active_tokens:
         token_id = int(token.id)
@@ -2538,7 +2579,14 @@ async def list_models(auth_ctx: AuthContext = Depends(verify_api_key_flexible)):
 @router.get("/v1/models/aliases")
 async def list_model_aliases(auth_ctx: AuthContext = Depends(verify_api_key_flexible)):
     """List simplified model aliases for generationConfig-based resolution."""
-    aliases = get_base_model_aliases() if await _has_native_flow_accounts() else {}
+    active_tokens = await _get_active_native_tokens()
+    aliases = (
+        get_base_model_aliases(
+            include_4k=_has_active_native_ultra_account(active_tokens)
+        )
+        if active_tokens
+        else {}
+    )
     alias_models = []
     for alias_id, description in aliases.items():
         alias_models.append(

@@ -8,6 +8,12 @@ PAYGATE_TIER_ONE = "PAYGATE_TIER_ONE"
 PAYGATE_TIER_TWO = "PAYGATE_TIER_TWO"
 
 
+def is_native_4k_model(model_name: Optional[str]) -> bool:
+    """Return whether a native model id explicitly requests 4K output."""
+    normalized = (model_name or "").strip().lower()
+    return normalized.endswith("-4k") or normalized.endswith("_4k")
+
+
 def normalize_user_paygate_tier(user_paygate_tier: Optional[str]) -> str:
     """Normalize an account tier, defaulting unknown values to free tier."""
     normalized = (user_paygate_tier or "").strip()
@@ -42,7 +48,7 @@ def get_required_paygate_tier_for_model(model_name: Optional[str]) -> str:
     if not normalized:
         return PAYGATE_TIER_NOT_PAID
 
-    if normalized.endswith("-4k") or normalized.endswith("_4k") or "_ultra" in normalized:
+    if is_native_4k_model(normalized) or "_ultra" in normalized:
         return PAYGATE_TIER_TWO
 
     if normalized.endswith("-2k") or normalized.endswith("_1080p"):

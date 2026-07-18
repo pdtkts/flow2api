@@ -11,10 +11,16 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+from fastapi import HTTPException
 from PIL import Image
 
 import src.api.routes as routes
 from src.api.routes import _extract_async_delivery_fields
+from src.core.account_tiers import (
+    PAYGATE_TIER_ONE,
+    PAYGATE_TIER_TWO,
+    is_native_4k_model,
+)
 from src.core.config import config
 from src.core.logger import debug_logger
 from src.core.model_resolver import get_base_model_aliases, resolve_model_name
@@ -2193,6 +2199,226 @@ class StartupStorageRecoveryTests(unittest.IsolatedAsyncioTestCase):
         ):
             await _init_database_with_storage_recovery(database, cache)
         self.assertEqual(database.init_db.await_count, 2)
+
+
+NATIVE_IMAGE_2K = "gemini-3.1-flash-image-landscape-2k"
+NATIVE_IMAGE_4K = "gemini-3.1-flash-image-landscape-4k"
+NATIVE_VIDEO_1080P = "veo_3_1_t2v_1080p"
+NATIVE_VIDEO_4K = "veo_3_1_t2v_4k"
+NATIVE_NON_4K_ULTRA = "veo_3_1_t2v_fast_ultra"
+GEMINIGEN_IMAGE_4K = "geminigen-nano-banana-pro-image-square-4k"
+
+
+def make_tier_token(
+    token_id: int,
+    tier: str,
+    *,
+    is_active: bool = True,
+    image_enabled: bool = True,
+    video_enabled: bool = True,
+):
+    return SimpleNamespace(
+        id=token_id,
+        user_paygate_tier=tier,
+        is_active=is_active,
+        image_enabled=image_enabled,
+        video_enabled=video_enabled,
+    )
+
+
+def make_tier_auth_context(*token_ids: int):
+    return SimpleNamespace(key_id=99, allowed_accounts=set(token_ids))
+
+
+class _TierNativeDb:
+    def __init__(self, tokens):
+        self.tokens = list(tokens)
+
+    async def get_active_tokens(self):
+        return list(self.tokens)
+
+
+class _TierTokenManager:
+    def __init__(self, tokens):
+        self.tokens = list(tokens)
+
+    async def get_active_tokens(self):
+        return list(self.tokens)
+
+
+class _TierLoadBalancer:
+    def __init__(self, tokens):
+        self.token_manager = _TierTokenManager(tokens)
+
+    async def _get_token_load(self, token_id, **kwargs):
+        return 0, None
+
+
+def make_tier_handler(tokens):
+    tokens = list(tokens)
+    return SimpleNamespace(
+        db=_TierNativeDb(tokens),
+        load_balancer=_TierLoadBalancer(tokens),
+    )
+
+
+class _TierGeminiGenDb:
+    async def get_geminigen_config(self):
+        return SimpleNamespace(enabled=True, video_enabled=True)
+
+    async def list_geminigen_accounts(self):
+        return [SimpleNamespace(is_active=True, bearer_token="test-token")]
+
+
+class Native4KCatalogUnitTests(unittest.TestCase):
+    def test_4k_identifier_and_alias_filtering(self):
+        self.assertTrue(is_native_4k_model(NATIVE_IMAGE_4K))
+        self.assertTrue(is_native_4k_model(NATIVE_VIDEO_4K))
+        self.assertFalse(is_native_4k_model(NATIVE_IMAGE_2K))
+        self.assertFalse(is_native_4k_model(NATIVE_NON_4K_ULTRA))
+
+        aliases = get_base_model_aliases(include_4k=False)
+        self.assertIn("sizes: 2k", aliases["gemini-3.1-flash-image"])
+        self.assertNotIn("4k", aliases["gemini-3.1-flash-image"])
+        self.assertIn(NATIVE_NON_4K_ULTRA, aliases)
+        self.assertFalse(any(is_native_4k_model(alias) for alias in aliases))
+
+
+class Native4KCatalogAsyncTests(unittest.IsolatedAsyncioTestCase):
+    async def test_pro_only_catalog_hides_4k_but_keeps_2k_1080p_and_ultra_names(self):
+        handler = make_tier_handler([make_tier_token(1, PAYGATE_TIER_ONE)])
+        with (
+            patch.object(routes, "generation_handler", handler),
+            patch.object(routes, "geminigen_service", None),
+        ):
+            openai_catalog = await routes._get_openai_model_catalog()
+            gemini_catalog = await routes._get_gemini_model_catalog()
+            alias_payload = await routes.list_model_aliases(make_tier_auth_context(1))
+            missing_model = await routes.get_gemini_model(
+                NATIVE_IMAGE_4K,
+                make_tier_auth_context(1),
+            )
+
+        openai_ids = {item["id"] for item in openai_catalog}
+        alias_ids = {item["id"] for item in alias_payload["data"]}
+        self.assertIn(NATIVE_IMAGE_2K, openai_ids)
+        self.assertIn(NATIVE_VIDEO_1080P, openai_ids)
+        self.assertIn(NATIVE_NON_4K_ULTRA, openai_ids)
+        self.assertNotIn(NATIVE_IMAGE_4K, openai_ids)
+        self.assertNotIn(NATIVE_VIDEO_4K, openai_ids)
+        self.assertNotIn(NATIVE_IMAGE_4K, gemini_catalog)
+        self.assertFalse(any(is_native_4k_model(alias) for alias in alias_ids))
+        self.assertNotIn("4k", gemini_catalog["gemini-3.1-flash-image"])
+        self.assertEqual(missing_model.status_code, 404)
+
+    async def test_active_ultra_globally_enables_4k_catalog_entries(self):
+        handler = make_tier_handler(
+            [
+                make_tier_token(1, PAYGATE_TIER_ONE),
+                make_tier_token(2, PAYGATE_TIER_TWO),
+            ]
+        )
+        with (
+            patch.object(routes, "generation_handler", handler),
+            patch.object(routes, "geminigen_service", None),
+        ):
+            openai_catalog = await routes._get_openai_model_catalog()
+            gemini_catalog = await routes._get_gemini_model_catalog()
+            alias_payload = await routes.list_model_aliases(make_tier_auth_context(1))
+            model_payload = await routes.get_gemini_model(
+                NATIVE_IMAGE_4K,
+                make_tier_auth_context(1),
+            )
+
+        openai_ids = {item["id"] for item in openai_catalog}
+        alias_ids = {item["id"] for item in alias_payload["data"]}
+        self.assertIn(NATIVE_IMAGE_4K, openai_ids)
+        self.assertIn(NATIVE_VIDEO_4K, openai_ids)
+        self.assertIn(NATIVE_IMAGE_4K, gemini_catalog)
+        self.assertIn(NATIVE_VIDEO_4K, alias_ids)
+        self.assertIn("4k", gemini_catalog["gemini-3.1-flash-image"])
+        self.assertEqual(model_payload["name"], f"models/{NATIVE_IMAGE_4K}")
+
+    async def test_inactive_ultra_does_not_enable_4k(self):
+        handler = make_tier_handler(
+            [
+                make_tier_token(1, PAYGATE_TIER_ONE),
+                make_tier_token(2, PAYGATE_TIER_TWO, is_active=False),
+            ]
+        )
+        with patch.object(routes, "generation_handler", handler):
+            catalog = await routes._get_openai_model_catalog()
+
+        self.assertFalse(any(is_native_4k_model(item["id"]) for item in catalog))
+
+    async def test_native_filter_does_not_hide_geminigen_4k(self):
+        handler = make_tier_handler([make_tier_token(1, PAYGATE_TIER_ONE)])
+        geminigen_service = SimpleNamespace(db=_TierGeminiGenDb())
+        with (
+            patch.object(routes, "generation_handler", handler),
+            patch.object(routes, "geminigen_service", geminigen_service),
+            patch.object(routes, "runway_service", None),
+        ):
+            payload = await routes.list_models(make_tier_auth_context(1))
+
+        ids = {item["id"] for item in payload["data"]}
+        self.assertNotIn(NATIVE_IMAGE_4K, ids)
+        self.assertIn(GEMINIGEN_IMAGE_4K, ids)
+
+
+class Native4KGenerationEligibilityTests(unittest.IsolatedAsyncioTestCase):
+    async def test_pro_only_assignment_rejects_explicit_and_alias_resolved_4k(self):
+        request = SimpleNamespace(
+            generationConfig=SimpleNamespace(
+                aspectRatio="landscape",
+                imageSize="4k",
+            )
+        )
+        alias_resolved = resolve_model_name(
+            "gemini-3.1-flash-image",
+            request=request,
+            model_config=MODEL_CONFIG,
+        )
+        self.assertEqual(alias_resolved, NATIVE_IMAGE_4K)
+
+        handler = make_tier_handler([make_tier_token(1, PAYGATE_TIER_ONE)])
+        with patch.object(routes, "generation_handler", handler):
+            for model in (NATIVE_IMAGE_4K, NATIVE_VIDEO_4K, alias_resolved):
+                with self.subTest(model=model):
+                    with self.assertRaises(HTTPException) as raised:
+                        await routes._select_random_active_project_for_api_key(
+                            make_tier_auth_context(1),
+                            model,
+                        )
+                    self.assertEqual(raised.exception.status_code, 403)
+                    self.assertIn("active Ultra account assigned", raised.exception.detail)
+
+    async def test_4k_selection_uses_only_assigned_ultra(self):
+        handler = make_tier_handler(
+            [
+                make_tier_token(1, PAYGATE_TIER_ONE),
+                make_tier_token(2, PAYGATE_TIER_TWO),
+            ]
+        )
+        with patch.object(routes, "generation_handler", handler):
+            selected, project_id = await routes._select_random_active_project_for_api_key(
+                make_tier_auth_context(1, 2),
+                NATIVE_IMAGE_4K,
+            )
+
+        self.assertEqual(selected, {2})
+        self.assertIsNone(project_id)
+
+    async def test_pro_assignment_can_generate_2k_and_1080p(self):
+        handler = make_tier_handler([make_tier_token(1, PAYGATE_TIER_ONE)])
+        with patch.object(routes, "generation_handler", handler):
+            for model in (NATIVE_IMAGE_2K, NATIVE_VIDEO_1080P):
+                with self.subTest(model=model):
+                    selected, _ = await routes._select_random_active_project_for_api_key(
+                        make_tier_auth_context(1),
+                        model,
+                    )
+                    self.assertEqual(selected, {1})
 
 
 if __name__ == "__main__":
