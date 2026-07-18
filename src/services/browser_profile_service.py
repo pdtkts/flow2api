@@ -21,6 +21,8 @@ from .browser_cookie_utils import extract_session_token_from_cookie_payload
 BROWSER_PROFILE_ROOT = get_runtime_data_dir() / "browser_profiles"
 LOGIN_URL = "https://accounts.google.com/"
 FLOW_URL = "https://labs.google/fx/tools/flow"
+CHROMIUM_SINGLETON_ARTIFACTS = ("SingletonLock", "SingletonCookie", "SingletonSocket")
+SUPPORTS_PROC_PROFILE_INSPECTION = os.name != "nt" and Path("/proc").exists()
 
 
 @dataclass
@@ -145,23 +147,68 @@ class BrowserProfileService:
         )
 
     @staticmethod
+    def _is_profile_lock_error(exc: BaseException) -> bool:
+        message = str(exc or "").lower()
+        return any(
+            marker in message
+            for marker in (
+                "profile appears to be in use by another chromium process",
+                "has locked the profile so that it doesn't get corrupted",
+                "process_singleton_posix.cc",
+                "failed to create a processsingleton",
+            )
+        )
+
+    @staticmethod
     def _profile_process_ids(profile_path: Optional[Path]) -> list[int]:
         if os.name == "nt" or profile_path is None:
             return []
         proc_root = Path("/proc")
         if not proc_root.exists():
             return []
-        needle = f"--user-data-dir={profile_path.resolve()}".encode("utf-8")
+        resolved_path = os.path.normcase(str(profile_path.resolve()))
         process_ids: list[int] = []
         for entry in proc_root.iterdir():
             if not entry.name.isdigit():
                 continue
             try:
-                if needle in (entry / "cmdline").read_bytes():
-                    process_ids.append(int(entry.name))
+                args = [
+                    value.decode("utf-8", errors="surrogateescape")
+                    for value in (entry / "cmdline").read_bytes().split(b"\0")
+                    if value
+                ]
             except (OSError, ValueError):
                 continue
+            for index, arg in enumerate(args):
+                candidate = None
+                if arg.startswith("--user-data-dir="):
+                    candidate = arg.split("=", 1)[1]
+                elif arg == "--user-data-dir" and index + 1 < len(args):
+                    candidate = args[index + 1]
+                if candidate and os.path.normcase(str(Path(candidate).resolve())) == resolved_path:
+                    process_ids.append(int(entry.name))
+                    break
         return process_ids
+
+    @classmethod
+    def _remove_stale_singleton_artifacts(cls, profile_path: Path) -> int:
+        """Remove Chromium locks only when no process is using this exact profile."""
+        if not SUPPORTS_PROC_PROFILE_INSPECTION or cls._profile_process_ids(profile_path):
+            return 0
+        removed = 0
+        for name in CHROMIUM_SINGLETON_ARTIFACTS:
+            artifact = profile_path / name
+            try:
+                if artifact.is_symlink() or artifact.is_file():
+                    artifact.unlink()
+                    removed += 1
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                debug_logger.log_warning(
+                    f"[BrowserProfile] unable to remove stale {name}: {type(exc).__name__}"
+                )
+        return removed
 
     @classmethod
     async def _terminate_profile_processes(cls, profile_path: Optional[Path]) -> int:
@@ -220,17 +267,39 @@ class BrowserProfileService:
                     playwright = await self._ensure_playwright()
                     profile_path = self.profile_path_for_token(token_id)
                     profile_path.mkdir(parents=True, exist_ok=True)
-                    try:
-                        context = await playwright.chromium.launch_persistent_context(
-                            str(profile_path),
-                            **self._launch_options(),
+                    removed = self._remove_stale_singleton_artifacts(profile_path)
+                    if removed:
+                        debug_logger.log_info(
+                            f"[BrowserProfile] removed {removed} stale Chromium profile locks "
+                            f"for token {token_id}"
                         )
-                    except Exception as exc:
-                        if self.is_resource_exhaustion_error(exc):
-                            raise BrowserProfileResourceExhaustedError(
-                                "Browser profile runtime capacity is exhausted"
-                            ) from exc
-                        raise
+                    for launch_attempt in range(2):
+                        try:
+                            context = await playwright.chromium.launch_persistent_context(
+                                str(profile_path),
+                                **self._launch_options(),
+                            )
+                            break
+                        except Exception as exc:
+                            if self.is_resource_exhaustion_error(exc):
+                                raise BrowserProfileResourceExhaustedError(
+                                    "Browser profile runtime capacity is exhausted"
+                                ) from exc
+                            if (
+                                launch_attempt == 0
+                                and self._is_profile_lock_error(exc)
+                                and self._remove_stale_singleton_artifacts(profile_path)
+                            ):
+                                debug_logger.log_warning(
+                                    f"[BrowserProfile] reclaimed a stale Chromium profile lock "
+                                    f"for token {token_id}; retrying once"
+                                )
+                                continue
+                            if self._is_profile_lock_error(exc):
+                                raise RuntimeError(
+                                    "Browser profile is already in use by another live Chromium process"
+                                ) from exc
+                            raise
                     page = context.pages[0] if context.pages else await context.new_page()
                     runtime = ProfileRuntime(
                         context=context,

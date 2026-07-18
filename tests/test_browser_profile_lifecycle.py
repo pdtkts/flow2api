@@ -304,6 +304,59 @@ class BrowserProfileRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(chromium.launch_calls), 1)
         self.assertNotIn(24, self.service._runtimes)
 
+    async def test_stale_chromium_singleton_artifacts_are_removed_before_launch(self):
+        profile_path = self.service.profile_path_for_token(24)
+        profile_path.mkdir(parents=True)
+        for name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+            (profile_path / name).write_text("stale", encoding="utf-8")
+        chromium = self.configure_contexts(FakeContext(FakePage()))
+
+        with (
+            patch("src.services.browser_profile_service.SUPPORTS_PROC_PROFILE_INSPECTION", True),
+            patch.object(BrowserProfileService, "_profile_process_ids", return_value=[]),
+        ):
+            await self.service._get_runtime(24)
+
+        self.assertEqual(len(chromium.launch_calls), 1)
+        for name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+            self.assertFalse((profile_path / name).exists())
+
+    async def test_active_profile_singleton_artifacts_are_preserved(self):
+        profile_path = self.service.profile_path_for_token(24)
+        profile_path.mkdir(parents=True)
+        lock_path = profile_path / "SingletonLock"
+        lock_path.write_text("active", encoding="utf-8")
+        lock_error = RuntimeError(
+            "The profile appears to be in use by another Chromium process"
+        )
+        chromium = self.configure_contexts(lock_error)
+
+        with (
+            patch("src.services.browser_profile_service.SUPPORTS_PROC_PROFILE_INSPECTION", True),
+            patch.object(BrowserProfileService, "_profile_process_ids", return_value=[4321]),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "already in use"):
+                await self.service._get_runtime(24)
+
+        self.assertTrue(lock_path.exists())
+        self.assertEqual(len(chromium.launch_calls), 1)
+
+    async def test_profile_lock_launch_failure_reclaims_and_retries_once(self):
+        lock_error = RuntimeError(
+            "process_singleton_posix.cc: The profile appears to be in use by another Chromium process"
+        )
+        chromium = self.configure_contexts(lock_error, FakeContext(FakePage()))
+
+        with patch.object(
+            self.service,
+            "_remove_stale_singleton_artifacts",
+            side_effect=[0, 3],
+        ):
+            runtime = await self.service._get_runtime(24)
+
+        self.assertFalse(runtime.page.is_closed())
+        self.assertEqual(len(chromium.launch_calls), 2)
+
     async def test_close_unpinned_and_close_all_preserve_then_release_pinned(self):
         transient_context = FakeContext(FakePage())
         pinned_context = FakeContext(FakePage())
