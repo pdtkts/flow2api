@@ -6,6 +6,8 @@
 services:
   flow2api-headed:
     init: true
+    env_file:
+      - .env
     build:
       context: .
       dockerfile: Dockerfile.headed
