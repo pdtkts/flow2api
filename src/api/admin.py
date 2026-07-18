@@ -235,6 +235,55 @@ def _extract_log_job_id(*payloads: Any) -> str:
     return ""
 
 
+def _extract_captcha_user_agent_metadata(*payloads: Any) -> Dict[str, Any]:
+    """Extract the persisted provider-UA marker without exposing the raw User-Agent."""
+
+    def visit(value: Any) -> Optional[Dict[str, Any]]:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return None
+            try:
+                return visit(json.loads(text))
+            except Exception:
+                if not re.search(r'"captcha_user_agent_set"\s*:\s*true', text, re.IGNORECASE):
+                    return None
+                provider_match = re.search(
+                    r'"captcha_provider"\s*:\s*"([^"\\]+)"',
+                    text,
+                    re.IGNORECASE,
+                )
+                return {
+                    "captcha_user_agent_set": True,
+                    "captcha_provider": provider_match.group(1).strip() if provider_match else None,
+                }
+        if isinstance(value, dict):
+            if value.get("captcha_user_agent_set") is True:
+                provider = str(value.get("captcha_provider") or "").strip() or None
+                return {
+                    "captcha_user_agent_set": True,
+                    "captcha_provider": provider,
+                }
+            for nested in value.values():
+                found = visit(nested)
+                if found:
+                    return found
+        if isinstance(value, list):
+            for item in value:
+                found = visit(item)
+                if found:
+                    return found
+        return None
+
+    for payload in payloads:
+        found = visit(payload)
+        if found:
+            return found
+    return {"captcha_user_agent_set": False, "captcha_provider": None}
+
+
 def _guess_client_hints_from_user_agent(user_agent: str) -> Dict[str, str]:
     """根据 UA 补全常见的 sec-ch-* 头。"""
     ua = (user_agent or "").strip()
@@ -477,8 +526,8 @@ async def _solve_recaptcha_with_api_service(
     elif method == "capmonster":
         client_key = config.capmonster_api_key
         base_url = config.capmonster_base_url
-        task_type = "RecaptchaV3TaskProxyless"
-        min_score = None
+        task_type = "RecaptchaV3EnterpriseTask"
+        min_score = config.capmonster_min_score
     elif method == "ezcaptcha":
         client_key = config.ezcaptcha_api_key
         base_url = config.ezcaptcha_base_url
@@ -3203,6 +3252,7 @@ async def get_logs(
             status_code = int(raw_status_code) if raw_status_code is not None else None
         except (TypeError, ValueError):
             status_code = None
+        captcha_ua = _extract_captcha_user_agent_metadata(log.get("response_body_excerpt"))
         result.append({
             "id": log.get("id"),
             "job_id": log.get("job_id") or _extract_log_job_id(log.get("response_body_excerpt")),
@@ -3220,6 +3270,8 @@ async def get_logs(
             "created_at": log.get("created_at"),
             "updated_at": log.get("updated_at"),
             "error_summary": _extract_error_summary(log.get("response_body_excerpt")) if status_code is not None and status_code >= 400 else "",
+            "captcha_user_agent_set": captcha_ua["captcha_user_agent_set"],
+            "captcha_provider": captcha_ua["captcha_provider"],
         })
     return {"logs": result, "total": total, "limit": limit, "offset": offset}
 
@@ -3235,6 +3287,7 @@ async def get_log_detail(
         raise HTTPException(status_code=404, detail="日志不存在")
 
     error_summary = _extract_error_summary(log.get("response_body"))
+    captcha_ua = _extract_captcha_user_agent_metadata(log.get("response_body"))
 
     return {
         "id": log.get("id"),
@@ -3253,6 +3306,8 @@ async def get_log_detail(
         "created_at": log.get("created_at"),
         "updated_at": log.get("updated_at"),
         "error_summary": error_summary,
+        "captcha_user_agent_set": captcha_ua["captcha_user_agent_set"],
+        "captcha_provider": captcha_ua["captcha_provider"],
         "request_body": log.get("request_body"),
         "response_body": log.get("response_body"),
     }
@@ -4329,6 +4384,7 @@ async def update_captcha_config(
     yescaptcha_task_type = normalize_yescaptcha_task_type(request.get("yescaptcha_task_type"))
     capmonster_api_key = request.get("capmonster_api_key")
     capmonster_base_url = request.get("capmonster_base_url")
+    capmonster_min_score = request.get("capmonster_min_score")
     ezcaptcha_api_key = request.get("ezcaptcha_api_key")
     ezcaptcha_base_url = request.get("ezcaptcha_base_url")
     capsolver_api_key = request.get("capsolver_api_key")
@@ -4406,6 +4462,13 @@ async def update_captcha_config(
         browser_count = max(1, min(20, int(browser_count or 1)))
     except Exception:
         return {"success": False, "message": "browser_count must be an integer between 1 and 20"}
+    if capmonster_min_score is not None:
+        try:
+            capmonster_min_score = float(capmonster_min_score)
+        except (TypeError, ValueError):
+            return {"success": False, "message": "CapMonster minimum score must be a number between 0.1 and 0.9"}
+        if capmonster_min_score < 0.1 or capmonster_min_score > 0.9:
+            return {"success": False, "message": "CapMonster minimum score must be between 0.1 and 0.9"}
     try:
         browser_personal_fresh_restart_every_n_solves = max(
             0,
@@ -4451,6 +4514,7 @@ async def update_captcha_config(
         yescaptcha_task_type=yescaptcha_task_type,
         capmonster_api_key=capmonster_api_key,
         capmonster_base_url=capmonster_base_url,
+        capmonster_min_score=capmonster_min_score,
         ezcaptcha_api_key=ezcaptcha_api_key,
         ezcaptcha_base_url=ezcaptcha_base_url,
         capsolver_api_key=capsolver_api_key,
@@ -4535,6 +4599,7 @@ async def get_captcha_config(token: str = Depends(verify_admin_token)):
         "yescaptcha_task_type": captcha_config.yescaptcha_task_type,
         "capmonster_api_key": captcha_config.capmonster_api_key,
         "capmonster_base_url": captcha_config.capmonster_base_url,
+        "capmonster_min_score": captcha_config.capmonster_min_score,
         "ezcaptcha_api_key": captcha_config.ezcaptcha_api_key,
         "ezcaptcha_base_url": captcha_config.ezcaptcha_base_url,
         "capsolver_api_key": captcha_config.capsolver_api_key,

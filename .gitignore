@@ -75,6 +75,7 @@ tests/*
 !tests/test_client_presence.py
 !tests/test_browser_profile_lifecycle.py
 !tests/test_cache_backends.py
+!tests/test_capmonster_enterprise_ua_status.py
 
 # Root GUI static build (keep local-only)
 /static/

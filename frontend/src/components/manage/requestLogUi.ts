@@ -7,6 +7,7 @@ export const STATUS_MAP: Record<string, string> = {
   project_ready: "Project ready",
   uploading_images: "Uploading images",
   solving_image_captcha: "Solving captcha",
+  captcha_user_agent_set: "SET UA",
   submitting_image: "Submitting image",
   image_generated: "Image done",
   preparing_video: "Preparing video",

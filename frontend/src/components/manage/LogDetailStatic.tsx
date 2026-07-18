@@ -447,7 +447,19 @@ export function LogDetailStatic({ log }: { log: LogDetail }) {
         <h4 className={sectionTitle}>Basic Information</h4>
         <div className="flex flex-col gap-2.5 text-sm">
           <BasicInfoRow label="Operation">{log.operation || "—"}</BasicInfoRow>
-          <BasicInfoRow label="Status">{formatLogStatus(log)}</BasicInfoRow>
+          <BasicInfoRow label="Status">
+            <span className="inline-flex flex-wrap items-center gap-1.5">
+              <span>{formatLogStatus(log)}</span>
+              {log.captcha_user_agent_set && log.status_text !== "captcha_user_agent_set" ? (
+                <span
+                  className="inline-flex items-center rounded border border-cyan-500/35 bg-cyan-500/15 px-2 py-0.5 text-xs font-medium text-cyan-900 dark:text-cyan-200"
+                  title={log.captcha_provider ? `Captcha provider: ${log.captcha_provider}` : "Captcha provider User-Agent applied"}
+                >
+                  SET UA
+                </span>
+              ) : null}
+            </span>
+          </BasicInfoRow>
           <BasicInfoRow label="Status code">
             <span
               className={cn(

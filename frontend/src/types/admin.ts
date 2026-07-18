@@ -140,6 +140,8 @@ export interface LogListItem {
   created_at?: string | null
   updated_at?: string | null
   error_summary?: string
+  captcha_user_agent_set?: boolean
+  captcha_provider?: string | null
 }
 
 /** Detail from GET /api/logs/:id */

@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Dict, Any, Optional, List
 
 DEFAULT_YESCAPTCHA_TASK_TYPE = "RecaptchaV3TaskProxylessM1S9"
+DEFAULT_CAPMONSTER_MIN_SCORE = 0.9
 YESCAPTCHA_TASK_TYPE_OPTIONS = {
     "RecaptchaV3TaskProxyless": None,
     "RecaptchaV3TaskProxylessM1": None,
@@ -22,6 +23,14 @@ def normalize_yescaptcha_task_type(task_type: Optional[str]) -> str:
 
 def get_yescaptcha_min_score(task_type: Optional[str]) -> Optional[float]:
     return YESCAPTCHA_TASK_TYPE_OPTIONS.get(normalize_yescaptcha_task_type(task_type))
+
+
+def normalize_capmonster_min_score(value: Any) -> float:
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return DEFAULT_CAPMONSTER_MIN_SCORE
+    return max(0.1, min(0.9, score))
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -1239,6 +1248,21 @@ class Config:
         if "captcha" not in self._config:
             self._config["captcha"] = {}
         self._config["captcha"]["capmonster_base_url"] = base_url
+
+    @property
+    def capmonster_min_score(self) -> float:
+        """Get the required CapMonster reCAPTCHA v3 Enterprise score."""
+        return normalize_capmonster_min_score(
+            self._config.get("captcha", {}).get(
+                "capmonster_min_score",
+                DEFAULT_CAPMONSTER_MIN_SCORE,
+            )
+        )
+
+    def set_capmonster_min_score(self, value: float):
+        if "captcha" not in self._config:
+            self._config["captcha"] = {}
+        self._config["captcha"]["capmonster_min_score"] = normalize_capmonster_min_score(value)
 
     @property
     def ezcaptcha_api_key(self) -> str:

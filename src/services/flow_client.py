@@ -1821,6 +1821,7 @@ class FlowClient:
                     token_id=token_id,
                     retry_attempt=retry_attempt,
                     max_retries=max_retries,
+                    poll_task_progress=poll_task_progress,
                 )
             finally:
                 if launch_gate_acquired:
@@ -1994,6 +1995,7 @@ class FlowClient:
                 token_id=token_id,
                 retry_attempt=retry_attempt,
                 max_retries=max_retries,
+                poll_task_progress=poll_task_progress,
             )
             if not recaptcha_token:
                 await _emit_poll_task_progress(
@@ -2769,6 +2771,7 @@ class FlowClient:
                     token_id=token_id,
                     retry_attempt=retry_attempt,
                     max_retries=max_retries,
+                    poll_task_progress=poll_task_progress,
                 )
             finally:
                 if launch_gate_acquired:
@@ -2931,6 +2934,7 @@ class FlowClient:
                     token_id=token_id,
                     retry_attempt=retry_attempt,
                     max_retries=max_retries,
+                    poll_task_progress=poll_task_progress,
                 )
             finally:
                 if launch_gate_acquired:
@@ -3102,6 +3106,7 @@ class FlowClient:
                     token_id=token_id,
                     retry_attempt=retry_attempt,
                     max_retries=max_retries,
+                    poll_task_progress=poll_task_progress,
                 )
             finally:
                 if launch_gate_acquired:
@@ -3271,6 +3276,7 @@ class FlowClient:
                     token_id=token_id,
                     retry_attempt=retry_attempt,
                     max_retries=max_retries,
+                    poll_task_progress=poll_task_progress,
                 )
             finally:
                 if launch_gate_acquired:
@@ -3417,6 +3423,7 @@ class FlowClient:
                     project_id,
                     action="VIDEO_GENERATION",
                     token_id=token_id,
+                    poll_task_progress=poll_task_progress,
                 )
             finally:
                 if launch_gate_acquired:
@@ -3643,6 +3650,7 @@ class FlowClient:
                     token_id=token_id,
                     retry_attempt=retry_attempt,
                     max_retries=max_retries,
+                    poll_task_progress=poll_task_progress,
                 )
             finally:
                 if launch_gate_acquired:
@@ -4249,6 +4257,7 @@ class FlowClient:
         user_paygate_tier: str = "PAYGATE_TIER_ONE",
         token_id: Optional[int] = None,
         token_video_concurrency: Optional[int] = None,
+        poll_task_progress: PollTaskProgressHook = None,
     ) -> Dict[str, Any]:
         """Generate Omni reference video through Flow Creation Agent."""
         if not st:
@@ -4277,7 +4286,10 @@ class FlowClient:
                 raise RuntimeError("Video launch queue wait timeout")
             try:
                 recaptcha_token, browser_id = await self._get_recaptcha_token(
-                    project_id, action="VIDEO_GENERATION", token_id=token_id,
+                    project_id,
+                    action="VIDEO_GENERATION",
+                    token_id=token_id,
+                    poll_task_progress=poll_task_progress,
                 )
             finally:
                 await self._release_video_launch_gate(token_id)
@@ -4340,7 +4352,10 @@ class FlowClient:
                 tool_result = self._extract_generate_video_with_references_result(events)
                 if not tool_result:
                     approval_token, approval_browser_id = await self._get_recaptcha_token(
-                        project_id, action="VIDEO_GENERATION", token_id=token_id,
+                        project_id,
+                        action="VIDEO_GENERATION",
+                        token_id=token_id,
+                        poll_task_progress=poll_task_progress,
                     )
                     if not approval_token:
                         raise RuntimeError("Omni approval could not obtain a reCAPTCHA token")
@@ -4905,6 +4920,7 @@ class FlowClient:
         token_id: Optional[int] = None,
         retry_attempt: int = 0,
         max_retries: int = 1,
+        poll_task_progress: PollTaskProgressHook = None,
     ) -> tuple[Optional[str], Optional[Union[int, str]]]:
         """获取reCAPTCHA token - 支持多种打码方式
         
@@ -5268,6 +5284,14 @@ class FlowClient:
                     f"[reCAPTCHA {captcha_method}] Injected provider User-Agent into request fingerprint: "
                     f"{captcha_user_agent[:80]}"
                 )
+                await _emit_poll_task_progress(
+                    poll_task_progress,
+                    {
+                        "captcha_status": "user_agent_set",
+                        "captcha_user_agent_set": True,
+                        "captcha_provider": captcha_method,
+                    },
+                )
             else:
                 debug_logger.log_warning(
                     f"[reCAPTCHA {captcha_method}] Provider solution omitted userAgent; using request fallback identity"
@@ -5311,8 +5335,8 @@ class FlowClient:
         elif method == "capmonster":
             client_key = config.capmonster_api_key
             base_url = config.capmonster_base_url
-            task_type = "RecaptchaV3TaskProxyless"
-            min_score = None
+            task_type = "RecaptchaV3EnterpriseTask"
+            min_score = config.capmonster_min_score
         elif method == "ezcaptcha":
             client_key = config.ezcaptcha_api_key
             base_url = config.ezcaptcha_base_url
@@ -5372,7 +5396,7 @@ class FlowClient:
                 ).strip()
                 if effective_user_agent:
                     create_data["task"]["userAgent"] = effective_user_agent
-                if method == "yescaptcha" and min_score is not None:
+                if min_score is not None:
                     create_data["task"]["minScore"] = min_score
 
                 if proxy:

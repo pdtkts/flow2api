@@ -93,6 +93,7 @@ yescaptcha_base_url = "https://api.yescaptcha.com"
 yescaptcha_task_type = "RecaptchaV3TaskProxylessM1S9"  # 可选: RecaptchaV3TaskProxyless/RecaptchaV3TaskProxylessM1/RecaptchaV3TaskProxylessM1S7/RecaptchaV3TaskProxylessM1S9
 capmonster_api_key = ""
 capmonster_base_url = "https://api.capmonster.cloud"
+capmonster_min_score = 0.9  # reCAPTCHA v3 Enterprise minimum score (0.1 to 0.9)
 ezcaptcha_api_key = ""
 ezcaptcha_base_url = "https://api.ez-captcha.com"
 capsolver_api_key = ""

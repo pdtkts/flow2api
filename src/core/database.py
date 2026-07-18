@@ -6,7 +6,13 @@ from contextlib import asynccontextmanager
 from datetime import date, datetime
 from typing import Optional, List, Dict, Any, Tuple, Set
 from pathlib import Path
-from .config import DEFAULT_YESCAPTCHA_TASK_TYPE, get_runtime_data_dir, normalize_yescaptcha_task_type
+from .config import (
+    DEFAULT_CAPMONSTER_MIN_SCORE,
+    DEFAULT_YESCAPTCHA_TASK_TYPE,
+    get_runtime_data_dir,
+    normalize_capmonster_min_score,
+    normalize_yescaptcha_task_type,
+)
 from .runway_manifest import RUNWAY_MANIFEST_VERSION, RUNWAY_MODEL_MANIFEST
 from .storage_errors import (
     is_sqlite_recoverable_storage_error,
@@ -948,6 +954,7 @@ class Database:
                         yescaptcha_task_type TEXT DEFAULT 'RecaptchaV3TaskProxylessM1S9',
                         capmonster_api_key TEXT DEFAULT '',
                         capmonster_base_url TEXT DEFAULT 'https://api.capmonster.cloud',
+                        capmonster_min_score REAL DEFAULT 0.9,
                         ezcaptcha_api_key TEXT DEFAULT '',
                         ezcaptcha_base_url TEXT DEFAULT 'https://api.ez-captcha.com',
                         capsolver_api_key TEXT DEFAULT '',
@@ -1271,6 +1278,7 @@ class Database:
                     ("yescaptcha_task_type", "TEXT DEFAULT 'RecaptchaV3TaskProxylessM1S9'"),
                     ("capmonster_api_key", "TEXT DEFAULT ''"),
                     ("capmonster_base_url", "TEXT DEFAULT 'https://api.capmonster.cloud'"),
+                    ("capmonster_min_score", "REAL DEFAULT 0.9"),
                     ("ezcaptcha_api_key", "TEXT DEFAULT ''"),
                     ("ezcaptcha_base_url", "TEXT DEFAULT 'https://api.ez-captcha.com'"),
                     ("capsolver_api_key", "TEXT DEFAULT ''"),
@@ -1710,6 +1718,7 @@ class Database:
                     yescaptcha_task_type TEXT DEFAULT 'RecaptchaV3TaskProxylessM1S9',
                     capmonster_api_key TEXT DEFAULT '',
                     capmonster_base_url TEXT DEFAULT 'https://api.capmonster.cloud',
+                    capmonster_min_score REAL DEFAULT 0.9,
                     ezcaptcha_api_key TEXT DEFAULT '',
                     ezcaptcha_base_url TEXT DEFAULT 'https://api.ez-captcha.com',
                     capsolver_api_key TEXT DEFAULT '',
@@ -5338,6 +5347,7 @@ class Database:
             config.set_yescaptcha_task_type(captcha_config.yescaptcha_task_type)
             config.set_capmonster_api_key(captcha_config.capmonster_api_key)
             config.set_capmonster_base_url(captcha_config.capmonster_base_url)
+            config.set_capmonster_min_score(captcha_config.capmonster_min_score)
             config.set_ezcaptcha_api_key(captcha_config.ezcaptcha_api_key)
             config.set_ezcaptcha_base_url(captcha_config.ezcaptcha_base_url)
             config.set_capsolver_api_key(captcha_config.capsolver_api_key)
@@ -5547,6 +5557,7 @@ class Database:
         yescaptcha_task_type: str = None,
         capmonster_api_key: str = None,
         capmonster_base_url: str = None,
+        capmonster_min_score: float = None,
         ezcaptcha_api_key: str = None,
         ezcaptcha_base_url: str = None,
         capsolver_api_key: str = None,
@@ -5602,6 +5613,11 @@ class Database:
                 )
                 new_cap_key = capmonster_api_key if capmonster_api_key is not None else current.get("capmonster_api_key", "")
                 new_cap_url = capmonster_base_url if capmonster_base_url is not None else current.get("capmonster_base_url", "https://api.capmonster.cloud")
+                new_cap_min_score = normalize_capmonster_min_score(
+                    capmonster_min_score
+                    if capmonster_min_score is not None
+                    else current.get("capmonster_min_score", DEFAULT_CAPMONSTER_MIN_SCORE)
+                )
                 new_ez_key = ezcaptcha_api_key if ezcaptcha_api_key is not None else current.get("ezcaptcha_api_key", "")
                 new_ez_url = ezcaptcha_base_url if ezcaptcha_base_url is not None else current.get("ezcaptcha_base_url", "https://api.ez-captcha.com")
                 new_cs_key = capsolver_api_key if capsolver_api_key is not None else current.get("capsolver_api_key", "")
@@ -5788,7 +5804,7 @@ class Database:
                     UPDATE captcha_config
                     SET captcha_method = ?, yescaptcha_api_key = ?, yescaptcha_base_url = ?,
                         yescaptcha_task_type = ?,
-                        capmonster_api_key = ?, capmonster_base_url = ?,
+                        capmonster_api_key = ?, capmonster_base_url = ?, capmonster_min_score = ?,
                         ezcaptcha_api_key = ?, ezcaptcha_base_url = ?,
                         capsolver_api_key = ?, capsolver_base_url = ?,
                         remote_browser_base_url = ?, remote_browser_api_key = ?, remote_browser_timeout = ?,
@@ -5817,7 +5833,7 @@ class Database:
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = 1
                 """, (new_method, new_yes_key, new_yes_url, new_yes_task_type,
-                      new_cap_key, new_cap_url,
+                      new_cap_key, new_cap_url, new_cap_min_score,
                       new_ez_key, new_ez_url, new_cs_key, new_cs_url,
                       (new_remote_base_url or "").strip(), (new_remote_api_key or "").strip(), new_remote_timeout,
                       bool(new_browser_fallback),
@@ -5848,6 +5864,11 @@ class Database:
                 new_yes_task_type = normalize_yescaptcha_task_type(yescaptcha_task_type)
                 new_cap_key = capmonster_api_key if capmonster_api_key is not None else ""
                 new_cap_url = capmonster_base_url if capmonster_base_url is not None else "https://api.capmonster.cloud"
+                new_cap_min_score = normalize_capmonster_min_score(
+                    capmonster_min_score
+                    if capmonster_min_score is not None
+                    else DEFAULT_CAPMONSTER_MIN_SCORE
+                )
                 new_ez_key = ezcaptcha_api_key if ezcaptcha_api_key is not None else ""
                 new_ez_url = ezcaptcha_base_url if ezcaptcha_base_url is not None else "https://api.ez-captcha.com"
                 new_cs_key = capsolver_api_key if capsolver_api_key is not None else ""
@@ -6001,7 +6022,8 @@ class Database:
                 await db.execute("""
                     INSERT INTO captcha_config (id, captcha_method, yescaptcha_api_key, yescaptcha_base_url,
                         yescaptcha_task_type,
-                        capmonster_api_key, capmonster_base_url, ezcaptcha_api_key, ezcaptcha_base_url,
+                        capmonster_api_key, capmonster_base_url, capmonster_min_score,
+                        ezcaptcha_api_key, ezcaptcha_base_url,
                         capsolver_api_key, capsolver_base_url,
                         remote_browser_base_url, remote_browser_api_key, remote_browser_timeout,
                         browser_fallback_to_remote_browser,
@@ -6025,8 +6047,9 @@ class Database:
                         dedicated_extension_enabled, dedicated_extension_captcha_timeout_seconds,
                         dedicated_extension_st_refresh_timeout_seconds,
                         extension_fallback_to_managed_on_dedicated_failure)
-                    VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (new_method, new_yes_key, new_yes_url, new_yes_task_type, new_cap_key, new_cap_url,
+                    VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (new_method, new_yes_key, new_yes_url, new_yes_task_type,
+                      new_cap_key, new_cap_url, new_cap_min_score,
                       new_ez_key, new_ez_url, new_cs_key, new_cs_url,
                       (new_remote_base_url or "").strip(), (new_remote_api_key or "").strip(), new_remote_timeout,
                       new_browser_fallback,

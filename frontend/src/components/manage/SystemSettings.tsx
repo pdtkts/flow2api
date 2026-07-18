@@ -26,6 +26,7 @@ type CaptchaForm = {
   yescaptcha_task_type: string
   capmonster_api_key: string
   capmonster_base_url: string
+  capmonster_min_score: number
   ezcaptcha_api_key: string
   ezcaptcha_base_url: string
   capsolver_api_key: string
@@ -72,6 +73,7 @@ const defaultCaptcha: CaptchaForm = {
   yescaptcha_task_type: "RecaptchaV3TaskProxylessM1",
   capmonster_api_key: "",
   capmonster_base_url: "https://api.capmonster.cloud",
+  capmonster_min_score: 0.9,
   ezcaptcha_api_key: "",
   ezcaptcha_base_url: "https://api.ez-captcha.com",
   capsolver_api_key: "",
@@ -272,6 +274,7 @@ export function SystemSettings({ active }: { active: boolean }) {
         yescaptcha_task_type: String(raw.yescaptcha_task_type || defaultCaptcha.yescaptcha_task_type),
         capmonster_api_key: String(raw.capmonster_api_key ?? ""),
         capmonster_base_url: String(raw.capmonster_base_url || defaultCaptcha.capmonster_base_url),
+        capmonster_min_score: Math.max(0.1, Math.min(0.9, Number(raw.capmonster_min_score ?? 0.9))),
         ezcaptcha_api_key: String(raw.ezcaptcha_api_key ?? ""),
         ezcaptcha_base_url: String(raw.ezcaptcha_base_url || defaultCaptcha.ezcaptcha_base_url),
         capsolver_api_key: String(raw.capsolver_api_key ?? ""),
@@ -651,6 +654,7 @@ export function SystemSettings({ active }: { active: boolean }) {
           yescaptcha_task_type: captcha.yescaptcha_task_type,
           capmonster_api_key: captcha.capmonster_api_key.trim(),
           capmonster_base_url: captcha.capmonster_base_url.trim(),
+          capmonster_min_score: captcha.capmonster_min_score,
           ezcaptcha_api_key: captcha.ezcaptcha_api_key.trim(),
           ezcaptcha_base_url: captcha.ezcaptcha_base_url.trim(),
           capsolver_api_key: captcha.capsolver_api_key.trim(),
@@ -1205,6 +1209,23 @@ export function SystemSettings({ active }: { active: boolean }) {
               <Input value={captcha.capmonster_api_key} onChange={(e) => setCaptcha((c) => ({ ...c, capmonster_api_key: e.target.value }))} />
               <Label>Base URL</Label>
               <Input value={captcha.capmonster_base_url} onChange={(e) => setCaptcha((c) => ({ ...c, capmonster_base_url: e.target.value }))} />
+              <Label>Minimum score</Label>
+              <Input
+                type="number"
+                min={0.1}
+                max={0.9}
+                step={0.1}
+                value={captcha.capmonster_min_score}
+                onChange={(e) =>
+                  setCaptcha((c) => ({
+                    ...c,
+                    capmonster_min_score: Number(e.target.value),
+                  }))
+                }
+              />
+              <p className="text-xs text-muted-foreground">
+                Sent as <code className="text-xs">minScore</code> for CapMonster Enterprise tasks. Allowed range: 0.1–0.9.
+              </p>
             </div>
           )}
           {m === "ezcaptcha" && (

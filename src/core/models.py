@@ -279,6 +279,7 @@ class CaptchaConfig(BaseModel):
     yescaptcha_task_type: str = "RecaptchaV3TaskProxylessM1S9"
     capmonster_api_key: str = ""
     capmonster_base_url: str = "https://api.capmonster.cloud"
+    capmonster_min_score: float = 0.9
     ezcaptcha_api_key: str = ""
     ezcaptcha_base_url: str = "https://api.ez-captcha.com"
     capsolver_api_key: str = ""

@@ -269,11 +269,21 @@ export function RequestLogs() {
                         </span>
                       </TableCell>
                       <TableCell className="py-2.5 px-3 align-top">
-                        <span
-                          className={cn("inline-flex items-center rounded px-2 py-0.5 text-xs", logStatusPillClass(log))}
-                        >
-                          {formatLogStatus(log)}
-                        </span>
+                        <div className="flex flex-wrap items-center gap-1">
+                          <span
+                            className={cn("inline-flex items-center rounded px-2 py-0.5 text-xs", logStatusPillClass(log))}
+                          >
+                            {formatLogStatus(log)}
+                          </span>
+                          {log.captcha_user_agent_set && log.status_text !== "captcha_user_agent_set" ? (
+                            <span
+                              className="inline-flex items-center rounded border border-cyan-500/35 bg-cyan-500/15 px-2 py-0.5 text-xs font-medium text-cyan-900 dark:text-cyan-200"
+                              title={log.captcha_provider ? `Captcha provider: ${log.captcha_provider}` : "Captcha provider User-Agent applied"}
+                            >
+                              SET UA
+                            </span>
+                          ) : null}
+                        </div>
                       </TableCell>
                       <TableCell className="py-2.5 px-3 text-xs align-top text-foreground">
                         {formatLogProgressField(log)}

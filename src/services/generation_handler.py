@@ -1332,12 +1332,34 @@ class GenerationHandler:
         except Exception as exc:
             debug_logger.log_warning(f"[poll_task] update_task failed: {exc}")
 
-    def _build_poll_task_progress_hook(self, poll_task_id: Optional[str]):
-        if not poll_task_id:
+    def _build_poll_task_progress_hook(
+        self,
+        poll_task_id: Optional[str],
+        request_log_state: Optional[Dict[str, Any]] = None,
+        token_id: Optional[int] = None,
+    ):
+        if not poll_task_id and not isinstance(request_log_state, dict):
             return None
 
         async def _hook(updates: Dict[str, Any]) -> None:
-            await self._maybe_update_poll_task(poll_task_id, **updates)
+            if updates.get("captcha_user_agent_set") and isinstance(request_log_state, dict):
+                provider = str(updates.get("captcha_provider") or "").strip() or None
+                request_log_state["captcha_user_agent_set"] = True
+                request_log_state["captcha_provider"] = provider
+                await self._update_request_log_progress(
+                    request_log_state,
+                    token_id=token_id,
+                    status_text="captcha_user_agent_set",
+                    progress=int(request_log_state.get("progress") or 0),
+                )
+
+            if poll_task_id:
+                task_updates = {
+                    key: value
+                    for key, value in updates.items()
+                    if key not in {"captcha_user_agent_set", "captcha_provider"}
+                }
+                await self._maybe_update_poll_task(poll_task_id, **task_updates)
 
         return _hook
 
@@ -1439,6 +1461,8 @@ class GenerationHandler:
             "progress": 0,
             "api_key_id": api_key_id,
             "request_id": request_id,
+            "captcha_user_agent_set": False,
+            "captcha_provider": None,
         }
 
         # 防止并发链路复用到上一次请求的指纹上下文
@@ -1484,6 +1508,7 @@ class GenerationHandler:
             duration=0,
             status_text="started",
             progress=0,
+            request_log_state=request_log_state,
         )
 
         async def _finalize_early_failure(error_message: str, status_code: int) -> None:
@@ -1509,6 +1534,7 @@ class GenerationHandler:
                 log_id=request_log_state.get("id"),
                 status_text="failed",
                 progress=request_log_state.get("progress", 0),
+                request_log_state=request_log_state,
             )
 
         # 向用户展示开始信息
@@ -1632,6 +1658,7 @@ class GenerationHandler:
                 log_id=request_log_state.get("id"),
                 status_text="failed",
                 progress=request_log_state.get("progress", 0),
+                request_log_state=request_log_state,
             )
             if stream:
                 yield self._create_stream_chunk(f"❌ {error_msg}\n")
@@ -1814,6 +1841,7 @@ class GenerationHandler:
                     log_id=request_log_state.get("id"),
                     status_text="failed",
                     progress=request_log_state.get("progress", 0),
+                    request_log_state=request_log_state,
                 )
                 if not generation_result.get("error_emitted"):
                     if stream:
@@ -1880,6 +1908,7 @@ class GenerationHandler:
                 log_id=request_log_state.get("id"),
                 status_text="completed",
                 progress=100,
+                request_log_state=request_log_state,
             )
 
         except asyncio.CancelledError:
@@ -1906,6 +1935,7 @@ class GenerationHandler:
                 log_id=request_log_state.get("id"),
                 status_text="failed",
                 progress=request_log_state.get("progress", 0),
+                request_log_state=request_log_state,
             )
             raise
         except Exception as e:
@@ -1941,6 +1971,7 @@ class GenerationHandler:
                 log_id=request_log_state.get("id"),
                 status_text="failed",
                 progress=request_log_state.get("progress", 0),
+                request_log_state=request_log_state,
             )
             if stream:
                 yield self._create_stream_chunk(f"❌ {error_msg}\n")
@@ -2069,7 +2100,11 @@ class GenerationHandler:
                     progress=progress,
                 )
 
-            poll_hook = self._build_poll_task_progress_hook(poll_task_id)
+            poll_hook = self._build_poll_task_progress_hook(
+                poll_task_id,
+                request_log_state=request_log_state,
+                token_id=token.id,
+            )
             generate_started_at = time.time()
             async def _extension_generate_image():
                 return await self.flow_client.generate_image(
@@ -2450,7 +2485,11 @@ class GenerationHandler:
 
         # 不在本地等待视频硬并发槽位；请求一到就直接向上游提交。
         normalized_tier = normalize_user_paygate_tier(token.user_paygate_tier)
-        poll_hook = self._build_poll_task_progress_hook(poll_task_id)
+        poll_hook = self._build_poll_task_progress_hook(
+            poll_task_id,
+            request_log_state=request_log_state,
+            token_id=token.id,
+        )
 
         if video_trace is not None:
             video_trace["slot_wait_ms"] = 0
@@ -2623,6 +2662,7 @@ class GenerationHandler:
                             user_paygate_tier=normalized_tier,
                             token_id=token.id,
                             token_video_concurrency=token.video_concurrency,
+                            poll_task_progress=poll_hook,
                         )
                     return await self.flow_client.generate_video_reference_images(
                         at=token.at,
@@ -2765,7 +2805,11 @@ class GenerationHandler:
         if response_state is None:
             response_state = self._create_response_state()
 
-        poll_hook = self._build_poll_task_progress_hook(poll_task_id)
+        poll_hook = self._build_poll_task_progress_hook(
+            poll_task_id,
+            request_log_state=request_log_state,
+            token_id=token.id,
+        )
 
         max_attempts = config.max_poll_attempts
         poll_interval = config.poll_interval
@@ -3401,6 +3445,11 @@ class GenerationHandler:
             payload["request_id"] = request_id
         if isinstance(response_extra, dict):
             payload.update(response_extra)
+        if request_log_state.get("captcha_user_agent_set"):
+            payload["captcha_user_agent_set"] = True
+            provider = str(request_log_state.get("captcha_provider") or "").strip()
+            if provider:
+                payload["captcha_provider"] = provider
 
         should_write = (
             safe_progress in (0, 100)
@@ -3442,6 +3491,7 @@ class GenerationHandler:
         log_id: Optional[int] = None,
         status_text: Optional[str] = None,
         progress: Optional[int] = None,
+        request_log_state: Optional[Dict[str, Any]] = None,
     ):
         """???????????? log_id ????????"""
         try:
@@ -3453,8 +3503,17 @@ class GenerationHandler:
                 effective_progress = 100 if status_code == 200 else 0 if status_code >= 400 else 0
             effective_progress = max(0, min(100, int(effective_progress)))
 
+            effective_response_data = dict(response_data)
+            if isinstance(request_log_state, dict) and request_log_state.get("captcha_user_agent_set"):
+                metadata: Dict[str, Any] = {"captcha_user_agent_set": True}
+                provider = str(request_log_state.get("captcha_provider") or "").strip()
+                if provider:
+                    metadata["captcha_provider"] = provider
+                metadata.update(effective_response_data)
+                effective_response_data = metadata
+
             request_body = json.dumps(request_data, ensure_ascii=False)
-            response_body = json.dumps(response_data, ensure_ascii=False)
+            response_body = json.dumps(effective_response_data, ensure_ascii=False)
 
             if log_id:
                 await self.db.update_request_log(
