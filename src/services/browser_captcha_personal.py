@@ -83,6 +83,15 @@ def set_cached_session_cookies(cookies: Dict[str, str]) -> None:
     global _recaptcha_session_cookies, _recaptcha_session_cookies_fetched_at
     _recaptcha_session_cookies = dict(cookies)
     _recaptcha_session_cookies_fetched_at = time.time()
+
+
+def clear_cached_session_cookies() -> None:
+    """Clear runtime-level Google session cookies after browser replacement."""
+    global _recaptcha_session_cookies, _recaptcha_session_cookies_fetched_at
+    _recaptcha_session_cookies = None
+    _recaptcha_session_cookies_fetched_at = 0.0
+
+
 PERSONAL_HEADLESS_VISIBLE_SPOOF_SOURCE = r"""
 (() => {
     const marker = "__personalHeadlessVisibleSpoofInstalled__";
@@ -1397,6 +1406,8 @@ class ResidentTabInfo:
         self.use_count = 0  # 使用次数
         self.fingerprint: Optional[Dict[str, Any]] = None
         self.cookie_signature: Optional[str] = None
+        self.session_cookies: Optional[Dict[str, str]] = None
+        self.session_cookies_fetched_at: float = 0.0
         self.solve_lock = asyncio.Lock()  # 串行化同一标签页上的执行，降低并发冲突
         self.pending_assignment_count = 0  # 选中但尚未真正进入 solve_lock 的请求数
 
@@ -6833,6 +6844,8 @@ class BrowserCaptchaService:
         if not cookie_signature:
             self._remember_token_affinity(int(token_key), resident_info.slot_id, resident_info)
             resident_info.cookie_signature = None
+            resident_info.session_cookies = None
+            resident_info.session_cookies_fetched_at = 0.0
             return False
 
         if (
@@ -6878,6 +6891,8 @@ class BrowserCaptchaService:
 
             resident_info.token_id = int(token_key)
             resident_info.cookie_signature = cookie_signature
+            resident_info.session_cookies = None
+            resident_info.session_cookies_fetched_at = 0.0
             self._remember_token_affinity(int(token_key), resident_info.slot_id, resident_info)
             debug_logger.log_info(
                 f"[BrowserCaptcha] 已向 context 注入 cookie (slot={resident_info.slot_id}, token_id={token_key}, cookies={cookie_count})"
@@ -7114,6 +7129,8 @@ class BrowserCaptchaService:
             if current_token_id == int(token_key) and not current_cookie_signature:
                 self._remember_token_affinity(int(token_key), resident_info.slot_id, resident_info)
                 resident_info.cookie_signature = None
+                resident_info.session_cookies = None
+                resident_info.session_cookies_fetched_at = 0.0
                 return True
 
             try:
@@ -7164,6 +7181,8 @@ class BrowserCaptchaService:
 
             self._remember_token_affinity(int(token_key), resident_info.slot_id, resident_info)
             resident_info.cookie_signature = None
+            resident_info.session_cookies = None
+            resident_info.session_cookies_fetched_at = 0.0
             return True
 
         async with resident_info.solve_lock:
@@ -7188,6 +7207,16 @@ class BrowserCaptchaService:
                     f"[BrowserCaptcha] token_id={token_key} cookie 注入后页面未能按时 ready (slot={resident_info.slot_id})"
                 )
                 return False
+
+            warmup_ok = await self._warmup_google_context_cookies(
+                resident_info,
+                label=f"{label}:google_warmup",
+            )
+            if not warmup_ok:
+                debug_logger.log_warning(
+                    f"[BrowserCaptcha] token_id={token_key} Google cookie warmup incomplete "
+                    f"after cookie binding (slot={resident_info.slot_id})"
+                )
 
             resident_info.recaptcha_ready = await self._wait_for_recaptcha(resident_info.tab)
             if not resident_info.recaptcha_ready:
@@ -8145,6 +8174,7 @@ class BrowserCaptchaService:
         self._refresh_runtime_fingerprint_spoof_seed()
         self._last_fingerprint = None
         self._last_fingerprint_at = 0.0
+        clear_cached_session_cookies()
         self._mark_browser_health(False)
         self._reset_browser_rotation_budget()
         self._reset_local_recaptcha_asset_caches(purge_disk=False)
@@ -10408,6 +10438,7 @@ class BrowserCaptchaService:
         token_id: Optional[int],
         slot_id: Optional[str],
         fingerprint: Optional[Dict[str, Any]] = None,
+        session_cookies: Optional[Dict[str, str]] = None,
         issued_at: Optional[float] = None,
         expires_at: Optional[float] = None,
     ) -> Dict[str, Any]:
@@ -10416,7 +10447,13 @@ class BrowserCaptchaService:
         if normalized_fingerprint is not None and proxy_url and not str(normalized_fingerprint.get("proxy_url") or "").strip():
             normalized_fingerprint["proxy_url"] = proxy_url
 
-        session_cookies = get_cached_session_cookies()
+        bundled_session_cookies: Optional[Dict[str, str]] = None
+        if isinstance(session_cookies, dict) and session_cookies:
+            bundled_session_cookies = dict(session_cookies)
+        elif not slot_id:
+            runtime_cookies = get_cached_session_cookies()
+            if isinstance(runtime_cookies, dict) and runtime_cookies:
+                bundled_session_cookies = dict(runtime_cookies)
         issued_timestamp = float(issued_at or time.time())
         expires_timestamp = float(
             expires_at
@@ -10431,30 +10468,58 @@ class BrowserCaptchaService:
             "worker_index": getattr(self, "_worker_index", None),
             "fingerprint": normalized_fingerprint,
             "proxy_url": proxy_url,
-            "session_cookies": dict(session_cookies) if session_cookies else None,
+            "session_cookies": bundled_session_cookies,
             "issued_at": issued_timestamp,
             "expires_at": expires_timestamp,
         }
 
-    async def _cache_session_cookies_for_computed(self, resident_info: ResidentTabInfo) -> None:
-        """Cache Google-family cookies for computed captcha relay consumers."""
-        if not resident_info or get_cached_session_cookies() is not None:
-            return
+    async def _cache_session_cookies_for_computed(
+        self,
+        resident_info: ResidentTabInfo,
+    ) -> Optional[Dict[str, str]]:
+        """Cache the exact tab's Google-family cookies for solve-bundle consumers."""
+        if not resident_info or not resident_info.tab:
+            return None
         cookies = await self._get_browser_cookies(
             "computed_session_cookie_cache",
             timeout_seconds=6.0,
             browser_context_id=getattr(resident_info, "browser_context_id", None),
         )
         collected: Dict[str, str] = {}
-        allowed_names = {"SID", "SSID", "APISID", "SAPISID", "HSID", "NID", "ENID"}
+        allowed_names = {
+            "SID",
+            "SSID",
+            "APISID",
+            "SAPISID",
+            "HSID",
+            "NID",
+            "ENID",
+            "AEC",
+            "SIDCC",
+            "SEARCH_SAMESITE",
+            "CONSENT",
+            "OTZ",
+        }
         for cookie in cookies or []:
-            name = str(getattr(cookie, "name", "") or "").strip()
-            value = str(getattr(cookie, "value", "") or "").strip()
-            domain = str(getattr(cookie, "domain", "") or "").strip().lower().lstrip(".")
-            if name and value and domain.endswith(("google.com", "recaptcha.net")) and any(key in name for key in allowed_names):
+            serialized = self._serialize_browser_cookie_for_storage(cookie) or {}
+            name = str(serialized.get("name") or "").strip()
+            value = str(serialized.get("value") or "").strip()
+            domain = str(serialized.get("domain") or "").strip().lower().lstrip(".")
+            if (
+                name
+                and value
+                and domain.endswith(("google.com", "recaptcha.net", "labs.google"))
+                and any(key in name for key in allowed_names)
+            ):
                 collected[name] = value
         if collected:
+            resident_info.session_cookies = dict(collected)
+            resident_info.session_cookies_fetched_at = time.time()
             set_cached_session_cookies(collected)
+            return dict(collected)
+        if isinstance(resident_info.session_cookies, dict) and resident_info.session_cookies:
+            return dict(resident_info.session_cookies)
+        return None
 
     async def _solve_with_resident_tab(
         self,
@@ -10961,13 +11026,47 @@ class BrowserCaptchaService:
         )
         if not token:
             return None
+        resident_info = None
+        if slot_id:
+            async with self._resident_lock:
+                resident_info = self._resident_tabs.get(slot_id)
+        if (
+            resident_info
+            and token_id is not None
+            and resident_info.token_id != int(token_id)
+        ):
+            debug_logger.log_warning(
+                f"[BrowserCaptcha] refusing mismatched slot identity in solve bundle "
+                f"(slot={slot_id}, expected_token_id={token_id}, "
+                f"resident_token_id={resident_info.token_id})"
+            )
+            resident_info = None
+        if resident_info and not resident_info.session_cookies:
+            try:
+                await self._cache_session_cookies_for_computed(resident_info)
+            except Exception as cookie_error:
+                debug_logger.log_warning(
+                    f"[BrowserCaptcha] solve-bundle cookie extraction failed "
+                    f"(slot={slot_id}, project={project_id}, token_id={token_id}): {cookie_error}"
+                )
+        fingerprint = (
+            dict(resident_info.fingerprint)
+            if resident_info and isinstance(resident_info.fingerprint, dict) and resident_info.fingerprint
+            else (self.get_last_fingerprint() if not slot_id else None)
+        )
+        session_cookies = (
+            dict(resident_info.session_cookies)
+            if resident_info and isinstance(resident_info.session_cookies, dict) and resident_info.session_cookies
+            else None
+        )
         return self._build_solve_bundle(
             token=token,
             project_id=project_id,
             action=action,
             token_id=token_id,
             slot_id=slot_id,
-            fingerprint=self.get_last_fingerprint(),
+            fingerprint=fingerprint,
+            session_cookies=session_cookies,
         )
 
     async def _create_resident_tab(
@@ -11065,6 +11164,16 @@ class BrowserCaptchaService:
                 return None
 
             # 等待 reCAPTCHA 加载
+            warmup_ok = await self._warmup_google_context_cookies(
+                resident_info,
+                label=f"resident_init:{slot_id}",
+            )
+            if not warmup_ok:
+                debug_logger.log_warning(
+                    f"[BrowserCaptcha] Google cookie warmup incomplete during resident init "
+                    f"(slot={slot_id}, project={project_id}, token_id={token_id})"
+                )
+
             recaptcha_ready = await self._wait_for_recaptcha(tab)
 
             if not recaptcha_ready:
@@ -11077,6 +11186,13 @@ class BrowserCaptchaService:
 
             resident_info.recaptcha_ready = True
             resident_info.fingerprint = await self._refresh_last_fingerprint(tab)
+            try:
+                await self._cache_session_cookies_for_computed(resident_info)
+            except Exception as cookie_error:
+                debug_logger.log_warning(
+                    f"[BrowserCaptcha] resident cookie extraction failed after init "
+                    f"(slot={slot_id}, project={project_id}, token_id={token_id}): {cookie_error}"
+                )
             self._mark_browser_health(True)
 
             debug_logger.log_info(
@@ -11200,6 +11316,16 @@ class BrowserCaptchaService:
                         debug_logger.log_error("[BrowserCaptcha] [Legacy] 打开 labs 引导页失败")
                         return None
 
+                    warmup_ok = await self._warmup_google_context_cookies(
+                        legacy_info,
+                        label=f"legacy:{project_id}",
+                    )
+                    if not warmup_ok:
+                        debug_logger.log_warning(
+                            f"[BrowserCaptcha] [Legacy] Google cookie warmup incomplete "
+                            f"(project={project_id}, token_id={token_id})"
+                        )
+
                     # 等待 reCAPTCHA 加载
                     recaptcha_ready = await self._wait_for_recaptcha(tab)
 
@@ -11223,7 +11349,14 @@ class BrowserCaptchaService:
                             project_id=project_id,
                         )
                         self._mark_browser_health(True)
-                        await self._refresh_last_fingerprint(tab)
+                        legacy_info.fingerprint = await self._refresh_last_fingerprint(tab)
+                        try:
+                            await self._cache_session_cookies_for_computed(legacy_info)
+                        except Exception as cookie_error:
+                            debug_logger.log_warning(
+                                f"[BrowserCaptcha] [Legacy] cookie extraction failed "
+                                f"(project={project_id}, token_id={token_id}): {cookie_error}"
+                            )
                         debug_logger.log_info(
                             "[BrowserCaptcha] [Legacy] ✅ Token获取成功"
                             f"（耗时 {duration_ms:.0f}ms, browser_solve_count={browser_solve_count}）"

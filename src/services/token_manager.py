@@ -1,5 +1,6 @@
 """Token manager for Flow2API with AT auto-refresh"""
 import asyncio
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, Dict, Optional, List
 from ..core.database import Database
@@ -23,6 +24,8 @@ class TokenManager:
         self._project_locks: dict[int, asyncio.Lock] = {}
         self._refresh_futures: dict[int, asyncio.Task] = {}
         self._last_st_refresh_reason: dict[int, str] = {}
+        self._at_validation_cache: dict[int, float] = {}
+        self._at_validation_retry_after: dict[int, float] = {}
         self._protocol_refresher_task: Optional[asyncio.Task] = None
 
     def _set_st_refresh_reason(self, token_id: int, reason: str) -> None:
@@ -31,6 +34,54 @@ class TokenManager:
     def consume_st_refresh_reason(self, token_id: int) -> str:
         """Return and clear the latest ST refresh reason for a token."""
         return self._last_st_refresh_reason.pop(token_id, "")
+
+    def _clear_at_validation_cache(self, token_id: int) -> None:
+        token_key = int(token_id)
+        self._at_validation_cache.pop(token_key, None)
+        self._at_validation_retry_after.pop(token_key, None)
+
+    def _mark_at_valid(self, token_id: int, ttl_seconds: int = 300) -> None:
+        token_key = int(token_id)
+        self._at_validation_cache[token_key] = (
+            time.monotonic() + max(30, int(ttl_seconds or 300))
+        )
+        self._at_validation_retry_after.pop(token_key, None)
+
+    def _defer_at_validation(self, token_id: int, delay_seconds: int = 30) -> None:
+        token_key = int(token_id)
+        self._at_validation_retry_after[token_key] = (
+            time.monotonic() + max(1, int(delay_seconds or 30))
+        )
+
+    def _has_recent_at_validation(self, token_id: int) -> bool:
+        token_key = int(token_id)
+        expires_at = float(self._at_validation_cache.get(token_key, 0.0) or 0.0)
+        if expires_at <= time.monotonic():
+            self._at_validation_cache.pop(token_key, None)
+            return False
+        return True
+
+    def _is_at_validation_deferred(self, token_id: int) -> bool:
+        token_key = int(token_id)
+        retry_at = float(self._at_validation_retry_after.get(token_key, 0.0) or 0.0)
+        if retry_at <= time.monotonic():
+            self._at_validation_retry_after.pop(token_key, None)
+            return False
+        return True
+
+    @staticmethod
+    def _is_at_authentication_error(exc: BaseException) -> bool:
+        message = str(exc or "").strip().lower()
+        return any(
+            marker in message
+            for marker in (
+                "401",
+                "unauthenticated",
+                "invalid authentication credentials",
+                "invalid access token",
+                "access token expired",
+            )
+        )
 
     def _is_timeout_st_refresh_reason(self, reason: str) -> bool:
         normalized = str(reason or "").strip().lower()
@@ -260,6 +311,7 @@ class TokenManager:
                 project_ids.append(project_id)
 
         await self.db.delete_token(token_id)
+        self._clear_at_validation_cache(token_id)
 
         refresh_task = self._refresh_futures.pop(token_id, None)
         if refresh_task and not refresh_task.done():
@@ -284,6 +336,7 @@ class TokenManager:
 
     async def enable_token(self, token_id: int):
         """Enable a token and reset error count"""
+        self._clear_at_validation_cache(token_id)
         # Enable the token
         await self.db.update_token(token_id, is_active=True, ban_reason=None, banned_at=None)
         # Reset error count when enabling (only reset total error_count, keep today_error_count)
@@ -291,6 +344,7 @@ class TokenManager:
 
     async def disable_token(self, token_id: int):
         """Disable a token"""
+        self._clear_at_validation_cache(token_id)
         await self.db.update_token(token_id, is_active=False)
 
     # ========== Token添加 (支持Project创建) ==========
@@ -410,6 +464,7 @@ class TokenManager:
         当用户编辑保存token时，如果token未过期，自动清空429禁用状态
         """
         update_fields = {}
+        credential_updated = any(value is not None for value in (st, at, at_expires))
 
         if st is not None:
             update_fields["st"] = st
@@ -454,6 +509,14 @@ class TokenManager:
 
         # 检查token是否因429被禁用，如果是且未过期，则清空429状态
         token = await self.db.get_token(token_id)
+        if credential_updated and token:
+            if not token.is_active:
+                debug_logger.log_info(
+                    f"[UPDATE_TOKEN] Token {token_id} credentials updated; re-enabling token"
+                )
+            update_fields["is_active"] = True
+            update_fields["ban_reason"] = None
+            update_fields["banned_at"] = None
         if token and token.ban_reason == "429_rate_limit":
             # 检查token是否过期
             is_expired = False
@@ -472,6 +535,8 @@ class TokenManager:
                 update_fields["banned_at"] = None
 
         if update_fields:
+            if credential_updated:
+                self._clear_at_validation_cache(token_id)
             await self.db.update_token(token_id, **update_fields)
 
     # ========== AT自动刷新逻辑 (核心) ==========
@@ -514,7 +579,29 @@ class TokenManager:
             return None
 
         if not self._should_refresh_at(token):
-            return token
+            if self._has_recent_at_validation(token.id) or self._is_at_validation_deferred(token.id):
+                return token
+            try:
+                credits_result = await self._get_credits_for_token(token, token.at)
+                await self.db.update_token(
+                    token.id,
+                    credits=credits_result.get("credits", 0),
+                    user_paygate_tier=credits_result.get("userPaygateTier"),
+                )
+                self._mark_at_valid(token.id)
+                return await self.db.get_token(token.id) or token
+            except Exception as exc:
+                if not self._is_at_authentication_error(exc):
+                    self._defer_at_validation(token.id, delay_seconds=30)
+                    debug_logger.log_warning(
+                        f"[AT_CHECK] Token {token.id}: transient AT validation failure; "
+                        f"keeping token active and retrying later - {type(exc).__name__}"
+                    )
+                    return token
+                debug_logger.log_warning(
+                    f"[AT_CHECK] Token {token.id}: upstream rejected locally unexpired AT; "
+                    "refreshing AT/ST"
+                )
 
         if not await self._refresh_at(token.id):
             return None
@@ -609,7 +696,10 @@ class TokenManager:
 
         async def runner() -> bool:
             try:
-                return await self._refresh_at_inner(token_id)
+                result = await self._refresh_at_inner(token_id)
+                if not result:
+                    self._clear_at_validation_cache(token_id)
+                return result
             finally:
                 current = self._refresh_futures.get(token_id)
                 if current is task:
@@ -704,12 +794,14 @@ class TokenManager:
 
             # 验证 AT 有效性：通过 get_credits 测试
             try:
-                credits_result = await self._get_credits_for_token(token, new_at)
+                current_token = await self.db.get_token(token_id)
+                credits_result = await self._get_credits_for_token(current_token, new_at)
                 await self.db.update_token(
                     token_id,
                     credits=credits_result.get("credits", 0),
                     user_paygate_tier=credits_result.get("userPaygateTier"),
                 )
+                self._mark_at_valid(token_id)
                 debug_logger.log_info(f"[AT_REFRESH] Token {token_id}: AT 验证成功（余额: {credits_result.get('credits', 0)}）")
                 record_token_refresh("at", "success")
                 return True
@@ -723,6 +815,7 @@ class TokenManager:
                 else:
                     # 其他错误（如网络问题），仍视为成功
                     debug_logger.log_warning(f"[AT_REFRESH] Token {token_id}: AT 验证时发生非认证错误: {error_msg}")
+                    self._defer_at_validation(token_id, delay_seconds=30)
                     record_token_refresh("at", "success")
                     return True
 

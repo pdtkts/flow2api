@@ -320,7 +320,7 @@ class FlowClient:
             return False
         return any(
             host == candidate or host.endswith(f".{candidate}")
-            for candidate in ("google.com", "labs.google", "recaptcha.net")
+            for candidate in ("google.com", "googleapis.com", "labs.google", "recaptcha.net")
         )
 
     @staticmethod
@@ -4016,7 +4016,6 @@ class FlowClient:
         if st:
             null_input = self._encode_trpc_input({"json": None, "meta": {"values": ["undefined"]}})
             paths = (
-                f"flow.projectInitialData?input={self._encode_trpc_input({'json': {'projectId': project_id}})}",
                 f"general.fetchUserPreferences?input={null_input}",
                 f"videoFx.getFlowAppConfig?input={null_input}",
                 f"videoFx.getUserSettings?input={null_input}",
@@ -5219,15 +5218,28 @@ class FlowClient:
                     api_proxy_url = await self.proxy_manager.get_request_proxy_url()
                 except Exception as e:
                     debug_logger.log_warning(f"[reCAPTCHA] Failed to get proxy for API captcha: {e}")
-            # Keep an explicit empty value for direct mode so the later Flow request
-            # cannot select a different rotating proxy than the captcha solve used.
-            self._set_request_fingerprint({"proxy_url": api_proxy_url or ""})
+            # Bind solve and submit to the same deterministic browser identity and proxy.
+            api_captcha_ua = self._generate_user_agent(
+                str(token_id or project_id or captcha_method)
+            )
+            self._set_request_fingerprint(
+                {
+                    "proxy_url": api_proxy_url or "",
+                    "user_agent": api_captcha_ua,
+                    "accept_language": self._get_primary_accept_language(),
+                    "sec_ch_ua": self._infer_sec_ch_ua_from_user_agent(api_captcha_ua),
+                    "project_id": project_id,
+                    "origin": "https://labs.google",
+                    "referer": self._build_flow_project_page_url(project_id),
+                }
+            )
             api_result = await self._get_api_captcha_token(
                 captcha_method,
                 project_id,
                 action,
                 proxy_url=api_proxy_url,
                 proxy_resolved=True,
+                user_agent=api_captcha_ua,
             )
             if api_result is None:
                 self._set_request_fingerprint(None)
@@ -5248,6 +5260,9 @@ class FlowClient:
             if captcha_user_agent:
                 existing_fingerprint = self.get_request_fingerprint() or {}
                 existing_fingerprint["user_agent"] = captcha_user_agent
+                existing_fingerprint["sec_ch_ua"] = self._infer_sec_ch_ua_from_user_agent(
+                    captcha_user_agent
+                )
                 self._set_request_fingerprint(existing_fingerprint)
                 debug_logger.log_info(
                     f"[reCAPTCHA {captcha_method}] Injected provider User-Agent into request fingerprint: "
@@ -5274,6 +5289,7 @@ class FlowClient:
         *,
         proxy_url: Optional[str] = None,
         proxy_resolved: bool = False,
+        user_agent: Optional[str] = None,
     ) -> Optional[tuple[str, Optional[str]]]:
         """通用API打码服务
         
@@ -5349,6 +5365,13 @@ class FlowClient:
                         "pageAction": page_action
                     }
                 }
+                effective_user_agent = str(
+                    user_agent
+                    or (self.get_request_fingerprint() or {}).get("user_agent")
+                    or self._generate_user_agent(str(project_id or method))
+                ).strip()
+                if effective_user_agent:
+                    create_data["task"]["userAgent"] = effective_user_agent
                 if method == "yescaptcha" and min_score is not None:
                     create_data["task"]["minScore"] = min_score
 

@@ -39,6 +39,7 @@ class PersonalSolveBundleTests(unittest.IsolatedAsyncioTestCase):
             token_id=7,
             slot_id="worker-0:slot-1",
             fingerprint={"user_agent": "Browser UA"},
+            session_cookies={"SID": "cookie-secret"},
         )
         self.assertEqual(bundle["proxy_url"], "http://127.0.0.1:8080")
         self.assertEqual(bundle["fingerprint"]["proxy_url"], "http://127.0.0.1:8080")

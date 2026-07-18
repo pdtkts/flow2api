@@ -82,6 +82,7 @@ class ApiCaptchaProviderResultTests(unittest.IsolatedAsyncioTestCase):
                 "project-1",
                 proxy_url="http://127.0.0.1:8080",
                 proxy_resolved=True,
+                user_agent="Solver UA",
             )
 
         self.assertEqual(result, ("captcha-token", PROVIDER_UA))
@@ -89,6 +90,7 @@ class ApiCaptchaProviderResultTests(unittest.IsolatedAsyncioTestCase):
             session.calls[0]["proxies"],
             {"http": "http://127.0.0.1:8080", "https": "http://127.0.0.1:8080"},
         )
+        self.assertEqual(session.calls[0]["json"]["task"]["userAgent"], "Solver UA")
 
 
 class ApiCaptchaFingerprintTests(unittest.IsolatedAsyncioTestCase):
@@ -108,17 +110,21 @@ class ApiCaptchaFingerprintTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual((token, browser_id), ("captcha-token", None))
         self.assertEqual(proxy_manager.calls, 1)
+        expected_solver_ua = client._generate_user_agent("project-1")
         client._get_api_captcha_token.assert_awaited_once_with(
             "yescaptcha",
             "project-1",
             "IMAGE_GENERATION",
             proxy_url="http://127.0.0.1:8080",
             proxy_resolved=True,
+            user_agent=expected_solver_ua,
         )
-        self.assertEqual(
-            client.get_request_fingerprint(),
-            {"proxy_url": "http://127.0.0.1:8080", "user_agent": PROVIDER_UA},
-        )
+        fingerprint = client.get_request_fingerprint()
+        self.assertEqual(fingerprint["proxy_url"], "http://127.0.0.1:8080")
+        self.assertEqual(fingerprint["user_agent"], PROVIDER_UA)
+        self.assertEqual(fingerprint["project_id"], "project-1")
+        self.assertEqual(fingerprint["origin"], "https://labs.google")
+        self.assertIn('"Google Chrome";v="147"', fingerprint["sec_ch_ua"])
 
     async def test_legacy_plain_token_and_missing_user_agent_remain_usable(self):
         client = FlowClient(proxy_manager=_FakeProxyManager())
@@ -127,10 +133,10 @@ class ApiCaptchaFingerprintTests(unittest.IsolatedAsyncioTestCase):
         token, _ = await client._get_recaptcha_token("project-1")
 
         self.assertEqual(token, "legacy-token")
-        self.assertEqual(
-            client.get_request_fingerprint(),
-            {"proxy_url": "http://127.0.0.1:8080"},
-        )
+        fingerprint = client.get_request_fingerprint()
+        self.assertEqual(fingerprint["proxy_url"], "http://127.0.0.1:8080")
+        self.assertEqual(fingerprint["project_id"], "project-1")
+        self.assertTrue(fingerprint["user_agent"])
 
     async def test_failed_provider_result_clears_fingerprint(self):
         client = FlowClient(proxy_manager=_FakeProxyManager())
