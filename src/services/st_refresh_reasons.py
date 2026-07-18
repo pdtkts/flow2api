@@ -24,6 +24,7 @@ ST_REFRESH_REASON_HINTS: Final[dict[str, str]] = {
     "local_error": "local browser ST refresh failed",
     "local_timeout_after_extension": "local browser refresh timed out after extension attempt",
     "local_error_after_extension": "local browser refresh failed after extension attempt",
+    "browser_profile_resource_exhausted": "browser profile runtime capacity is exhausted",
     "extension_and_local_failed": "both extension and local browser ST refresh failed",
     "extension_enabled_but_no_success": "extension refresh enabled but did not return a usable session",
     "same_st": "session token did not rotate (possibly expired login)",

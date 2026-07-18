@@ -1,11 +1,128 @@
 """Debug logger module for detailed API request/response logging"""
 import json
 import logging
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Any, Optional
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from .config import config
+
+
+_SENSITIVE_KEYS = {
+    "authorization",
+    "proxy_authorization",
+    "cookie",
+    "cookies",
+    "set_cookie",
+    "api_key",
+    "apikey",
+    "key_plaintext",
+    "client_key",
+    "worker_key",
+    "captcha_worker_key",
+    "private_key",
+    "x_api_key",
+    "x_goog_api_key",
+    "password",
+    "client_secret",
+    "secret",
+    "secret_key",
+    "access_token",
+    "refresh_token",
+    "session_token",
+    "id_token",
+    "connection_token",
+    "google_cookies",
+    "st",
+    "at",
+    "token",
+}
+
+
+def _normalize_sensitive_key(key: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", str(key or "").strip().lower()).strip("_")
+
+
+def _is_sensitive_key(key: Any) -> bool:
+    normalized = _normalize_sensitive_key(key)
+    if normalized in _SENSITIVE_KEYS:
+        return True
+    if normalized in {"token_id", "tokens", "token_count", "password_required"}:
+        return False
+    return normalized.endswith(
+        ("_token", "_secret", "_password", "_api_key", "_auth_key", "_worker_key", "_cookies")
+    )
+
+
+def redact_url_for_log(value: Any) -> str:
+    text = str(value or "")
+    try:
+        parts = urlsplit(text)
+        query = parse_qsl(parts.query, keep_blank_values=True)
+        if not query:
+            return text
+        safe_query = [
+            (key, "<redacted>" if _is_sensitive_key(key) or key.strip().lower() == "key" else item)
+            for key, item in query
+        ]
+        return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(safe_query), parts.fragment))
+    except Exception:
+        return re.sub(
+            r"(?i)([?&](?:key|token|access_token|session_token|api_key)=)[^&#\s]+",
+            r"\1<redacted>",
+            text,
+        )
+
+
+def redact_text_for_log(value: Any) -> str:
+    text = str(value or "")
+    text = re.sub(r"(?i)(bearer\s+)[^\s,;\"']+", r"\1<redacted>", text)
+    text = re.sub(
+        r"(?i)((?:__Secure-next-auth\.session-token|session_token|access_token|refresh_token|api_key|password)=)[^;\s,]+",
+        r"\1<redacted>",
+        text,
+    )
+    text = re.sub(
+        r'''(?ix)(["'](?:access_token|refresh_token|session_token|api_key|password|client_secret|google_cookies)["']\s*:\s*["'])[^"']+''',
+        r"\1<redacted>",
+        text,
+    )
+    return redact_url_for_log(text)
+
+
+def sanitize_headers_for_log(headers: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    sanitized: Dict[str, Any] = {}
+    for key, value in dict(headers or {}).items():
+        sanitized[str(key)] = "<redacted>" if _is_sensitive_key(key) else redact_text_for_log(value)
+    return sanitized
+
+
+def sanitize_data_for_log(data: Any, *, field_name: Any = None) -> Any:
+    if field_name is not None and _is_sensitive_key(field_name):
+        return "<redacted>"
+    if isinstance(data, dict):
+        return {str(key): sanitize_data_for_log(value, field_name=key) for key, value in data.items()}
+    if isinstance(data, list):
+        return [sanitize_data_for_log(item) for item in data]
+    if isinstance(data, tuple):
+        return tuple(sanitize_data_for_log(item) for item in data)
+    if isinstance(data, str):
+        return redact_text_for_log(data)
+    return data
+
+
+class SensitiveAccessLogFilter(logging.Filter):
+    """Redact sensitive query parameters before Uvicorn formats access logs."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if isinstance(args, tuple) and len(args) >= 3:
+            safe_args = list(args)
+            safe_args[2] = redact_url_for_log(safe_args[2])
+            record.args = tuple(safe_args)
+        return True
 
 class DebugLogger:
     """Debug logger for API requests and responses"""
@@ -77,6 +194,9 @@ class DebugLogger:
         if isinstance(data, dict):
             result = {}
             for key, value in data.items():
+                if _is_sensitive_key(key):
+                    result[key] = "<redacted>"
+                    continue
                 # 对特定的大字段进行截断
                 if key in ("encodedImage", "base64", "imageData", "data") and isinstance(value, str) and len(value) > max_length:
                     result[key] = f"{value[:100]}... (truncated, total {len(value)} chars)"
@@ -106,47 +226,33 @@ class DebugLogger:
 
         try:
             self._write_separator()
-            self.logger.info(f"🔵 [REQUEST] {self._format_timestamp()}")
+            self.logger.info(f"[REQUEST] {self._format_timestamp()}")
             self._write_separator("-")
 
             # Basic info
             self.logger.info(f"Method: {method}")
-            self.logger.info(f"URL: {url}")
+            self.logger.info(f"URL: {redact_url_for_log(url)}")
 
             # Headers
-            self.logger.info("\n📋 Headers:")
-            masked_headers = dict(headers)
-            if "Authorization" in masked_headers or "authorization" in masked_headers:
-                auth_key = "Authorization" if "Authorization" in masked_headers else "authorization"
-                auth_value = masked_headers[auth_key]
-                if auth_value.startswith("Bearer "):
-                    token = auth_value[7:]
-                    masked_headers[auth_key] = f"Bearer {self._mask_token(token)}"
-
-            # Mask Cookie header (ST token)
-            if "Cookie" in masked_headers:
-                cookie_value = masked_headers["Cookie"]
-                if "__Secure-next-auth.session-token=" in cookie_value:
-                    parts = cookie_value.split("=", 1)
-                    if len(parts) == 2:
-                        st_token = parts[1].split(";")[0]
-                        masked_headers["Cookie"] = f"__Secure-next-auth.session-token={self._mask_token(st_token)}"
+            self.logger.info("\nHeaders:")
+            masked_headers = sanitize_headers_for_log(headers)
 
             for key, value in masked_headers.items():
                 self.logger.info(f"  {key}: {value}")
 
             # Body
             if body is not None:
-                self.logger.info("\n📦 Request Body:")
-                if isinstance(body, (dict, list)):
-                    body_str = json.dumps(body, indent=2, ensure_ascii=False)
+                self.logger.info("\nRequest Body:")
+                safe_body = sanitize_data_for_log(body)
+                if isinstance(safe_body, (dict, list)):
+                    body_str = json.dumps(safe_body, indent=2, ensure_ascii=False)
                     self.logger.info(body_str)
                 else:
-                    self.logger.info(str(body))
+                    self.logger.info(str(safe_body))
 
             # Files
             if files:
-                self.logger.info("\n📎 Files:")
+                self.logger.info("\nFiles:")
                 try:
                     if hasattr(files, 'keys') and callable(getattr(files, 'keys', None)):
                         for key in files.keys():
@@ -158,7 +264,7 @@ class DebugLogger:
 
             # Proxy
             if proxy:
-                self.logger.info(f"\n🌐 Proxy: {proxy}")
+                self.logger.info(f"\nProxy: {redact_url_for_log(proxy)}")
 
             self._write_separator()
             self.logger.info("")  # Empty line
@@ -180,45 +286,46 @@ class DebugLogger:
 
         try:
             self._write_separator()
-            self.logger.info(f"🟢 [RESPONSE] {self._format_timestamp()}")
+            self.logger.info(f"[RESPONSE] {self._format_timestamp()}")
             self._write_separator("-")
 
             # Status
-            status_emoji = "✅" if 200 <= status_code < 300 else "❌"
-            self.logger.info(f"Status: {status_code} {status_emoji}")
+            status_label = "OK" if 200 <= status_code < 300 else "ERROR"
+            self.logger.info(f"Status: {status_code} {status_label}")
 
             # Duration
             if duration_ms is not None:
                 self.logger.info(f"Duration: {duration_ms:.2f}ms")
 
             # Headers
-            self.logger.info("\n📋 Response Headers:")
-            for key, value in headers.items():
+            self.logger.info("\nResponse Headers:")
+            for key, value in sanitize_headers_for_log(headers).items():
                 self.logger.info(f"  {key}: {value}")
 
             # Body
-            self.logger.info("\n📦 Response Body:")
-            if isinstance(body, (dict, list)):
+            self.logger.info("\nResponse Body:")
+            safe_body = sanitize_data_for_log(body)
+            if isinstance(safe_body, (dict, list)):
                 # 对大字段进行截断处理
-                body_to_log = self._truncate_large_fields(body)
+                body_to_log = self._truncate_large_fields(safe_body)
                 body_str = json.dumps(body_to_log, indent=2, ensure_ascii=False)
                 self.logger.info(body_str)
-            elif isinstance(body, str):
+            elif isinstance(safe_body, str):
                 # Try to parse as JSON
                 try:
-                    parsed = json.loads(body)
+                    parsed = sanitize_data_for_log(json.loads(safe_body))
                     # 对大字段进行截断处理
                     parsed = self._truncate_large_fields(parsed)
                     body_str = json.dumps(parsed, indent=2, ensure_ascii=False)
                     self.logger.info(body_str)
                 except:
                     # Not JSON, log as text (limit length)
-                    if len(body) > 2000:
-                        self.logger.info(f"{body[:2000]}... (truncated)")
+                    if len(safe_body) > 2000:
+                        self.logger.info(f"{safe_body[:2000]}... (truncated)")
                     else:
-                        self.logger.info(body)
+                        self.logger.info(safe_body)
             else:
-                self.logger.info(str(body))
+                self.logger.info(str(safe_body))
 
             self._write_separator()
             self.logger.info("")  # Empty line
@@ -239,27 +346,28 @@ class DebugLogger:
 
         try:
             self._write_separator()
-            self.logger.info(f"🔴 [ERROR] {self._format_timestamp()}")
+            self.logger.info(f"[ERROR] {self._format_timestamp()}")
             self._write_separator("-")
 
             if status_code:
                 self.logger.info(f"Status Code: {status_code}")
 
-            self.logger.info(f"Error Message: {error_message}")
+            self.logger.info(f"Error Message: {redact_text_for_log(error_message)}")
 
             if response_text:
-                self.logger.info("\n📦 Error Response:")
+                self.logger.info("\nError Response:")
                 # Try to parse as JSON
                 try:
-                    parsed = json.loads(response_text)
+                    parsed = sanitize_data_for_log(json.loads(response_text))
                     body_str = json.dumps(parsed, indent=2, ensure_ascii=False)
                     self.logger.info(body_str)
                 except:
                     # Not JSON, log as text
-                    if len(response_text) > 2000:
-                        self.logger.info(f"{response_text[:2000]}... (truncated)")
+                    safe_response_text = redact_text_for_log(response_text)
+                    if len(safe_response_text) > 2000:
+                        self.logger.info(f"{safe_response_text[:2000]}... (truncated)")
                     else:
-                        self.logger.info(response_text)
+                        self.logger.info(safe_response_text)
 
             self._write_separator()
             self.logger.info("")  # Empty line
@@ -272,7 +380,7 @@ class DebugLogger:
         if not config.debug_enabled:
             return
         try:
-            self.logger.info(f"ℹ️  [{self._format_timestamp()}] {message}")
+            self.logger.info(f"INFO [{self._format_timestamp()}] {redact_text_for_log(message)}")
         except Exception as e:
             self.logger.error(f"Error logging info: {e}")
 
@@ -281,7 +389,7 @@ class DebugLogger:
         if not config.debug_enabled:
             return
         try:
-            self.logger.warning(f"⚠️  [{self._format_timestamp()}] {message}")
+            self.logger.warning(f"WARN [{self._format_timestamp()}] {redact_text_for_log(message)}")
         except Exception as e:
             self.logger.error(f"Error logging warning: {e}")
 
@@ -297,6 +405,7 @@ class DebugLogger:
         if not self._should_log_recaptcha():
             return
         try:
+            line = redact_text_for_log(line)
             if level == "warning":
                 self.logger.warning(line)
             elif level == "error":
@@ -313,7 +422,7 @@ class DebugLogger:
 
     def log_recaptcha_action_switch(self, old_action: str, new_action: str) -> None:
         self._recaptcha_narrative_line(
-            f"[DEBUG] reCAPTCHA action switch: {old_action} → {new_action}, resetting"
+            f"[DEBUG] reCAPTCHA action switch: {old_action} -> {new_action}, resetting"
         )
 
     def log_recaptcha_proxy_check(self, line: str) -> None:
@@ -330,8 +439,7 @@ class DebugLogger:
     def log_recaptcha_token_success(self, token: Optional[str]) -> None:
         if not token:
             return
-        head = token[:40] + ("..." if len(token) > 40 else "")
-        self._recaptcha_narrative_line(f"Token obtained: {head}")
+        self._recaptcha_narrative_line(f"Token obtained: <redacted> (length={len(token)})")
         self._recaptcha_narrative_line(f"[DEBUG] reCAPTCHA token length: {len(token)}")
         iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
         self._recaptcha_narrative_line(f"[DEBUG] reCAPTCHA token obtained at: {iso}")
@@ -340,12 +448,12 @@ class DebugLogger:
         self._recaptcha_narrative_line(f"reCAPTCHA error: {message}", level="error")
         if raw_result is not None:
             if isinstance(raw_result, str):
-                raw = raw_result
+                raw = redact_text_for_log(raw_result)
             else:
                 try:
-                    raw = json.dumps(raw_result, ensure_ascii=False)
+                    raw = json.dumps(sanitize_data_for_log(raw_result), ensure_ascii=False)
                 except Exception:
-                    raw = str(raw_result)
+                    raw = redact_text_for_log(raw_result)
             if len(raw) > 2000:
                 raw = raw[:2000] + "... (truncated)"
             self._recaptcha_narrative_line(f"[DEBUG] reCAPTCHA raw result: {raw}")

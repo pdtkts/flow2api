@@ -3073,9 +3073,19 @@ async def logout(token: str = Depends(verify_admin_token)):
 async def health_check():
     """Public health check endpoint - no auth required"""
     try:
-        return await build_public_health_snapshot(db)
+        snapshot = await build_public_health_snapshot(db)
+        snapshot["database_ready"] = True
+        return snapshot
     except Exception:
-        return {"backend_running": True, "has_active_tokens": False}
+        return JSONResponse(
+            status_code=503,
+            content={
+                "backend_running": True,
+                "database_ready": False,
+                "has_active_tokens": False,
+                "error": "database_unavailable",
+            },
+        )
 
 
 @router.get("/api/stats")

@@ -40,6 +40,20 @@ class TokenManager:
             "local_timeout_after_extension",
         }
 
+    @staticmethod
+    def _is_resource_exhaustion_error(exc: BaseException) -> bool:
+        message = str(exc or "").strip().lower()
+        return any(
+            marker in message
+            for marker in (
+                "can't start new thread",
+                "cannot start new thread",
+                "cannot fork",
+                "resource temporarily unavailable",
+                "eagain",
+            )
+        )
+
     async def _get_token_lock(
         self,
         lock_map: dict[int, asyncio.Lock],
@@ -780,13 +794,19 @@ class TokenManager:
 
             if getattr(token, "auth_mode", "session_token") == "browser_profile":
                 try:
-                    from .browser_profile_service import BrowserProfileService
+                    from .browser_profile_service import (
+                        BrowserProfileResourceExhaustedError,
+                        BrowserProfileService,
+                    )
 
                     profile_service = await BrowserProfileService.get_instance(
                         db=self.db,
                         flow_client=self.flow_client,
                     )
-                    profile = await profile_service.refresh_profile(token_id)
+                    profile = await profile_service.refresh_profile(
+                        token_id,
+                        retain_runtime=False,
+                    )
                     updated = await self.db.get_token(token_id)
                     if (
                         updated
@@ -801,10 +821,20 @@ class TokenManager:
                     record_token_refresh("st", "failure")
                     return None
                 except Exception as profile_err:
-                    debug_logger.log_warning(
-                        f"[ST_REFRESH] Token {token_id}: browser profile ST refresh failed: {profile_err}"
+                    resource_exhausted = (
+                        isinstance(profile_err, BrowserProfileResourceExhaustedError)
+                        or BrowserProfileService.is_resource_exhaustion_error(profile_err)
                     )
-                    self._set_st_refresh_reason(token_id, "browser_profile_error")
+                    debug_logger.log_warning(
+                        f"[ST_REFRESH] Token {token_id}: browser profile ST refresh failed: "
+                        f"{'runtime capacity exhausted' if resource_exhausted else profile_err}"
+                    )
+                    self._set_st_refresh_reason(
+                        token_id,
+                        "browser_profile_resource_exhausted"
+                        if resource_exhausted
+                        else "browser_profile_error",
+                    )
                     record_token_refresh("st", "failure")
                     return None
 
@@ -1047,6 +1077,8 @@ class TokenManager:
             try:
                 await self._refresh_protocol_token(token)
             except Exception as exc:
+                if self._is_resource_exhaustion_error(exc):
+                    raise
                 debug_logger.log_error(
                     f"[PROTOCOL_REFRESH] Token {token.id}: background refresh failed: {type(exc).__name__}"
                 )
@@ -1059,6 +1091,13 @@ class TokenManager:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                if self._is_resource_exhaustion_error(exc):
+                    debug_logger.log_error(
+                        "[PROTOCOL_REFRESH] Container runtime capacity exhausted; "
+                        "pausing background refresh for five minutes"
+                    )
+                    await asyncio.sleep(300)
+                    continue
                 debug_logger.log_error(
                     f"[PROTOCOL_REFRESH] Background loop failed: {type(exc).__name__}"
                 )

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import signal
 import shutil
 import uuid
 from dataclasses import dataclass
@@ -27,6 +28,12 @@ class ProfileRuntime:
     context: Any
     page: Any
     lock: asyncio.Lock
+    pinned: bool = False
+    profile_path: Optional[Path] = None
+
+
+class BrowserProfileResourceExhaustedError(RuntimeError):
+    """The container cannot allocate another browser process or worker thread."""
 
 
 class BrowserProfileService:
@@ -53,6 +60,10 @@ class BrowserProfileService:
                 if flow_client is not None:
                     cls._instance.flow_client = flow_client
             return cls._instance
+
+    @classmethod
+    def get_existing_instance(cls) -> Optional["BrowserProfileService"]:
+        return cls._instance
 
     @staticmethod
     def build_placeholder_st() -> str:
@@ -95,6 +106,26 @@ class BrowserProfileService:
         return options
 
     @staticmethod
+    def is_resource_exhaustion_error(exc: BaseException) -> bool:
+        message = str(exc or "").strip().lower()
+        return any(
+            marker in message
+            for marker in (
+                "can't start new thread",
+                "cannot start new thread",
+                "cannot fork",
+                "resource temporarily unavailable",
+                "spawn eagain",
+                "spawn /",
+            )
+        ) and (
+            "thread" in message
+            or "fork" in message
+            or "eagain" in message
+            or "resource temporarily unavailable" in message
+        )
+
+    @staticmethod
     def _runtime_is_alive(runtime: ProfileRuntime) -> bool:
         try:
             return not runtime.page.is_closed()
@@ -114,11 +145,49 @@ class BrowserProfileService:
         )
 
     @staticmethod
-    async def _dispose_runtime(runtime: ProfileRuntime) -> None:
+    def _profile_process_ids(profile_path: Optional[Path]) -> list[int]:
+        if os.name == "nt" or profile_path is None:
+            return []
+        proc_root = Path("/proc")
+        if not proc_root.exists():
+            return []
+        needle = f"--user-data-dir={profile_path.resolve()}".encode("utf-8")
+        process_ids: list[int] = []
+        for entry in proc_root.iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                if needle in (entry / "cmdline").read_bytes():
+                    process_ids.append(int(entry.name))
+            except (OSError, ValueError):
+                continue
+        return process_ids
+
+    @classmethod
+    async def _terminate_profile_processes(cls, profile_path: Optional[Path]) -> int:
+        process_ids = cls._profile_process_ids(profile_path)
+        for pid in process_ids:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except (OSError, ProcessLookupError):
+                pass
+        if process_ids:
+            await asyncio.sleep(0.2)
+        survivors = cls._profile_process_ids(profile_path)
+        for pid in survivors:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except (OSError, ProcessLookupError):
+                pass
+        return len(process_ids)
+
+    @classmethod
+    async def _dispose_runtime(cls, runtime: ProfileRuntime) -> None:
         try:
-            await runtime.context.close()
+            await asyncio.wait_for(runtime.context.close(), timeout=10)
         except Exception:
             pass
+        await cls._terminate_profile_processes(runtime.profile_path)
 
     async def is_runtime_open(self, token_id: int) -> bool:
         stale_runtime: Optional[ProfileRuntime] = None
@@ -131,7 +200,13 @@ class BrowserProfileService:
             await self._dispose_runtime(stale_runtime)
         return runtime is not None
 
-    async def _get_runtime(self, token_id: int, *, open_url: Optional[str] = None) -> ProfileRuntime:
+    async def _get_runtime(
+        self,
+        token_id: int,
+        *,
+        open_url: Optional[str] = None,
+        pin: bool = False,
+    ) -> ProfileRuntime:
         token_id = int(token_id)
         async with self._runtime_lock:
             for attempt in range(2):
@@ -145,13 +220,28 @@ class BrowserProfileService:
                     playwright = await self._ensure_playwright()
                     profile_path = self.profile_path_for_token(token_id)
                     profile_path.mkdir(parents=True, exist_ok=True)
-                    context = await playwright.chromium.launch_persistent_context(
-                        str(profile_path),
-                        **self._launch_options(),
-                    )
+                    try:
+                        context = await playwright.chromium.launch_persistent_context(
+                            str(profile_path),
+                            **self._launch_options(),
+                        )
+                    except Exception as exc:
+                        if self.is_resource_exhaustion_error(exc):
+                            raise BrowserProfileResourceExhaustedError(
+                                "Browser profile runtime capacity is exhausted"
+                            ) from exc
+                        raise
                     page = context.pages[0] if context.pages else await context.new_page()
-                    runtime = ProfileRuntime(context=context, page=page, lock=asyncio.Lock())
+                    runtime = ProfileRuntime(
+                        context=context,
+                        page=page,
+                        lock=asyncio.Lock(),
+                        pinned=bool(pin),
+                        profile_path=profile_path,
+                    )
                     self._runtimes[token_id] = runtime
+                elif pin:
+                    runtime.pinned = True
 
                 if open_url:
                     try:
@@ -174,6 +264,45 @@ class BrowserProfileService:
             await self._dispose_runtime(runtime)
             return True
         return False
+
+    async def close_runtime_if_unpinned(self, token_id: int) -> bool:
+        """Close a scheduler-owned runtime without disturbing an admin-opened profile."""
+        async with self._runtime_lock:
+            runtime = self._runtimes.get(int(token_id))
+            if runtime is None or runtime.pinned:
+                return False
+            self._runtimes.pop(int(token_id), None)
+        await self._dispose_runtime(runtime)
+        return True
+
+    async def close_unpinned_runtimes(self) -> int:
+        """Release every transient browser runtime after container resource pressure."""
+        async with self._runtime_lock:
+            transient = [runtime for runtime in self._runtimes.values() if not runtime.pinned]
+            self._runtimes = {
+                token_id: runtime
+                for token_id, runtime in self._runtimes.items()
+                if runtime.pinned
+            }
+        for runtime in transient:
+            await self._dispose_runtime(runtime)
+        return len(transient)
+
+    async def close_all(self) -> int:
+        """Close all profile contexts and the shared Playwright driver."""
+        async with self._runtime_lock:
+            runtimes = list(self._runtimes.values())
+            self._runtimes.clear()
+            playwright = self._playwright
+            self._playwright = None
+        for runtime in runtimes:
+            await self._dispose_runtime(runtime)
+        if playwright is not None:
+            try:
+                await playwright.stop()
+            except Exception:
+                pass
+        return len(runtimes)
 
     def _token_status_payload(self, token: Token) -> Dict[str, Any]:
         return {
@@ -209,7 +338,7 @@ class BrowserProfileService:
         profile_path = str(self.profile_path_for_token(token_id))
         now = datetime.now(timezone.utc)
         try:
-            await self._get_runtime(token_id, open_url=LOGIN_URL)
+            await self._get_runtime(token_id, open_url=LOGIN_URL, pin=True)
             authenticated = (
                 token.browser_profile_login_state == "logged_in"
                 and token.browser_profile_cookie_status == "ok"
@@ -256,15 +385,20 @@ class BrowserProfileService:
         )
         return [dict(cookie) for cookie in cookies]
 
-    async def sync_profile(self, token_id: int) -> Dict[str, Any]:
+    async def sync_profile(
+        self,
+        token_id: int,
+        *,
+        retain_runtime: bool = True,
+    ) -> Dict[str, Any]:
         token = await self.db.get_token(int(token_id))
         if not token:
             raise ValueError("Token not found")
         profile_path = str(self.profile_path_for_token(token_id))
         now = datetime.now(timezone.utc)
-        runtime = await self._get_runtime(token_id, open_url=FLOW_URL)
-        async with runtime.lock:
-            try:
+        try:
+            runtime = await self._get_runtime(token_id, open_url=FLOW_URL)
+            async with runtime.lock:
                 cookies = await self._collect_cookies(runtime)
                 session_token = extract_session_token_from_cookie_payload(cookies)
                 if not session_token:
@@ -318,22 +452,41 @@ class BrowserProfileService:
                     browser_profile_last_refresh_at=now,
                     browser_profile_last_error=None,
                 )
-            except Exception as exc:
-                debug_logger.log_warning(f"[BrowserProfile] sync failed for token {token_id}: {exc}")
+        except Exception as exc:
+            safe_error = (
+                "browser runtime capacity exhausted"
+                if self.is_resource_exhaustion_error(exc)
+                else str(exc)[:500]
+            )
+            debug_logger.log_warning(f"[BrowserProfile] sync failed for token {token_id}: {safe_error}")
+            try:
                 await self.db.update_token(
                     token_id,
                     auth_mode="browser_profile",
                     browser_profile_path=profile_path,
                     browser_profile_status="error",
                     browser_profile_last_sync_at=now,
-                    browser_profile_last_error=str(exc)[:500],
+                    browser_profile_last_error=safe_error,
                 )
-                raise
+            except Exception as update_exc:
+                debug_logger.log_warning(
+                    f"[BrowserProfile] failed to persist sync error for token {token_id}: "
+                    f"{type(update_exc).__name__}"
+                )
+            raise
+        finally:
+            if not retain_runtime:
+                await self.close_runtime_if_unpinned(token_id)
         updated = await self.db.get_token(token_id)
         return self._token_status_payload(updated)
 
-    async def refresh_profile(self, token_id: int) -> Dict[str, Any]:
-        return await self.sync_profile(token_id)
+    async def refresh_profile(
+        self,
+        token_id: int,
+        *,
+        retain_runtime: bool = True,
+    ) -> Dict[str, Any]:
+        return await self.sync_profile(token_id, retain_runtime=retain_runtime)
 
     async def reset_profile(self, token_id: int) -> Dict[str, Any]:
         token = await self.db.get_token(int(token_id))

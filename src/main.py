@@ -36,6 +36,7 @@ from .services.generation_handler import GenerationHandler
 from .services.geminigen_service import GeminiGenService
 from .services.runway_service import RunwayService
 from .services.st_refresh_reasons import describe_st_refresh_reason
+from .services.browser_profile_service import BrowserProfileService
 from .api import routes, admin
 from .core.api_key_manager import ApiKeyManager
 from .core.auth import set_api_key_manager
@@ -43,6 +44,30 @@ from .core.logger import debug_logger
 
 
 _LOCAL_NO_PROXY_HOSTS = ("127.0.0.1", "localhost", "::1")
+
+
+async def _abort_refresh_batch_on_resource_exhaustion(
+    *,
+    source: str,
+    reason: str = "",
+    error: BaseException | None = None,
+) -> bool:
+    exhausted = reason == "browser_profile_resource_exhausted" or (
+        error is not None and BrowserProfileService.is_resource_exhaustion_error(error)
+    )
+    if not exhausted:
+        return False
+    profile_service = BrowserProfileService.get_existing_instance()
+    released = (
+        await profile_service.close_unpinned_runtimes()
+        if profile_service is not None
+        else 0
+    )
+    debug_logger.log_error(
+        f"[{source}] Container runtime capacity exhausted; released "
+        f"{released} transient runtime(s) and stopped this batch"
+    )
+    return True
 
 
 def _configure_stdio() -> None:
@@ -651,7 +676,18 @@ async def lifespan(app: FastAPI):
                 for token in candidates[:batch_size]:
                     try:
                         await token_manager._refresh_at(token.id)
+                        refresh_reason = token_manager.consume_st_refresh_reason(token.id)
+                        if await _abort_refresh_batch_on_resource_exhaustion(
+                            source="AT_REFRESH",
+                            reason=refresh_reason,
+                        ):
+                            break
                     except Exception as refresh_err:
+                        if await _abort_refresh_batch_on_resource_exhaustion(
+                            source="AT_REFRESH",
+                            error=refresh_err,
+                        ):
+                            break
                         print(f"WARN Scheduled refresh failed for token {token.id}: {refresh_err}")
             except Exception as e:
                 print(f"ERR Scheduled token refresh task error: {e}")
@@ -723,7 +759,17 @@ async def lifespan(app: FastAPI):
                                 f"[ST_SCHEDULER] Token {tk.id}: ST refresh failed "
                                 f"(reason={reason or 'unknown'}; {hint or 'no hint'})"
                             )
+                        if await _abort_refresh_batch_on_resource_exhaustion(
+                            source="ST_SCHEDULER",
+                            reason=reason,
+                        ):
+                            break
                     except Exception as refresh_err:
+                        if await _abort_refresh_batch_on_resource_exhaustion(
+                            source="ST_SCHEDULER",
+                            error=refresh_err,
+                        ):
+                            break
                         debug_logger.log_warning(
                             f"[ST_SCHEDULER] Token {tk.id}: scheduled ST refresh raised: {refresh_err}"
                         )
@@ -783,6 +829,10 @@ async def lifespan(app: FastAPI):
     except asyncio.CancelledError:
         pass
     await token_manager.stop_protocol_refresher()
+    profile_service = BrowserProfileService.get_existing_instance()
+    if profile_service is not None:
+        closed_profiles = await profile_service.close_all()
+        print(f"OK Browser profile service closed ({closed_profiles} runtime(s))")
     # Close browser if initialized
     if browser_service:
         await browser_service.close()
