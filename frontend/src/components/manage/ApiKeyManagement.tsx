@@ -139,6 +139,7 @@ export function ApiKeyManagement() {
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([])
   const [auditPage, setAuditPage] = useState(0)
   const [auditTotal, setAuditTotal] = useState(0)
+  const [auditClearing, setAuditClearing] = useState(false)
 
   const [createOpen, setCreateOpen] = useState(false)
   const [editOpen, setEditOpen] = useState(false)
@@ -300,6 +301,32 @@ export function ApiKeyManagement() {
       setGenerationStatsLoading(false)
     }
   }, [token])
+
+  const clearAuditLogs = async () => {
+    if (!token || auditTotal === 0) return
+    if (!confirm("Clear all managed API key audit logs? This cannot be undone.")) return
+
+    setAuditClearing(true)
+    try {
+      const r = await adminJson<{ success?: boolean; detail?: string; deleted?: number }>(
+        "/api/admin/managed-apikeys/audit",
+        token,
+        { method: "DELETE" }
+      )
+      if (r.ok && r.data?.success) {
+        setAuditLogs([])
+        setAuditTotal(0)
+        setAuditPage(0)
+        toast.success("Key audit logs cleared")
+      } else {
+        toast.error(r.data?.detail || "Failed to clear key audit logs")
+      }
+    } catch {
+      toast.error("Failed to clear key audit logs")
+    } finally {
+      setAuditClearing(false)
+    }
+  }
 
   const toggleAccount = (id: number) => {
     setSelectedAccountIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))
@@ -829,8 +856,18 @@ export function ApiKeyManagement() {
       </Card>
 
       <Card>
-        <CardHeader>
+        <CardHeader className="flex flex-row items-center justify-between gap-3">
           <CardTitle>Recent key audit logs</CardTitle>
+          <Button
+            type="button"
+            variant="destructive"
+            size="sm"
+            disabled={loading || auditClearing || auditTotal === 0}
+            onClick={() => void clearAuditLogs()}
+          >
+            {auditClearing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+            Clear all
+          </Button>
         </CardHeader>
         <CardContent className="p-0">
           <Table>

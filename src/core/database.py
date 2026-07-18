@@ -6381,6 +6381,13 @@ class Database:
             row = await cursor.fetchone()
             return int(row[0]) if row and row[0] is not None else 0
 
+    async def clear_api_key_audit_logs(self) -> int:
+        """Delete every managed API key audit log and return the number removed."""
+        async with self._connect(write=True) as db:
+            cursor = await db.execute("DELETE FROM api_key_audit_logs")
+            await db.commit()
+            return int(cursor.rowcount or 0)
+
     async def list_api_key_audit_logs(
         self,
         limit: int = 200,

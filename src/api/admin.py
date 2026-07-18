@@ -3578,6 +3578,15 @@ async def list_managed_api_key_audit(
     return {"success": True, "logs": logs, "total": total, "limit": limit, "offset": offset}
 
 
+@router.delete("/api/admin/managed-apikeys/audit")
+async def clear_managed_api_key_audit(
+    token: str = Depends(verify_admin_token),
+):
+    """Clear all managed API key audit logs."""
+    deleted = await db.clear_api_key_audit_logs()
+    return {"success": True, "message": "Managed API key audit logs cleared", "deleted": deleted}
+
+
 @router.get("/api/admin/managed-apikeys/{key_id}/projects")
 async def list_managed_api_key_projects(
     key_id: int,
