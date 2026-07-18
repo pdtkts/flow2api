@@ -3264,11 +3264,18 @@ class GenerationHandler:
         response_state: Optional[Dict[str, Any]] = None,
         flow_project_id: Optional[str] = None,
     ) -> str:
+        builder = getattr(self.file_cache, "build_url", None)
+        if callable(builder):
+            result = builder(
+                filename,
+                self._get_base_url(response_state),
+                flow_project_id=flow_project_id,
+            )
+            if isinstance(result, str):
+                return result
         base = f"{self._get_base_url(response_state)}/api/cache/blob/{filename}"
         pid = (flow_project_id or "").strip()
-        if pid:
-            return f"{base}?project_id={quote(pid, safe='')}"
-        return base
+        return f"{base}?project_id={quote(pid, safe='')}" if pid else base
 
     async def _update_request_log_progress(
         self,

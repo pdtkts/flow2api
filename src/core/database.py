@@ -652,19 +652,28 @@ class Database:
             cache_enabled = False
             cache_timeout = 7200
             cache_base_url = None
+            cache_provider = "local"
+            cache_delivery_mode = "proxy"
 
             if config_dict:
                 cache_config = config_dict.get("cache", {})
                 cache_enabled = cache_config.get("enabled", False)
                 cache_timeout = cache_config.get("timeout", 7200)
                 cache_base_url = cache_config.get("base_url", "")
+                cache_provider = cache_config.get("provider", "local")
+                cache_delivery_mode = cache_config.get("delivery_mode", "proxy")
                 # Convert empty string to None
                 cache_base_url = cache_base_url if cache_base_url else None
 
             await db.execute("""
-                INSERT INTO cache_config (id, cache_enabled, cache_timeout, cache_base_url)
-                VALUES (1, ?, ?, ?)
-            """, (cache_enabled, cache_timeout, cache_base_url))
+                INSERT INTO cache_config (
+                    id, cache_enabled, cache_timeout, cache_base_url,
+                    cache_provider, cache_delivery_mode
+                ) VALUES (1, ?, ?, ?, ?, ?)
+            """, (
+                cache_enabled, cache_timeout, cache_base_url,
+                cache_provider, cache_delivery_mode,
+            ))
 
         # Ensure debug_config has a row
         cursor = await db.execute("SELECT COUNT(*) FROM debug_config")
@@ -894,6 +903,8 @@ class Database:
                         cache_enabled BOOLEAN DEFAULT 0,
                         cache_timeout INTEGER DEFAULT 7200,
                         cache_base_url TEXT,
+                        cache_provider TEXT DEFAULT 'local',
+                        cache_delivery_mode TEXT DEFAULT 'proxy',
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )
@@ -1095,6 +1106,10 @@ class Database:
                         flow_project_id TEXT,
                         media_type TEXT,
                         source_url TEXT,
+                        storage_provider TEXT DEFAULT 'local',
+                        object_key TEXT,
+                        delivery_mode TEXT DEFAULT 'proxy',
+                        size_bytes INTEGER,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         FOREIGN KEY (api_key_id) REFERENCES api_keys(id),
@@ -1366,12 +1381,7 @@ class Database:
                             print(f"  ERR Failed to add column '{col_name}': {e}")
 
             if await self._table_exists(db, "cache_files"):
-                if not await self._column_exists(db, "cache_files", "flow_project_id"):
-                    try:
-                        await db.execute("ALTER TABLE cache_files ADD COLUMN flow_project_id TEXT")
-                        print("  OK Added column 'flow_project_id' to cache_files table")
-                    except Exception as e:
-                        print(f"  ERR Failed to add column 'flow_project_id' to cache_files: {e}")
+                await self._ensure_cache_backend_columns(db)
 
             await self._ensure_operation_stats_table(db)
             await self._ensure_tokens_use_extension_for_generation_column(db)
@@ -1560,6 +1570,10 @@ class Database:
                     flow_project_id TEXT,
                     media_type TEXT,
                     source_url TEXT,
+                    storage_provider TEXT DEFAULT 'local',
+                    object_key TEXT,
+                    delivery_mode TEXT DEFAULT 'proxy',
+                    size_bytes INTEGER,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (api_key_id) REFERENCES api_keys(id),
@@ -1666,6 +1680,8 @@ class Database:
                     cache_enabled BOOLEAN DEFAULT 0,
                     cache_timeout INTEGER DEFAULT 7200,
                     cache_base_url TEXT,
+                    cache_provider TEXT DEFAULT 'local',
+                    cache_delivery_mode TEXT DEFAULT 'proxy',
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
@@ -1955,12 +1971,38 @@ class Database:
                     await db.execute("ALTER TABLE request_logs ADD COLUMN api_key_id INTEGER")
                     print("  OK Added column 'api_key_id' to request_logs (init_db upgrade)")
             if await self._table_exists(db, "cache_files"):
-                if not await self._column_exists(db, "cache_files", "flow_project_id"):
-                    await db.execute("ALTER TABLE cache_files ADD COLUMN flow_project_id TEXT")
-                    print("  OK Added column 'flow_project_id' to cache_files (init_db upgrade)")
+                await self._ensure_cache_backend_columns(db)
         except Exception as e:
             print(f"  ERR api_key_id column upgrade failed: {e}")
             raise
+
+    async def _ensure_cache_backend_columns(self, db):
+        """Upgrade cache tables for selectable storage providers."""
+        cache_file_columns = {
+            "flow_project_id": "TEXT",
+            "storage_provider": "TEXT DEFAULT 'local'",
+            "object_key": "TEXT",
+            "delivery_mode": "TEXT DEFAULT 'proxy'",
+            "size_bytes": "INTEGER",
+        }
+        if await self._table_exists(db, "cache_files"):
+            for column_name, column_type in cache_file_columns.items():
+                if not await self._column_exists(db, "cache_files", column_name):
+                    await db.execute(f"ALTER TABLE cache_files ADD COLUMN {column_name} {column_type}")
+                    print(f"  OK Added column '{column_name}' to cache_files")
+            await db.execute(
+                "UPDATE cache_files SET object_key = filename "
+                "WHERE object_key IS NULL OR object_key = ''"
+            )
+
+        if await self._table_exists(db, "cache_config"):
+            for column_name, column_type in {
+                "cache_provider": "TEXT DEFAULT 'local'",
+                "cache_delivery_mode": "TEXT DEFAULT 'proxy'",
+            }.items():
+                if not await self._column_exists(db, "cache_config", column_name):
+                    await db.execute(f"ALTER TABLE cache_config ADD COLUMN {column_name} {column_type}")
+                    print(f"  OK Added column '{column_name}' to cache_config")
 
     async def _ensure_task_async_columns(self, db):
         """Add async job metadata columns to tasks for polling payload enrichment."""
@@ -4970,24 +5012,43 @@ class Database:
         media_type: str,
         source_url: Optional[str] = None,
         flow_project_id: Optional[str] = None,
+        storage_provider: str = "local",
+        object_key: Optional[str] = None,
+        delivery_mode: str = "proxy",
+        size_bytes: Optional[int] = None,
     ):
         """Upsert cache file ownership metadata."""
         async with self._connect(write=True) as db:
             await db.execute(
                 """
-                INSERT INTO cache_files (filename, api_key_id, token_id, flow_project_id, media_type, source_url, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                INSERT INTO cache_files (
+                    filename, api_key_id, token_id, flow_project_id, media_type, source_url,
+                    storage_provider, object_key, delivery_mode, size_bytes, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                 ON CONFLICT(filename) DO UPDATE SET
                     api_key_id = excluded.api_key_id,
                     token_id = excluded.token_id,
                     flow_project_id = excluded.flow_project_id,
                     media_type = excluded.media_type,
                     source_url = excluded.source_url,
+                    storage_provider = excluded.storage_provider,
+                    object_key = excluded.object_key,
+                    delivery_mode = excluded.delivery_mode,
+                    size_bytes = excluded.size_bytes,
                     updated_at = CURRENT_TIMESTAMP
                 """,
-                (filename, api_key_id, token_id, flow_project_id, media_type, source_url),
+                (
+                    filename, api_key_id, token_id, flow_project_id, media_type, source_url,
+                    storage_provider, object_key or filename, delivery_mode, size_bytes,
+                ),
             )
             await db.commit()
+
+    async def delete_all_cache_file_metadata(self) -> int:
+        async with self._connect(write=True) as db:
+            cursor = await db.execute("DELETE FROM cache_files")
+            await db.commit()
+            return int(cursor.rowcount or 0)
 
     async def get_cache_file(self, filename: str) -> Optional[Dict[str, Any]]:
         async with self._connect() as db:
@@ -5128,6 +5189,8 @@ class Database:
             config.set_cache_enabled(cache_config.cache_enabled)
             config.set_cache_timeout(cache_config.cache_timeout)
             config.set_cache_base_url(cache_config.cache_base_url or "")
+            config.set_cache_provider(cache_config.cache_provider)
+            config.set_cache_delivery_mode(cache_config.cache_delivery_mode)
 
         # Reload generation config
         generation_config = await self.get_generation_config()
@@ -5361,7 +5424,14 @@ class Database:
             # Return default if not found
             return CacheConfig(cache_enabled=False, cache_timeout=7200)
 
-    async def update_cache_config(self, enabled: bool = None, timeout: int = None, base_url: Optional[str] = None):
+    async def update_cache_config(
+        self,
+        enabled: bool = None,
+        timeout: int = None,
+        base_url: Optional[str] = None,
+        provider: Optional[str] = None,
+        delivery_mode: Optional[str] = None,
+    ):
         """Update cache configuration"""
         async with self._connect(write=True) as db:
             db.row_factory = aiosqlite.Row
@@ -5375,6 +5445,8 @@ class Database:
                 new_enabled = enabled if enabled is not None else current.get("cache_enabled", False)
                 new_timeout = timeout if timeout is not None else current.get("cache_timeout", 7200)
                 new_base_url = base_url if base_url is not None else current.get("cache_base_url")
+                new_provider = provider if provider is not None else current.get("cache_provider", "local")
+                new_delivery_mode = delivery_mode if delivery_mode is not None else current.get("cache_delivery_mode", "proxy")
 
                 # If base_url is explicitly set to empty string, treat as None
                 if base_url == "":
@@ -5382,19 +5454,24 @@ class Database:
 
                 await db.execute("""
                     UPDATE cache_config
-                    SET cache_enabled = ?, cache_timeout = ?, cache_base_url = ?, updated_at = CURRENT_TIMESTAMP
+                    SET cache_enabled = ?, cache_timeout = ?, cache_base_url = ?,
+                        cache_provider = ?, cache_delivery_mode = ?, updated_at = CURRENT_TIMESTAMP
                     WHERE id = 1
-                """, (new_enabled, new_timeout, new_base_url))
+                """, (new_enabled, new_timeout, new_base_url, new_provider, new_delivery_mode))
             else:
                 # Insert default row if not exists
                 new_enabled = enabled if enabled is not None else False
                 new_timeout = timeout if timeout is not None else 7200
                 new_base_url = base_url if base_url is not None else None
+                new_provider = provider if provider is not None else "local"
+                new_delivery_mode = delivery_mode if delivery_mode is not None else "proxy"
 
                 await db.execute("""
-                    INSERT INTO cache_config (id, cache_enabled, cache_timeout, cache_base_url)
-                    VALUES (1, ?, ?, ?)
-                """, (new_enabled, new_timeout, new_base_url))
+                    INSERT INTO cache_config (
+                        id, cache_enabled, cache_timeout, cache_base_url,
+                        cache_provider, cache_delivery_mode
+                    ) VALUES (1, ?, ?, ?, ?, ?)
+                """, (new_enabled, new_timeout, new_base_url, new_provider, new_delivery_mode))
 
             await db.commit()
 

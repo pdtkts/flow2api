@@ -982,6 +982,28 @@ class Config:
             self._config["cache"] = {}
         self._config["cache"]["base_url"] = base_url
 
+    @property
+    def cache_provider(self) -> str:
+        value = str(self._config.get("cache", {}).get("provider", "local") or "local").lower()
+        return value if value in {"local", "digitalocean"} else "local"
+
+    def set_cache_provider(self, provider: str):
+        value = str(provider or "local").lower()
+        if value not in {"local", "digitalocean"}:
+            raise ValueError("cache provider must be local or digitalocean")
+        self._config.setdefault("cache", {})["provider"] = value
+
+    @property
+    def cache_delivery_mode(self) -> str:
+        value = str(self._config.get("cache", {}).get("delivery_mode", "proxy") or "proxy").lower()
+        return value if value in {"proxy", "cdn"} else "proxy"
+
+    def set_cache_delivery_mode(self, mode: str):
+        value = str(mode or "proxy").lower()
+        if value not in {"proxy", "cdn"}:
+            raise ValueError("cache delivery mode must be proxy or cdn")
+        self._config.setdefault("cache", {})["delivery_mode"] = value
+
     # Captcha configuration
     @property
     def captcha_method(self) -> str:

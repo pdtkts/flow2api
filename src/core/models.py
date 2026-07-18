@@ -251,6 +251,8 @@ class CacheConfig(BaseModel):
     cache_enabled: bool = False
     cache_timeout: int = 7200  # seconds; UI uses days (max 7d = 604800s), 0 = never expire
     cache_base_url: Optional[str] = None
+    cache_provider: str = "local"
+    cache_delivery_mode: str = "proxy"
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 

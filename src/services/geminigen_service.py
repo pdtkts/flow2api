@@ -773,6 +773,11 @@ class GeminiGenService:
 
     def _cache_url(self, filename: str, base_url: Optional[str]) -> str:
         base = (base_url or "").strip().rstrip("/")
+        builder = getattr(self.file_cache, "build_url", None)
+        if callable(builder):
+            result = builder(filename, base)
+            if isinstance(result, str):
+                return result
         return f"{base}/api/cache/blob/{quote(filename, safe='')}" if base else f"/api/cache/blob/{quote(filename, safe='')}"
 
     @staticmethod

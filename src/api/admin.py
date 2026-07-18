@@ -10,7 +10,7 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from fastapi import APIRouter, Depends, File, HTTPException, Header, Query, Request, Response, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 from typing import Optional, List, Dict, Any
@@ -4066,6 +4066,11 @@ async def _sync_runtime_cache_config():
     if routes.generation_handler and routes.generation_handler.file_cache:
         file_cache = routes.generation_handler.file_cache
         file_cache.set_timeout(config.cache_timeout)
+        await file_cache.configure_backend(
+            config.cache_provider,
+            config.cache_delivery_mode,
+            validate=config.cache_provider == "digitalocean",
+        )
         await file_cache.refresh_cleanup_task()
 
 # ========== Cache Configuration Endpoints ==========
@@ -4075,6 +4080,9 @@ async def get_cache_config(token: str = Depends(verify_admin_token)):
     """Get cache configuration"""
     cache_config = await db.get_cache_config()
     cache_base_url = config.cache_base_url
+    from . import routes
+    file_cache = routes.generation_handler.file_cache if routes.generation_handler else None
+    do_env = file_cache.digitalocean_environment(cache_config.cache_delivery_mode) if file_cache else {}
 
     # Calculate effective base URL
     effective_base_url = cache_base_url if cache_base_url else f"http://127.0.0.1:8000"
@@ -4089,7 +4097,28 @@ async def get_cache_config(token: str = Depends(verify_admin_token)):
             "timeout": cache_config.cache_timeout,
             "timeout_days": timeout_days,
             "base_url": cache_base_url or "",
-            "effective_base_url": effective_base_url
+            "effective_base_url": effective_base_url if cache_config.cache_delivery_mode != "cdn" else do_env.get("cdn_base_url", ""),
+            "provider": cache_config.cache_provider,
+            "delivery_mode": cache_config.cache_delivery_mode,
+            "digitalocean": {
+                "configured": bool(do_env.get("configured")),
+                "healthy": bool(
+                    cache_config.cache_provider == "local"
+                    or (
+                        file_cache is not None
+                        and getattr(file_cache, "provider", "") == "digitalocean"
+                        and bool(do_env.get("configured"))
+                    )
+                ),
+                "missing": do_env.get("missing", []),
+                "region": do_env.get("region", ""),
+                "bucket": do_env.get("bucket", ""),
+                "prefix": do_env.get("prefix", "flow2api/cache"),
+                "cdn_base_url": do_env.get("cdn_base_url", ""),
+                "access_key_configured": bool(do_env.get("access_key_configured")),
+                "api_token_configured": bool(do_env.get("api_token_configured")),
+                "cdn_endpoint_configured": bool(do_env.get("cdn_endpoint_configured")),
+            },
         }
     }
 
@@ -4100,7 +4129,7 @@ async def get_cache_stats(token: str = Depends(verify_admin_token)):
     from . import routes
     if not routes.generation_handler or not routes.generation_handler.file_cache:
         raise HTTPException(status_code=503, detail="File cache not initialized")
-    stats = routes.generation_handler.file_cache.get_dir_stats()
+    stats = await routes.generation_handler.file_cache.get_stats()
     return {"success": True, **stats}
 
 
@@ -4110,28 +4139,45 @@ async def list_cache_files(token: str = Depends(verify_admin_token)):
     from . import routes
     if not routes.generation_handler or not routes.generation_handler.file_cache:
         raise HTTPException(status_code=503, detail="File cache not initialized")
-    files = routes.generation_handler.file_cache.list_gallery_files()
+    files = await routes.generation_handler.file_cache.list_files()
     return {"success": True, "files": files}
 
 
 @router.get("/api/cache/admin/file/{filename}")
-async def get_cache_file_admin_preview(filename: str, token: str = Depends(verify_admin_token)):
+async def get_cache_file_admin_preview(
+    filename: str,
+    request: Request,
+    token: str = Depends(verify_admin_token),
+):
     """Stream a cache file for the admin UI (Bearer auth). Plain <img src> cannot use managed-key /api/cache/blob/… URLs."""
     from . import routes
 
     if not routes.generation_handler or not routes.generation_handler.file_cache:
         raise HTTPException(status_code=503, detail="File cache not initialized")
     safe_name = Path(filename).name
-    cache_dir = routes.generation_handler.file_cache.cache_dir.resolve()
-    file_path = (cache_dir / safe_name).resolve()
     try:
-        file_path.relative_to(cache_dir)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid path")
-    if not file_path.is_file():
+        cached = await routes.generation_handler.file_cache.open_cached(
+            safe_name, request.headers.get("range")
+        )
+    except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Cache file not found")
-    media_type = mimetypes.guess_type(safe_name)[0] or "application/octet-stream"
-    return FileResponse(path=file_path, media_type=media_type, filename=safe_name)
+    except ValueError as exc:
+        raise HTTPException(status_code=416, detail=str(exc))
+    except Exception as exc:
+        if "404" in str(exc) or "Not Found" in str(exc):
+            raise HTTPException(status_code=404, detail="Cache file not found")
+        raise
+    headers = {"Accept-Ranges": "bytes", "Content-Length": str(cached.content_length)}
+    if cached.content_range:
+        headers["Content-Range"] = cached.content_range
+    if cached.etag:
+        headers["ETag"] = cached.etag
+    return StreamingResponse(
+        cached.body,
+        status_code=cached.status_code,
+        media_type=cached.content_type,
+        headers=headers,
+    )
 
 
 @router.post("/api/cache/clear")
@@ -4141,7 +4187,10 @@ async def clear_cache_files(token: str = Depends(verify_admin_token)):
     if not routes.generation_handler or not routes.generation_handler.file_cache:
         raise HTTPException(status_code=503, detail="File cache not initialized")
     try:
-        removed_count, removed_bytes = routes.generation_handler.file_cache.clear_all_files()
+        file_cache = routes.generation_handler.file_cache
+        removed_count, removed_bytes = await file_cache.backend.clear()
+        if file_cache.db is not None and hasattr(file_cache.db, "delete_all_cache_file_metadata"):
+            await file_cache.db.delete_all_cache_file_metadata()
         return {
             "success": True,
             "message": "Cache cleared",
@@ -4177,6 +4226,19 @@ async def update_cache_config_full(
     enabled = request.get("enabled")
     timeout = request.get("timeout")
     base_url = request.get("base_url")
+    provider = request.get("provider")
+    delivery_mode = request.get("delivery_mode")
+
+    if provider is not None:
+        provider = str(provider).strip().lower()
+        if provider not in {"local", "digitalocean"}:
+            raise HTTPException(status_code=400, detail="Cache provider must be local or digitalocean")
+    if delivery_mode is not None:
+        delivery_mode = str(delivery_mode).strip().lower()
+        if delivery_mode not in {"proxy", "cdn"}:
+            raise HTTPException(status_code=400, detail="Delivery mode must be proxy or cdn")
+    if provider == "local":
+        delivery_mode = "proxy"
 
     if timeout is not None:
         try:
@@ -4192,13 +4254,49 @@ async def update_cache_config_full(
                 detail=f"Cache timeout cannot exceed 7 days ({max_cache_seconds} seconds)",
             )
 
-    await db.update_cache_config(enabled=enabled, timeout=timeout, base_url=base_url)
+    from . import routes
+    file_cache = routes.generation_handler.file_cache if routes.generation_handler else None
+    current = await db.get_cache_config()
+    target_provider = provider or current.cache_provider
+    target_mode = delivery_mode or current.cache_delivery_mode
+    changed_backend = target_provider != current.cache_provider or target_mode != current.cache_delivery_mode
+    if file_cache and changed_backend:
+        stats = await file_cache.get_stats()
+        if int(stats.get("file_count", 0)) > 0:
+            raise HTTPException(status_code=409, detail="Clear the current cache before changing provider or delivery mode")
+    if file_cache and target_provider == "digitalocean":
+        try:
+            await file_cache.validate_backend(target_provider, target_mode)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"DigitalOcean validation failed: {exc}")
+
+    await db.update_cache_config(
+        enabled=enabled,
+        timeout=timeout,
+        base_url=base_url,
+        provider=provider,
+        delivery_mode=delivery_mode,
+    )
 
     # 🔥 Hot reload: sync database config to memory
     await db.reload_config_to_memory()
     await _sync_runtime_cache_config()
 
     return {"success": True, "message": "缓存配置更新成功"}
+
+
+@router.post("/api/cache/provider/test")
+async def test_cache_provider(request: dict, token: str = Depends(verify_admin_token)):
+    from . import routes
+    if not routes.generation_handler or not routes.generation_handler.file_cache:
+        raise HTTPException(status_code=503, detail="File cache not initialized")
+    provider = str(request.get("provider") or "digitalocean").strip().lower()
+    delivery_mode = str(request.get("delivery_mode") or "proxy").strip().lower()
+    try:
+        status = await routes.generation_handler.file_cache.validate_backend(provider, delivery_mode)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Provider validation failed: {exc}")
+    return {"success": True, "status": status}
 
 
 @router.post("/api/cache/base-url")

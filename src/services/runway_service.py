@@ -371,6 +371,11 @@ class RunwayService:
 
     def _cache_url(self, filename: str, base_url: Optional[str]) -> str:
         base = (base_url or "").strip().rstrip("/")
+        builder = getattr(self.file_cache, "build_url", None)
+        if callable(builder):
+            result = builder(filename, base)
+            if isinstance(result, str):
+                return result
         return f"{base}/api/cache/blob/{quote(filename, safe='')}" if base else f"/api/cache/blob/{quote(filename, safe='')}"
 
     async def _cache_artifacts(
@@ -1400,14 +1405,14 @@ class RunwayService:
         )
 
         safe_name = f"runway_upload_{uuid.uuid4().hex}{suffix}"
-        target = (self.file_cache.cache_dir / safe_name).resolve()
-        cache_dir = self.file_cache.cache_dir.resolve()
-        try:
-            target.relative_to(cache_dir)
-        except ValueError as exc:
-            raise ValueError("Invalid upload filename") from exc
-        with open(target, "wb") as fh:
-            fh.write(content)
+        await self.file_cache.store_bytes(
+            safe_name,
+            content,
+            content_type,
+            api_key_id=api_key_id,
+            media_type=media_type,
+            source_url="runway-upload",
+        )
         cached_url = self._cache_url(safe_name, base_url)
 
         asset_id = str(

@@ -6,9 +6,10 @@ import { Button } from "../ui/button"
 import { Input } from "../ui/input"
 import { Label } from "../ui/label"
 import { Switch } from "../ui/switch"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select"
 import { toast } from "sonner"
 import { RefreshCw, Trash2, File } from "lucide-react"
-import type { CacheStatsResponse, CacheConfigResponse, CacheFilesResponse, CacheFileItem } from "../../types/admin"
+import type { CacheStatsResponse, CacheConfigResponse, CacheFilesResponse, CacheFileItem, DigitalOceanCacheStatus } from "../../types/admin"
 
 const SECONDS_PER_DAY = 86400
 const MAX_CACHE_DAYS = 7
@@ -150,6 +151,9 @@ export function CacheManagement({ active }: { active: boolean }) {
   const [cacheTimeoutDays, setCacheTimeoutDays] = useState("0.0833")
   const [cacheBaseUrl, setCacheBaseUrl] = useState("")
   const [cacheEffectiveUrl, setCacheEffectiveUrl] = useState("")
+  const [cacheProvider, setCacheProvider] = useState<"local" | "digitalocean">("local")
+  const [cacheDeliveryMode, setCacheDeliveryMode] = useState<"proxy" | "cdn">("proxy")
+  const [doStatus, setDoStatus] = useState<DigitalOceanCacheStatus | undefined>(undefined)
 
   const [storeLoading, setStoreLoading] = useState(false)
   const [fileCount, setFileCount] = useState<number | null>(null)
@@ -173,6 +177,9 @@ export function CacheManagement({ active }: { active: boolean }) {
       }
       setCacheBaseUrl(cache.data.config.base_url || "")
       setCacheEffectiveUrl(cache.data.config.effective_base_url || "")
+      setCacheProvider(cache.data.config.provider === "digitalocean" ? "digitalocean" : "local")
+      setCacheDeliveryMode(cache.data.config.delivery_mode === "cdn" ? "cdn" : "proxy")
+      setDoStatus(cache.data.config.digitalocean)
     }
   }, [token, active])
 
@@ -187,7 +194,7 @@ export function CacheManagement({ active }: { active: boolean }) {
       if (stats.ok && stats.data?.success) {
         setFileCount(stats.data.file_count ?? 0)
         setTotalBytes(stats.data.total_bytes ?? 0)
-        setCacheDir(stats.data.cache_dir || "")
+        setCacheDir(stats.data.cache_dir || (stats.data.bucket ? `Spaces://${stats.data.bucket}/${stats.data.prefix || ""}` : ""))
       } else toast.error("Failed to load cache stats")
       if (files.ok && files.data?.success && Array.isArray(files.data.files)) {
         setGalleryFiles(files.data.files)
@@ -228,31 +235,39 @@ export function CacheManagement({ active }: { active: boolean }) {
     if (baseUrl && !baseUrl.startsWith("http://") && !baseUrl.startsWith("https://")) return toast.error("Base URL must start with http(s)://")
     setBusy(true)
     try {
-      const r0 = await adminFetch("/api/cache/enabled", token, {
+      const r0 = await adminFetch("/api/cache/config", token, {
         method: "POST",
-        body: JSON.stringify({ enabled: cacheEnabled }),
+        body: JSON.stringify({
+          enabled: cacheEnabled,
+          timeout,
+          base_url: cacheProvider === "local" ? baseUrl : "",
+          provider: cacheProvider,
+          delivery_mode: cacheProvider === "digitalocean" ? cacheDeliveryMode : "proxy",
+        }),
       })
       if (!r0) return
       const d0 = await r0.json()
-      if (!d0.success) return toast.error("Cache enabled save failed")
-      const r1 = await adminFetch("/api/cache/config", token, {
-        method: "POST",
-        body: JSON.stringify({ timeout }),
-      })
-      if (!r1) return
-      const d1 = await r1.json()
-      if (!d1.success) return toast.error("Cache timeout save failed")
-      const r2 = await adminFetch("/api/cache/base-url", token, {
-        method: "POST",
-        body: JSON.stringify({ base_url: baseUrl }),
-      })
-      if (!r2) return
-      const d2 = await r2.json()
-      if (d2.success) {
+      if (d0.success) {
         toast.success("Cache config saved")
         await new Promise((r) => setTimeout(r, 200))
         await loadConfig()
-      } else toast.error("Cache base URL failed")
+      } else toast.error(d0.detail || d0.message || "Cache config save failed")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const testProvider = async () => {
+    if (!token) return
+    setBusy(true)
+    try {
+      const response = await adminFetch("/api/cache/provider/test", token, {
+        method: "POST",
+        body: JSON.stringify({ provider: cacheProvider, delivery_mode: cacheProvider === "digitalocean" ? cacheDeliveryMode : "proxy" }),
+      })
+      const data = await response?.json().catch(() => ({}))
+      if (response?.ok && data?.success) toast.success("Provider connection successful")
+      else toast.error(data?.detail || "Provider connection failed")
     } finally {
       setBusy(false)
     }
@@ -260,7 +275,7 @@ export function CacheManagement({ active }: { active: boolean }) {
 
   const clearCache = async () => {
     if (!token) return
-    if (!confirm("Delete all files in the cache directory? This cannot be undone.")) return
+    if (!confirm(`Delete all files from the active ${cacheProvider === "digitalocean" ? "DigitalOcean Spaces" : "local"} cache? This cannot be undone.`)) return
     setBusy(true)
     try {
       const r = await adminFetch("/api/cache/clear", token, { method: "POST" })
@@ -293,6 +308,41 @@ export function CacheManagement({ active }: { active: boolean }) {
           {cacheEnabled ? (
             <>
               <div>
+                <Label>Cache provider</Label>
+                <Select value={cacheProvider} onValueChange={(value) => {
+                  const provider = value as "local" | "digitalocean"
+                  setCacheProvider(provider)
+                  if (provider === "local") setCacheDeliveryMode("proxy")
+                }}>
+                  <SelectTrigger className="mt-1"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="local">Local filesystem</SelectItem>
+                    <SelectItem value="digitalocean">DigitalOcean Spaces</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              {cacheProvider === "digitalocean" ? (
+                <div>
+                  <Label>Delivery mode</Label>
+                  <Select value={cacheDeliveryMode} onValueChange={(value) => setCacheDeliveryMode(value as "proxy" | "cdn")}>
+                    <SelectTrigger className="mt-1"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="proxy">Private proxy (authenticated)</SelectItem>
+                      <SelectItem value="cdn">Public Spaces CDN</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  {cacheDeliveryMode === "cdn" ? (
+                    <p className="mt-1 text-xs text-amber-600">Public CDN objects bypass Flow2API API-key checks and can be downloaded by anyone with the URL.</p>
+                  ) : null}
+                  <div className="mt-2 rounded border bg-muted/30 p-2 text-xs text-muted-foreground">
+                    <p>Region: {doStatus?.region || "not configured"} · Bucket: {doStatus?.bucket || "not configured"}</p>
+                    <p>Prefix: {doStatus?.prefix || "flow2api/cache"}</p>
+                    <p>Credentials: {doStatus?.configured ? "configured" : "missing"} · Runtime: {doStatus?.healthy ? "healthy" : "not active"}</p>
+                  </div>
+                  <Button type="button" variant="outline" size="sm" className="mt-2" onClick={() => void testProvider()} disabled={busy}>Test connection</Button>
+                </div>
+              ) : null}
+              <div>
                 <Label>Cache retention (days)</Label>
                 <p className="text-xs text-muted-foreground mt-0.5">
                   How long to keep files before the cleanup task can remove them. 0 = no automatic expiry. Max {MAX_CACHE_DAYS}{" "}
@@ -308,10 +358,10 @@ export function CacheManagement({ active }: { active: boolean }) {
                   onChange={(e) => setCacheTimeoutDays(e.target.value)}
                 />
               </div>
-              <div>
+              {cacheProvider === "local" ? <div>
                 <Label>Public base URL for cached files</Label>
                 <Input className="mt-1" value={cacheBaseUrl} onChange={(e) => setCacheBaseUrl(e.target.value)} placeholder="https://yourdomain.com" />
-              </div>
+              </div> : null}
               {cacheEffectiveUrl ? (
                 <p className="text-xs text-muted-foreground">
                   Effective URL: <code className="bg-muted px-1 rounded">{cacheEffectiveUrl}</code>

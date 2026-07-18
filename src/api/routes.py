@@ -464,6 +464,11 @@ def _cache_file_row_to_list_item(row: Dict[str, Any]) -> Dict[str, Any]:
     download_path = f"/api/cache/blob/{fn_safe}"
     if flow:
         download_path = f"{download_path}?project_id={quote(flow, safe='')}"
+    if row.get("delivery_mode") == "cdn" and generation_handler is not None:
+        file_cache = getattr(generation_handler, "file_cache", None)
+        direct = file_cache.backend.public_url(fn_safe) if file_cache and getattr(file_cache, "backend", None) else None
+        if direct:
+            download_path = direct
     created = row.get("created_at")
     updated = row.get("updated_at")
     return {
@@ -472,6 +477,9 @@ def _cache_file_row_to_list_item(row: Dict[str, Any]) -> Dict[str, Any]:
         "media_type": row.get("media_type"),
         "source_url": row.get("source_url"),
         "token_id": row.get("token_id"),
+        "storage_provider": row.get("storage_provider") or "local",
+        "delivery_mode": row.get("delivery_mode") or "proxy",
+        "size_bytes": row.get("size_bytes"),
         "created_at": created.isoformat() if hasattr(created, "isoformat") else (str(created) if created is not None else None),
         "updated_at": updated.isoformat() if hasattr(updated, "isoformat") else (str(updated) if updated is not None else None),
         "download_path": download_path,
@@ -507,12 +515,9 @@ async def retrieve_image_data(
                 if allowed_token_ids is not None and int(proj.token_id) not in allowed_token_ids:
                     return None
             filename = Path(cache_filename).name
-            local_file_path = file_cache.cache_dir / filename
-
-            if local_file_path.exists() and local_file_path.is_file():
-                data = local_file_path.read_bytes()
-                if data:
-                    return data
+            data = await file_cache.read_bytes(filename)
+            if data:
+                return data
     except Exception as exc:
         debug_logger.log_warning(f"[CONTEXT] 本地缓存读取失败: {str(exc)}")
 
@@ -2336,6 +2341,7 @@ async def list_cache_files_for_key_project(
 @router.get("/api/cache/blob/{filename}")
 async def get_cached_blob(
     filename: str,
+    request: Request,
     project_id: Optional[str] = Query(None),
     auth_ctx: AuthContext = Depends(verify_api_key_flexible),
 ):
@@ -2361,11 +2367,36 @@ async def get_cached_blob(
         tid = int(proj.token_id)
         if tid not in auth_ctx.allowed_accounts:
             raise HTTPException(status_code=400, detail="project_id is not assigned to this API key")
-    file_path = handler.file_cache.cache_dir / safe_name
-    if not file_path.exists() or not file_path.is_file():
+    try:
+        cached = await handler.file_cache.open_cached(
+            safe_name,
+            request.headers.get("range") if request else None,
+        )
+    except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Cache file not found")
-    media_type = metadata.get("media_type") or mimetypes.guess_type(safe_name)[0] or "application/octet-stream"
-    return FileResponse(path=file_path, media_type=media_type, filename=safe_name)
+    except ValueError as exc:
+        raise HTTPException(status_code=416, detail=str(exc))
+    except Exception as exc:
+        if "404" in str(exc) or "Not Found" in str(exc):
+            raise HTTPException(status_code=404, detail="Cache file not found")
+        raise
+    headers = {
+        "Accept-Ranges": "bytes",
+        "Content-Length": str(cached.content_length),
+        "Content-Disposition": f'inline; filename="{safe_name}"',
+    }
+    if cached.content_range:
+        headers["Content-Range"] = cached.content_range
+    if cached.etag:
+        headers["ETag"] = cached.etag
+    if cached.last_modified:
+        headers["Last-Modified"] = cached.last_modified.strftime("%a, %d %b %Y %H:%M:%S GMT")
+    return StreamingResponse(
+        cached.body,
+        status_code=cached.status_code,
+        media_type=cached.content_type,
+        headers=headers,
+    )
 
 
 @router.post("/api/generate-cloning-prompts")

@@ -160,6 +160,19 @@ export interface ImportTokenItem {
   video_concurrency?: number
 }
 
+export interface DigitalOceanCacheStatus {
+  configured?: boolean
+  healthy?: boolean
+  missing?: string[]
+  region?: string
+  bucket?: string
+  prefix?: string
+  cdn_base_url?: string
+  access_key_configured?: boolean
+  api_token_configured?: boolean
+  cdn_endpoint_configured?: boolean
+}
+
 export interface CacheConfigResponse {
   success?: boolean
   config?: {
@@ -170,6 +183,9 @@ export interface CacheConfigResponse {
     timeout_days?: number
     base_url?: string
     effective_base_url?: string
+    provider?: "local" | "digitalocean"
+    delivery_mode?: "proxy" | "cdn"
+    digitalocean?: DigitalOceanCacheStatus
   }
 }
 
@@ -178,6 +194,11 @@ export interface CacheStatsResponse {
   cache_dir?: string
   file_count?: number
   total_bytes?: number
+  provider?: string
+  delivery_mode?: string
+  region?: string
+  bucket?: string
+  prefix?: string
 }
 
 export interface CacheFileItem {
@@ -185,6 +206,8 @@ export interface CacheFileItem {
   size_bytes: number
   kind: "image" | "video" | "other"
   modified_at?: string | null
+  provider?: string
+  delivery_mode?: string
 }
 
 export interface CacheFilesResponse {

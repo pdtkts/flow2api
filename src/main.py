@@ -537,6 +537,11 @@ async def lifespan(app: FastAPI):
     # 启动时统一把数据库配置同步到内存，避免 personal/brower 相关运行时配置遗漏。
     await db.reload_config_to_memory()
     generation_handler.file_cache.set_timeout(config.cache_timeout)
+    await generation_handler.file_cache.configure_backend(
+        config.cache_provider,
+        config.cache_delivery_mode,
+        validate=config.cache_provider == "digitalocean",
+    )
     cache_cleanup_enabled = await generation_handler.file_cache.refresh_cleanup_task()
     captcha_config = await db.get_captcha_config()
 
