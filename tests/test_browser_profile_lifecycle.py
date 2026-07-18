@@ -564,5 +564,15 @@ class ProductionLogRedactionTests(unittest.TestCase):
         self.assertIn("instance_id=safe", rendered)
 
 
+class HeadedContainerLifecycleTests(unittest.TestCase):
+    def test_railway_headed_image_uses_tini_as_pid_one(self):
+        dockerfile = (Path(__file__).resolve().parents[1] / "Dockerfile.headed").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertRegex(dockerfile, r"(?m)^\s*tini\s*\\$")
+        self.assertIn('ENTRYPOINT ["/usr/bin/tini", "--"]', dockerfile)
+
+
 if __name__ == "__main__":
     unittest.main()

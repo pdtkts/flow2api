@@ -26,6 +26,7 @@ RUN apt-get update \
         curl \
         fluxbox \
         novnc \
+        tini \
         websockify \
         x11-utils \
         x11vnc \
@@ -53,4 +54,5 @@ COPY docker/fluxbox/menu /root/.fluxbox/menu
 
 EXPOSE 8000 5900 6080
 
+ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["/usr/local/bin/entrypoint.headed.sh"]
