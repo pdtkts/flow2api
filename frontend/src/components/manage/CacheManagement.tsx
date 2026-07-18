@@ -240,7 +240,7 @@ export function CacheManagement({ active }: { active: boolean }) {
         body: JSON.stringify({
           enabled: cacheEnabled,
           timeout,
-          base_url: cacheProvider === "local" ? baseUrl : "",
+          base_url: cacheDeliveryMode === "cdn" ? "" : baseUrl,
           provider: cacheProvider,
           delivery_mode: cacheProvider === "digitalocean" ? cacheDeliveryMode : "proxy",
         }),
@@ -358,7 +358,7 @@ export function CacheManagement({ active }: { active: boolean }) {
                   onChange={(e) => setCacheTimeoutDays(e.target.value)}
                 />
               </div>
-              {cacheProvider === "local" ? <div>
+              {cacheDeliveryMode !== "cdn" ? <div>
                 <Label>Public base URL for cached files</Label>
                 <Input className="mt-1" value={cacheBaseUrl} onChange={(e) => setCacheBaseUrl(e.target.value)} placeholder="https://yourdomain.com" />
               </div> : null}
