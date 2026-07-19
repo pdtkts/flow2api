@@ -8,11 +8,16 @@ import shutil
 from pathlib import Path
 from typing import Optional, Dict, Any, Tuple, List
 from datetime import datetime, timedelta, timezone
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 import httpx
 from curl_cffi.requests import AsyncSession
 from ..core.config import config
 from ..core.logger import debug_logger
+from .cache_backends import (
+    DigitalOceanSpacesBackend,
+    DigitalOceanSpacesSettings,
+    LocalCacheBackend,
+)
 
 _IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp", ".gif", ".avif", ".bmp", ".jpe"})
 _VIDEO_SUFFIXES = frozenset({".mp4", ".webm", ".mov", ".mkv", ".m4v"})
@@ -51,6 +56,71 @@ class FileCache:
         self._cleanup_task = None
         self._cleanup_lock = asyncio.Lock()
         self._download_locks: Dict[str, asyncio.Lock] = {}
+        self.provider = "local"
+        self.delivery_mode = "proxy"
+        self.backend = LocalCacheBackend(self.cache_dir)
+
+    @staticmethod
+    def digitalocean_environment(delivery_mode: str = "proxy") -> Dict[str, Any]:
+        values = {
+            "access_key_id": (os.environ.get("FLOW2API_DO_SPACES_ACCESS_KEY_ID") or "").strip(),
+            "secret_access_key": (os.environ.get("FLOW2API_DO_SPACES_SECRET_ACCESS_KEY") or "").strip(),
+            "region": (os.environ.get("FLOW2API_DO_SPACES_REGION") or "").strip(),
+            "bucket": (os.environ.get("FLOW2API_DO_SPACES_BUCKET") or "").strip(),
+            "prefix": (os.environ.get("FLOW2API_DO_SPACES_PREFIX") or "flow2api/cache").strip("/"),
+            "cdn_base_url": (os.environ.get("FLOW2API_DO_SPACES_CDN_BASE_URL") or "").strip().rstrip("/"),
+            "api_token": (os.environ.get("FLOW2API_DO_API_TOKEN") or "").strip(),
+            "cdn_endpoint_id": (os.environ.get("FLOW2API_DO_CDN_ENDPOINT_ID") or "").strip(),
+        }
+        settings = DigitalOceanSpacesSettings(delivery_mode=delivery_mode, **values)
+        return {
+            "settings": settings,
+            "configured": not settings.missing(),
+            "missing": settings.missing(),
+            "region": settings.region,
+            "bucket": settings.bucket,
+            "prefix": settings.prefix,
+            "cdn_base_url": settings.cdn_base_url,
+            "access_key_configured": bool(settings.access_key_id and settings.secret_access_key),
+            "api_token_configured": bool(settings.api_token),
+            "cdn_endpoint_configured": bool(settings.cdn_endpoint_id),
+        }
+
+    async def configure_backend(
+        self,
+        provider: str,
+        delivery_mode: str,
+        *,
+        validate: bool = False,
+    ) -> Dict[str, Any]:
+        provider = str(provider or "local").lower()
+        delivery_mode = str(delivery_mode or "proxy").lower()
+        if provider not in {"local", "digitalocean"}:
+            raise ValueError("cache provider must be local or digitalocean")
+        if delivery_mode not in {"proxy", "cdn"}:
+            raise ValueError("cache delivery mode must be proxy or cdn")
+        candidate, delivery_mode = self._candidate_backend(provider, delivery_mode)
+        status = await candidate.validate() if validate else {"ok": True, **candidate.location()}
+        self.backend = candidate
+        self.provider = provider
+        self.delivery_mode = delivery_mode
+        debug_logger.log_info(f"Cache backend configured: provider={provider}, delivery={delivery_mode}")
+        return status
+
+    def _candidate_backend(self, provider: str, delivery_mode: str):
+        provider = str(provider or "local").lower()
+        delivery_mode = str(delivery_mode or "proxy").lower()
+        if provider == "local":
+            return LocalCacheBackend(self.cache_dir), "proxy"
+        if provider == "digitalocean":
+            env = self.digitalocean_environment(delivery_mode)
+            return DigitalOceanSpacesBackend(env["settings"]), delivery_mode
+        raise ValueError("cache provider must be local or digitalocean")
+
+    async def validate_backend(self, provider: str, delivery_mode: str) -> Dict[str, Any]:
+        candidate, normalized_mode = self._candidate_backend(provider, delivery_mode)
+        result = await candidate.validate()
+        return {**result, "delivery_mode": normalized_mode}
 
     def _is_cleanup_disabled(self) -> bool:
         return self.default_timeout <= 0
@@ -81,6 +151,24 @@ class FileCache:
         except OSError:
             return 0
 
+    def _iter_cache_files(self):
+        """Yield regular cache files recursively without following symlinked directories."""
+        if not self.cache_dir.exists():
+            return
+        for root, dirnames, filenames in os.walk(self.cache_dir, followlinks=False):
+            root_path = Path(root)
+            safe_dirs = []
+            for dirname in dirnames:
+                path = root_path / dirname
+                try:
+                    if not path.is_symlink():
+                        safe_dirs.append(dirname)
+                except OSError:
+                    continue
+            dirnames[:] = safe_dirs
+            for filename in filenames:
+                yield root_path / filename
+
     async def reclaim_cache_space(
         self,
         required_bytes: int = 0,
@@ -88,6 +176,15 @@ class FileCache:
         target_free_bytes: Optional[int] = None,
     ) -> Dict[str, int]:
         """Restore the cache-volume reserve by evicting only generated media."""
+        if self.provider != "local":
+            usage = self._disk_usage()
+            return {
+                "free_before": int(usage.free),
+                "free_after": int(usage.free),
+                "target_free": 0,
+                "reclaimed_bytes": 0,
+                "removed_count": 0,
+            }
         async with self._cleanup_lock:
             usage = self._disk_usage()
             target = (
@@ -102,11 +199,7 @@ class FileCache:
             timeout = self.get_timeout()
             candidates = []
 
-            try:
-                paths = list(self.cache_dir.iterdir())
-            except OSError:
-                paths = []
-            for path in paths:
+            for path in self._iter_cache_files() or ():
                 try:
                     if path.is_symlink() or not path.is_file():
                         continue
@@ -530,6 +623,17 @@ class FileCache:
 
     async def _cleanup_expired_files(self):
         """Remove expired cache files"""
+        if self.provider != "local":
+            try:
+                removed_count, removed_bytes = await self.backend.cleanup_expired(self.get_timeout())
+                return {"removed_count": removed_count, "reclaimed_bytes": removed_bytes}
+            except Exception as e:
+                debug_logger.log_error(
+                    error_message=f"Failed to cleanup {self.provider} cache: {str(e)}",
+                    status_code=0,
+                    response_text="",
+                )
+                return {"removed_count": 0, "reclaimed_bytes": 0}
         try:
             timeout = self.get_timeout()
             current_time = time.time()
@@ -637,6 +741,23 @@ class FileCache:
         download_lock = self._download_locks.setdefault(filename, asyncio.Lock())
 
         async with download_lock:
+            if self.provider != "local":
+                existing = await self.backend.stat(filename)
+                if existing is not None:
+                    age = time.time() - existing.modified_at.timestamp()
+                    if self._is_cleanup_disabled() or age < self.default_timeout:
+                        debug_logger.log_info(f"Cache hit ({self.provider}): {filename}")
+                        await self._record_cache_metadata(
+                            filename=filename,
+                            api_key_id=api_key_id,
+                            token_id=token_id,
+                            flow_project_id=flow_project_id,
+                            media_type=media_type,
+                            source_url=url,
+                            stored_object=existing,
+                        )
+                        return filename
+                    await self.backend.delete(filename)
             # Check if already cached and not expired
             if file_path.exists():
                 try:
@@ -964,6 +1085,56 @@ class FileCache:
                 raise python_download_error
             raise Exception("Video cache download failed before receiving media")
 
+    async def cache_base64_video(
+        self,
+        base64_data: str,
+        *,
+        api_key_id: Optional[int] = None,
+        token_id: Optional[int] = None,
+        flow_project_id: Optional[str] = None,
+        source_media_name: Optional[str] = None,
+    ) -> str:
+        """Decode, validate, and atomically cache a base64-encoded video."""
+        import base64
+        import uuid
+
+        raw_value = str(base64_data or "").strip()
+        if raw_value.startswith("data:"):
+            if "," not in raw_value:
+                raise ValueError("Base64 video data URL is malformed")
+            raw_value = raw_value.split(",", 1)[1]
+        compact_value = "".join(raw_value.split())
+        if not compact_value:
+            raise ValueError("Base64 video payload is empty")
+
+        project_id = str(flow_project_id or "").strip()
+        unique_id = hashlib.md5(
+            f"{api_key_id or 0}:{project_id}:{uuid.uuid4()}:{time.time()}".encode()
+        ).hexdigest()
+        filename = f"{unique_id}.mp4"
+        file_path = self.cache_dir / filename
+        try:
+            video_data = base64.b64decode(compact_value, validate=True)
+            return await self._store_download_response(
+                filename=filename,
+                file_path=file_path,
+                content=video_data,
+                content_type="video/mp4",
+                media_type="video",
+                api_key_id=api_key_id,
+                token_id=token_id,
+                flow_project_id=project_id,
+                source_url=(
+                    f"flow-media:{str(source_media_name).strip()}"
+                    if str(source_media_name or "").strip()
+                    else "flow-media:encoded-video"
+                ),
+                method_name="Flow get_media base64",
+            )
+        except Exception as exc:
+            self._safe_unlink(file_path)
+            raise Exception(f"Failed to cache base64 video: {self._normalize_cache_error(exc)}") from exc
+
     async def cache_base64_image(
         self,
         base64_data: str,
@@ -1021,6 +1192,73 @@ class FileCache:
     def get_cache_path(self, filename: str) -> Path:
         """Get full path to cached file"""
         return self.cache_dir / filename
+
+    def build_url(
+        self,
+        filename: str,
+        proxy_base_url: str,
+        flow_project_id: Optional[str] = None,
+    ) -> str:
+        direct = self.backend.public_url(filename)
+        if direct:
+            return direct
+        base = f"{proxy_base_url.rstrip('/')}/api/cache/blob/{quote(filename, safe='')}"
+        pid = (flow_project_id or "").strip()
+        return f"{base}?project_id={quote(pid, safe='')}" if pid else base
+
+    async def store_bytes(
+        self,
+        filename: str,
+        content: bytes,
+        content_type: str,
+        *,
+        api_key_id: Optional[int] = None,
+        token_id: Optional[int] = None,
+        flow_project_id: Optional[str] = None,
+        media_type: str = "other",
+        source_url: Optional[str] = None,
+    ) -> str:
+        stored = await self.backend.store_bytes(filename, content, content_type)
+        await self._record_cache_metadata(
+            filename=filename,
+            api_key_id=api_key_id,
+            token_id=token_id,
+            flow_project_id=flow_project_id,
+            media_type=media_type,
+            source_url=source_url,
+            stored_object=stored,
+        )
+        return filename
+
+    async def read_bytes(self, filename: str) -> bytes:
+        return await self.backend.read_bytes(filename)
+
+    async def open_cached(self, filename: str, range_header: Optional[str] = None):
+        return await self.backend.open(filename, range_header)
+
+    async def get_stats(self) -> Dict[str, Any]:
+        objects = await self.backend.list()
+        return {
+            **self.backend.location(),
+            "delivery_mode": self.delivery_mode,
+            "file_count": len(objects),
+            "total_bytes": sum(item.size_bytes for item in objects),
+        }
+
+    async def list_files(self) -> List[Dict[str, Any]]:
+        rows: List[Dict[str, Any]] = []
+        for item in await self.backend.list():
+            suffix = Path(item.name).suffix.lower()
+            kind = "image" if suffix in _IMAGE_SUFFIXES else "video" if suffix in _VIDEO_SUFFIXES else "other"
+            rows.append({
+                "name": item.name,
+                "size_bytes": item.size_bytes,
+                "kind": kind,
+                "modified_at": item.modified_at.isoformat(),
+                "provider": self.provider,
+                "delivery_mode": self.delivery_mode,
+            })
+        return rows
 
     def set_timeout(self, timeout: int):
         """Set cache timeout in seconds"""
@@ -1119,7 +1357,9 @@ class FileCache:
 
     async def clear_all(self) -> int:
         """Clear all cached files (async wrapper). Returns removed file count."""
-        count, _ = self.clear_all_files()
+        count, _ = await self.backend.clear()
+        if self.db is not None and hasattr(self.db, "delete_all_cache_file_metadata"):
+            await self.db.delete_all_cache_file_metadata()
         return count
 
     async def _record_cache_metadata(
@@ -1131,7 +1371,18 @@ class FileCache:
         flow_project_id: Optional[str] = None,
         media_type: str,
         source_url: Optional[str],
+        stored_object=None,
     ):
+        if stored_object is None and self.provider != "local":
+            staging_path = self.cache_dir / Path(filename).name
+            if staging_path.is_file():
+                content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+                try:
+                    stored_object = await self.backend.store_file(filename, staging_path, content_type)
+                finally:
+                    self._safe_unlink(staging_path)
+            else:
+                stored_object = await self.backend.stat(filename)
         if self.db is None or api_key_id is None:
             return
         try:
@@ -1143,6 +1394,10 @@ class FileCache:
                 media_type=media_type,
                 source_url=source_url,
                 flow_project_id=fpid,
+                storage_provider=self.provider,
+                object_key=getattr(stored_object, "key", filename),
+                delivery_mode=self.delivery_mode,
+                size_bytes=getattr(stored_object, "size_bytes", None),
             )
         except Exception as exc:
             debug_logger.log_warning(f"Failed to record cache metadata: {exc}")

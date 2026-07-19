@@ -9,9 +9,9 @@ import shutil
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from fastapi import APIRouter, Depends, File, HTTPException, Header, Query, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, File, HTTPException, Header, Query, Request, Response, UploadFile
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 from typing import Optional, List, Dict, Any
 import secrets
@@ -25,13 +25,22 @@ from ..core.auth import AuthManager
 from ..core.api_key_manager import ApiKeyManager
 from ..core.database import Database
 from ..core.config import config, get_yescaptcha_min_score, normalize_yescaptcha_task_type
-from ..core.models import GenerationConfig
+from ..core.models import GenerationConfig, Token
+from ..core.browser_runtime_status import (
+    fail_runtime_prepare,
+    finish_runtime_prepare,
+    get_runtime_status,
+    progress_runtime_prepare,
+    start_runtime_prepare,
+)
 from ..core.monitoring import build_public_health_snapshot
 from ..services.token_manager import TokenManager
 from ..services.proxy_manager import ProxyManager
 from ..services.concurrency_manager import ConcurrencyManager
 from ..services.runway_service import RunwayService
 from ..services.geminigen_service import GeminiGenService
+from ..services.generation_handler import MODEL_CONFIG
+from ..services.browser_profile_service import BrowserProfileService
 
 try:
     import httpx
@@ -48,10 +57,12 @@ concurrency_manager: Optional[ConcurrencyManager] = None
 api_key_manager: Optional[ApiKeyManager] = None
 runway_service: Optional[RunwayService] = None
 geminigen_service: Optional[GeminiGenService] = None
+captcha_runtime_prepare_tasks: Dict[str, asyncio.Task] = {}
 
 # Admin session TTLs (seconds)
 _ADMIN_SESSION_TTL_REMEMBER = 30 * 24 * 3600  # 30 days when "remember me" is on
 _ADMIN_SESSION_TTL_BROWSER = 24 * 3600  # 24 hours when off
+ADMIN_SESSION_COOKIE_NAME = "admin_session"
 
 SUPPORTED_API_CAPTCHA_METHODS = {"yescaptcha", "capmonster", "ezcaptcha", "capsolver"}
 MAX_SQLITE_RESTORE_BYTES = 512 * 1024 * 1024
@@ -187,6 +198,90 @@ def _extract_error_summary(payload: Any) -> str:
         return ""
 
     return _truncate_text(payload)
+
+
+def _extract_log_job_id(*payloads: Any) -> str:
+    def visit(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return ""
+            try:
+                return visit(json.loads(text))
+            except Exception:
+                return ""
+        if isinstance(value, dict):
+            for key in ("job_id", "request_id", "task_id", "upstream_task_id"):
+                candidate = value.get(key)
+                if isinstance(candidate, str) and candidate.strip():
+                    return candidate.strip()
+            for key in ("content", "response", "data", "task", "operation", "performance"):
+                nested = visit(value.get(key))
+                if nested:
+                    return nested
+        if isinstance(value, list):
+            for item in value:
+                nested = visit(item)
+                if nested:
+                    return nested
+        return ""
+
+    for payload in payloads:
+        found = visit(payload)
+        if found:
+            return found
+    return ""
+
+
+def _extract_captcha_user_agent_metadata(*payloads: Any) -> Dict[str, Any]:
+    """Extract the persisted provider-UA marker without exposing the raw User-Agent."""
+
+    def visit(value: Any) -> Optional[Dict[str, Any]]:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return None
+            try:
+                return visit(json.loads(text))
+            except Exception:
+                if not re.search(r'"captcha_user_agent_set"\s*:\s*true', text, re.IGNORECASE):
+                    return None
+                provider_match = re.search(
+                    r'"captcha_provider"\s*:\s*"([^"\\]+)"',
+                    text,
+                    re.IGNORECASE,
+                )
+                return {
+                    "captcha_user_agent_set": True,
+                    "captcha_provider": provider_match.group(1).strip() if provider_match else None,
+                }
+        if isinstance(value, dict):
+            if value.get("captcha_user_agent_set") is True:
+                provider = str(value.get("captcha_provider") or "").strip() or None
+                return {
+                    "captcha_user_agent_set": True,
+                    "captcha_provider": provider,
+                }
+            for nested in value.values():
+                found = visit(nested)
+                if found:
+                    return found
+        if isinstance(value, list):
+            for item in value:
+                found = visit(item)
+                if found:
+                    return found
+        return None
+
+    for payload in payloads:
+        found = visit(payload)
+        if found:
+            return found
+    return {"captcha_user_agent_set": False, "captcha_provider": None}
 
 
 def _guess_client_hints_from_user_agent(user_agent: str) -> Dict[str, str]:
@@ -431,8 +526,8 @@ async def _solve_recaptcha_with_api_service(
     elif method == "capmonster":
         client_key = config.capmonster_api_key
         base_url = config.capmonster_base_url
-        task_type = "RecaptchaV3TaskProxyless"
-        min_score = None
+        task_type = "RecaptchaV3EnterpriseTask"
+        min_score = config.capmonster_min_score
     elif method == "ezcaptcha":
         client_key = config.ezcaptcha_api_key
         base_url = config.ezcaptcha_base_url
@@ -620,6 +715,52 @@ def _supports_kwarg(fn: Any, kwarg: str) -> bool:
         return False
 
 
+def _normalize_runtime_method(method: Optional[str]) -> str:
+    normalized = str(method or "").strip().lower()
+    if normalized not in {"browser", "personal"}:
+        raise HTTPException(status_code=400, detail="Invalid runtime method")
+    return normalized
+
+
+async def _prepare_captcha_runtime(method: str) -> None:
+    runtime_method = _normalize_runtime_method(method)
+    start_runtime_prepare(runtime_method, f"Preparing {runtime_method} captcha runtime")
+    try:
+        if runtime_method == "browser":
+            from ..services.browser_captcha import BrowserCaptchaService
+
+            service = await BrowserCaptchaService.get_instance(db)
+            progress_runtime_prepare(runtime_method, "Warming headed browser slots")
+            await service.reload_browser_count()
+            await service.warmup_browser_slots()
+        else:
+            from ..services.browser_captcha_personal import BrowserCaptchaService
+
+            service = await BrowserCaptchaService.get_instance(db)
+            progress_runtime_prepare(runtime_method, "Reloading Personal browser pool")
+            await service.reload_config()
+        finish_runtime_prepare(runtime_method, f"{runtime_method.title()} captcha runtime is ready")
+    except Exception as exc:
+        fail_runtime_prepare(
+            runtime_method,
+            f"Runtime preparation failed: {type(exc).__name__}: {str(exc)[:200]}",
+        )
+    finally:
+        captcha_runtime_prepare_tasks.pop(runtime_method, None)
+
+
+def _schedule_captcha_runtime_prepare(method: str) -> bool:
+    runtime_method = _normalize_runtime_method(method)
+    existing = captcha_runtime_prepare_tasks.get(runtime_method)
+    if existing and not existing.done():
+        progress_runtime_prepare(runtime_method, "Runtime preparation is still in progress")
+        return False
+    captcha_runtime_prepare_tasks[runtime_method] = asyncio.create_task(
+        _prepare_captcha_runtime(runtime_method)
+    )
+    return True
+
+
 def set_dependencies(
     tm: TokenManager,
     pm: ProxyManager,
@@ -650,8 +791,6 @@ class LoginRequest(BaseModel):
 
 class AddTokenRequest(BaseModel):
     st: str
-    project_id: Optional[str] = None  # 用户可选输入project_id
-    project_name: Optional[str] = None
     remark: Optional[str] = None
     captcha_proxy_url: Optional[str] = None
     extension_route_key: Optional[str] = None
@@ -659,12 +798,17 @@ class AddTokenRequest(BaseModel):
     video_enabled: bool = True
     image_concurrency: int = -1
     video_concurrency: int = -1
+    protocol_mode: str = "session"
+    google_cookies: Optional[str] = None
+    login_account: Optional[str] = None
+    login_password: Optional[str] = None
+    proxy_url: Optional[str] = None
+    auto_refresh_enabled: bool = True
+    refresh_interval_minutes: int = Field(default=120, ge=1, le=10080)
 
 
 class UpdateTokenRequest(BaseModel):
-    st: str  # Session Token (必填，用于刷新AT)
-    project_id: Optional[str] = None  # 用户可选输入project_id
-    project_name: Optional[str] = None
+    st: Optional[str] = None  # Session Token; browser-profile accounts may leave this empty
     remark: Optional[str] = None
     captcha_proxy_url: Optional[str] = None
     extension_route_key: Optional[str] = None
@@ -673,6 +817,22 @@ class UpdateTokenRequest(BaseModel):
     video_enabled: Optional[bool] = None
     image_concurrency: Optional[int] = None
     video_concurrency: Optional[int] = None
+    protocol_mode: Optional[str] = None
+    google_cookies: Optional[str] = None
+    login_account: Optional[str] = None
+    login_password: Optional[str] = None
+    proxy_url: Optional[str] = None
+    auto_refresh_enabled: Optional[bool] = None
+    refresh_interval_minutes: Optional[int] = Field(default=None, ge=1, le=10080)
+
+
+class BrowserProfileTokenRequest(BaseModel):
+    remark: Optional[str] = None
+    captcha_proxy_url: Optional[str] = None
+    image_enabled: bool = True
+    video_enabled: bool = True
+    image_concurrency: int = -1
+    video_concurrency: int = -1
 
 
 class ProxyConfigRequest(BaseModel):
@@ -878,6 +1038,7 @@ class RunwayModelUpdateRequest(BaseModel):
 
 class GeminiGenConfigUpdateRequest(BaseModel):
     enabled: Optional[bool] = None
+    video_enabled: Optional[bool] = None
     base_url: Optional[str] = None
     poll_interval_image_sec: Optional[float] = None
     poll_interval_video_sec: Optional[float] = None
@@ -917,6 +1078,11 @@ class ST2ATRequest(BaseModel):
     st: str
 
 
+class TokenRefreshConfigRequest(BaseModel):
+    enabled: Optional[bool] = None
+    refresh_interval_minutes: Optional[int] = Field(default=None, ge=1, le=10080)
+
+
 class ImportTokenItem(BaseModel):
     """导入Token项"""
     email: Optional[str] = None
@@ -929,6 +1095,13 @@ class ImportTokenItem(BaseModel):
     video_enabled: bool = True
     image_concurrency: int = -1
     video_concurrency: int = -1
+    protocol_mode: str = "session"
+    google_cookies: Optional[str] = None
+    login_account: Optional[str] = None
+    login_password: Optional[str] = None
+    proxy_url: Optional[str] = None
+    auto_refresh_enabled: bool = True
+    refresh_interval_minutes: int = Field(default=120, ge=1, le=10080)
 
 
 class ImportTokensRequest(BaseModel):
@@ -948,33 +1121,85 @@ class EventCalendarUpdateRequest(BaseModel):
 
 # ========== Auth Middleware ==========
 
-async def verify_admin_token(authorization: str = Header(None)):
-    """Verify admin session token (NOT API key)"""
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Missing authorization")
+def get_admin_token_from_cookie(request: Request) -> Optional[str]:
+    token = str(request.cookies.get(ADMIN_SESSION_COOKIE_NAME) or "").strip()
+    return token or None
 
-    token = authorization[7:]
 
-    if not await db.is_admin_session_valid(token):
+def _request_uses_https(request: Request) -> bool:
+    forwarded_proto = str(request.headers.get("x-forwarded-proto") or "").split(",", 1)[0]
+    return request.url.scheme.lower() == "https" or forwarded_proto.strip().lower() == "https"
+
+
+def _set_admin_session_cookie(
+    response: Response,
+    request: Request,
+    token: str,
+    *,
+    remember_me: bool,
+) -> None:
+    response.set_cookie(
+        key=ADMIN_SESSION_COOKIE_NAME,
+        value=token,
+        max_age=_ADMIN_SESSION_TTL_REMEMBER if remember_me else None,
+        httponly=True,
+        samesite="lax",
+        secure=_request_uses_https(request),
+        path="/",
+    )
+
+
+def _clear_admin_session_cookie(response: Response, request: Request) -> None:
+    response.delete_cookie(
+        key=ADMIN_SESSION_COOKIE_NAME,
+        httponly=True,
+        samesite="lax",
+        secure=_request_uses_https(request),
+        path="/",
+    )
+
+
+async def is_admin_session_token_valid(token: Optional[str]) -> bool:
+    normalized = str(token or "").strip()
+    return bool(normalized and db and await db.is_admin_session_valid(normalized))
+
+
+async def verify_admin_token(request: Request, authorization: str = Header(None)):
+    """Verify a persistent admin session from Bearer auth or the browser cookie."""
+    header_token = ""
+    if authorization and authorization.startswith("Bearer "):
+        header_token = authorization[7:].strip()
+    cookie_token = get_admin_token_from_cookie(request) or ""
+
+    if header_token and await is_admin_session_token_valid(header_token):
+        return header_token
+    if cookie_token and await is_admin_session_token_valid(cookie_token):
+        return cookie_token
+    if header_token or cookie_token:
         raise HTTPException(status_code=401, detail="Invalid or expired admin token")
-
-    return token
+    raise HTTPException(status_code=401, detail="Missing authorization")
 
 
 # ========== Auth Endpoints ==========
 
 @router.post("/api/admin/login")
-async def admin_login(request: LoginRequest):
+async def admin_login(payload: LoginRequest, request: Request, response: Response):
     """Admin login - returns session token (NOT API key)"""
-    if not AuthManager.verify_admin(request.username, request.password):
+    if not AuthManager.verify_admin(payload.username, payload.password):
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
     # Generate independent session token
     session_token = f"admin-{secrets.token_urlsafe(32)}"
 
-    ttl = _ADMIN_SESSION_TTL_REMEMBER if request.remember_me else _ADMIN_SESSION_TTL_BROWSER
+    ttl = _ADMIN_SESSION_TTL_REMEMBER if payload.remember_me else _ADMIN_SESSION_TTL_BROWSER
     expires_at = int(time.time()) + ttl
     await db.insert_admin_session(session_token, expires_at)
+    _set_admin_session_cookie(
+        response,
+        request,
+        session_token,
+        remember_me=payload.remember_me,
+    )
 
     return {
         "success": True,
@@ -984,26 +1209,36 @@ async def admin_login(request: LoginRequest):
 
 
 @router.post("/api/admin/logout")
-async def admin_logout(token: str = Depends(verify_admin_token)):
+async def admin_logout(
+    request: Request,
+    response: Response,
+    token: str = Depends(verify_admin_token),
+):
     """Admin logout - invalidate session token"""
-    await db.delete_admin_session(token)
+    cookie_token = get_admin_token_from_cookie(request)
+    for session_token in {token, cookie_token}:
+        if session_token:
+            await db.delete_admin_session(session_token)
+    _clear_admin_session_cookie(response, request)
     return {"success": True, "message": "退出登录成功"}
 
 
 @router.post("/api/admin/change-password")
 async def change_password(
-    request: ChangePasswordRequest,
+    payload: ChangePasswordRequest,
+    request: Request,
+    response: Response,
     token: str = Depends(verify_admin_token)
 ):
     """Change admin password"""
     # Verify old password
-    if not AuthManager.verify_admin(config.admin_username, request.old_password):
+    if not AuthManager.verify_admin(config.admin_username, payload.old_password):
         raise HTTPException(status_code=400, detail="旧密码错误")
 
     # Update password and username in database
-    update_params = {"password": request.new_password}
-    if request.username:
-        update_params["username"] = request.username
+    update_params = {"password": payload.new_password}
+    if payload.username:
+        update_params["username"] = payload.username
 
     await db.update_admin_config(**update_params)
 
@@ -1012,6 +1247,7 @@ async def change_password(
 
     # 🔑 Invalidate all admin session tokens (force re-login for security)
     await db.delete_all_admin_sessions()
+    _clear_admin_session_cookie(response, request)
 
     return {"success": True, "message": "密码修改成功,请重新登录"}
 
@@ -1022,6 +1258,12 @@ async def change_password(
 async def get_tokens(token: str = Depends(verify_admin_token)):
     """Get all tokens with statistics"""
     token_rows = await db.get_all_tokens_with_stats()
+    profile_service = await BrowserProfileService.get_instance(db=db, flow_client=token_manager.flow_client)
+    runtime_states = {
+        int(row["id"]): await profile_service.is_runtime_open(int(row["id"]))
+        for row in token_rows
+        if row.get("id") is not None and (row.get("auth_mode") or "session_token") == "browser_profile"
+    }
     to_iso = lambda value: value.isoformat() if hasattr(value, "isoformat") else value
     now = datetime.now(timezone.utc)
 
@@ -1060,8 +1302,33 @@ async def get_tokens(token: str = Depends(verify_admin_token)):
         "user_paygate_tier": row.get("user_paygate_tier"),
         "current_project_id": row.get("current_project_id"),  # 🆕 项目ID
         "current_project_name": row.get("current_project_name"),  # 🆕 项目名称
+        "auth_mode": row.get("auth_mode") or "session_token",
+        "browser_profile_path": row.get("browser_profile_path"),
+        "browser_profile_status": row.get("browser_profile_status") or "not_created",
+        "browser_profile_email": row.get("browser_profile_email"),
+        "browser_profile_name": row.get("browser_profile_name"),
+        "browser_profile_login_state": row.get("browser_profile_login_state") or "unknown",
+        "browser_profile_cookie_status": row.get("browser_profile_cookie_status") or "unknown",
+        "browser_profile_st_status": row.get("browser_profile_st_status") or "unknown",
+        "browser_profile_at_status": row.get("browser_profile_at_status") or "unknown",
+        "browser_profile_last_opened_at": to_iso(row.get("browser_profile_last_opened_at")) if row.get("browser_profile_last_opened_at") else None,
+        "browser_profile_last_sync_at": to_iso(row.get("browser_profile_last_sync_at")) if row.get("browser_profile_last_sync_at") else None,
+        "browser_profile_last_refresh_at": to_iso(row.get("browser_profile_last_refresh_at")) if row.get("browser_profile_last_refresh_at") else None,
+        "browser_profile_last_error": row.get("browser_profile_last_error"),
+        "runtime_open": runtime_states.get(int(row.get("id") or 0), False),
         "captcha_proxy_url": row.get("captcha_proxy_url") or "",
         "extension_route_key": row.get("extension_route_key") or "",
+        "protocol_mode": row.get("protocol_mode") or "session",
+        "google_cookies": row.get("google_cookies") or "",
+        "has_google_cookies": bool(str(row.get("google_cookies") or "").strip()),
+        "login_account": row.get("login_account") or "",
+        "login_password": row.get("login_password") or "",
+        "proxy_url": row.get("proxy_url") or "",
+        "protocol_proxy_configured": bool(str(row.get("proxy_url") or "").strip()),
+        "auto_refresh_enabled": bool(row.get("auto_refresh_enabled", True)),
+        "refresh_interval_minutes": int(row.get("refresh_interval_minutes") or 120),
+        "last_st_refresh_at": to_iso(row.get("last_st_refresh_at")) if row.get("last_st_refresh_at") else None,
+        "last_st_refresh_result": row.get("last_st_refresh_result") or "",
         "image_enabled": bool(row.get("image_enabled")),
         "video_enabled": bool(row.get("video_enabled")),
         "image_concurrency": row.get("image_concurrency"),
@@ -1086,14 +1353,21 @@ async def add_token(
     try:
         add_kwargs: Dict[str, Any] = {
             "st": request.st,
-            "project_id": request.project_id,  # 🆕 支持用户指定project_id
-            "project_name": request.project_name,
+            "project_id": None,
+            "project_name": None,
             "remark": request.remark,
             "captcha_proxy_url": request.captcha_proxy_url.strip() if request.captcha_proxy_url is not None else None,
             "image_enabled": request.image_enabled,
             "video_enabled": request.video_enabled,
             "image_concurrency": request.image_concurrency,
             "video_concurrency": request.video_concurrency,
+            "protocol_mode": request.protocol_mode,
+            "google_cookies": request.google_cookies,
+            "login_account": request.login_account,
+            "login_password": request.login_password,
+            "proxy_url": request.proxy_url,
+            "auto_refresh_enabled": request.auto_refresh_enabled,
+            "refresh_interval_minutes": request.refresh_interval_minutes,
         }
         if _supports_kwarg(token_manager.add_token, "extension_route_key"):
             add_kwargs["extension_route_key"] = (
@@ -1118,8 +1392,6 @@ async def add_token(
                 "id": new_token.id,
                 "email": new_token.email,
                 "credits": new_token.credits,
-                "project_id": new_token.current_project_id,
-                "project_name": new_token.current_project_name
             }
         }
     except ValueError as e:
@@ -1128,7 +1400,223 @@ async def add_token(
         raise HTTPException(status_code=500, detail=f"添加Token失败: {str(e)}")
 
 
+@router.post("/api/tokens/browser-profile")
+async def add_browser_profile_token(
+    request: BrowserProfileTokenRequest,
+    token: str = Depends(verify_admin_token),
+):
+    """Create a headed browser-profile account placeholder without a real ST yet."""
+    try:
+        service = await BrowserProfileService.get_instance(db=db, flow_client=token_manager.flow_client)
+        account = Token(
+            st=service.build_placeholder_st(),
+            at=None,
+            at_expires=None,
+            email=service.build_placeholder_email(),
+            name="Browser profile",
+            remark=request.remark,
+            is_active=False,
+            credits=0,
+            current_project_id=None,
+            current_project_name=None,
+            image_enabled=request.image_enabled,
+            video_enabled=request.video_enabled,
+            image_concurrency=request.image_concurrency,
+            video_concurrency=request.video_concurrency,
+            captcha_proxy_url=request.captcha_proxy_url.strip() if request.captcha_proxy_url else None,
+            auth_mode="browser_profile",
+            browser_profile_status="not_created",
+            browser_profile_login_state="unknown",
+            browser_profile_cookie_status="unknown",
+            browser_profile_st_status="missing",
+            browser_profile_at_status="missing",
+        )
+        token_id = await db.add_token(account)
+        await db.update_token(
+            token_id,
+            email=service.build_placeholder_email(token_id),
+            browser_profile_path=str(service.profile_path_for_token(token_id)),
+        )
+        if concurrency_manager:
+            await concurrency_manager.reset_token(
+                token_id,
+                image_concurrency=request.image_concurrency,
+                video_concurrency=request.video_concurrency,
+            )
+        return {
+            "success": True,
+            "message": "Browser profile account created",
+            "token": await service.status(token_id),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Create browser profile account failed: {str(e)}")
+
+
+@router.get("/api/tokens/{token_id}/browser-profile/status")
+async def browser_profile_status(
+    token_id: int,
+    token: str = Depends(verify_admin_token),
+):
+    try:
+        service = await BrowserProfileService.get_instance(db=db, flow_client=token_manager.flow_client)
+        return {"success": True, "profile": await service.status(token_id)}
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/tokens/{token_id}/browser-profile/open")
+async def open_browser_profile(
+    token_id: int,
+    token: str = Depends(verify_admin_token),
+):
+    try:
+        service = await BrowserProfileService.get_instance(db=db, flow_client=token_manager.flow_client)
+        return {"success": True, "profile": await service.open_profile(token_id)}
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/tokens/{token_id}/browser-profile/close")
+async def close_browser_profile(
+    token_id: int,
+    token: str = Depends(verify_admin_token),
+):
+    try:
+        service = await BrowserProfileService.get_instance(db=db, flow_client=token_manager.flow_client)
+        return {"success": True, "profile": await service.close_profile(token_id)}
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/tokens/{token_id}/browser-profile/sync")
+async def sync_browser_profile(
+    token_id: int,
+    token: str = Depends(verify_admin_token),
+):
+    try:
+        service = await BrowserProfileService.get_instance(db=db, flow_client=token_manager.flow_client)
+        profile = await service.sync_profile(token_id, retain_runtime=False)
+        if profile.get("profile_status") == "connected" and profile.get("st_status") == "ok":
+            await token_manager.enable_token(token_id)
+        return {"success": True, "profile": profile}
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/tokens/{token_id}/browser-profile/refresh")
+async def refresh_browser_profile(
+    token_id: int,
+    token: str = Depends(verify_admin_token),
+):
+    try:
+        service = await BrowserProfileService.get_instance(db=db, flow_client=token_manager.flow_client)
+        profile = await service.refresh_profile(token_id, retain_runtime=False)
+        if profile.get("profile_status") == "connected" and profile.get("st_status") == "ok":
+            await token_manager.enable_token(token_id)
+        return {"success": True, "profile": profile}
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/tokens/{token_id}/browser-profile/reset")
+async def reset_browser_profile(
+    token_id: int,
+    token: str = Depends(verify_admin_token),
+):
+    try:
+        service = await BrowserProfileService.get_instance(db=db, flow_client=token_manager.flow_client)
+        return {"success": True, "profile": await service.reset_profile(token_id)}
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.put("/api/tokens/{token_id}")
+async def update_token_profile_aware(
+    token_id: int,
+    request: UpdateTokenRequest,
+    token: str = Depends(verify_admin_token)
+):
+    """Update token/account metadata; ST is optional for browser-profile accounts."""
+    try:
+        existing = await token_manager.get_token(token_id)
+        if not existing:
+            raise HTTPException(status_code=404, detail="Token not found")
+
+        from datetime import datetime
+        update_kwargs: Dict[str, Any] = {
+            "token_id": token_id,
+            "remark": request.remark,
+            "captcha_proxy_url": request.captcha_proxy_url.strip() if request.captcha_proxy_url is not None else None,
+            "image_enabled": request.image_enabled,
+            "video_enabled": request.video_enabled,
+            "image_concurrency": request.image_concurrency,
+            "video_concurrency": request.video_concurrency,
+            "protocol_mode": request.protocol_mode,
+            "google_cookies": request.google_cookies,
+            "login_account": request.login_account,
+            "login_password": request.login_password,
+            "proxy_url": request.proxy_url,
+            "auto_refresh_enabled": request.auto_refresh_enabled,
+            "refresh_interval_minutes": request.refresh_interval_minutes,
+        }
+
+        st_value = (request.st or "").strip()
+        if st_value:
+            result = await token_manager.flow_client.st_to_at(st_value)
+            expires = result.get("expires")
+            at_expires = None
+            if expires:
+                try:
+                    at_expires = datetime.fromisoformat(str(expires).replace("Z", "+00:00"))
+                except Exception:
+                    at_expires = None
+            update_kwargs.update({
+                "st": st_value,
+                "at": result["access_token"],
+                "at_expires": at_expires,
+            })
+
+        if _supports_kwarg(token_manager.update_token, "extension_route_key"):
+            update_kwargs["extension_route_key"] = (
+                request.extension_route_key.strip()
+                if request.extension_route_key is not None
+                else None
+            )
+        if _supports_kwarg(token_manager.update_token, "use_extension_for_generation"):
+            if request.use_extension_for_generation is not None:
+                update_kwargs["use_extension_for_generation"] = bool(request.use_extension_for_generation)
+
+        await token_manager.update_token(**update_kwargs)
+
+        if concurrency_manager:
+            updated_token = await token_manager.get_token(token_id)
+            if updated_token:
+                await concurrency_manager.reset_token(
+                    token_id,
+                    image_concurrency=updated_token.image_concurrency,
+                    video_concurrency=updated_token.video_concurrency,
+                )
+
+        return {"success": True, "message": "Token updated successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/api/tokens/{token_id}/legacy-update-disabled")
 async def update_token(
     token_id: int,
     request: UpdateTokenRequest,
@@ -1164,6 +1652,13 @@ async def update_token(
             "video_enabled": request.video_enabled,
             "image_concurrency": request.image_concurrency,
             "video_concurrency": request.video_concurrency,
+            "protocol_mode": request.protocol_mode,
+            "google_cookies": request.google_cookies,
+            "login_account": request.login_account,
+            "login_password": request.login_password,
+            "proxy_url": request.proxy_url,
+            "auto_refresh_enabled": request.auto_refresh_enabled,
+            "refresh_interval_minutes": request.refresh_interval_minutes,
         }
         if _supports_kwarg(token_manager.update_token, "extension_route_key"):
             update_kwargs["extension_route_key"] = (
@@ -1374,6 +1869,7 @@ async def list_token_projects(
     token: str = Depends(verify_admin_token)
 ):
     """List VideoFX projects stored for a token."""
+    raise HTTPException(status_code=410, detail="Project management has been removed")
     t = await token_manager.get_token(token_id)
     if not t:
         raise HTTPException(status_code=404, detail="Token not found")
@@ -1388,6 +1884,7 @@ async def create_token_project(
     token: str = Depends(verify_admin_token)
 ):
     """Create a new VideoFX project for an existing token."""
+    raise HTTPException(status_code=410, detail="Project management has been removed")
     t = await token_manager.get_token(token_id)
     if not t:
         raise HTTPException(status_code=404, detail="Token not found")
@@ -1510,6 +2007,13 @@ async def import_tokens(
                         "video_enabled": item.video_enabled,
                         "image_concurrency": item.image_concurrency,
                         "video_concurrency": item.video_concurrency,
+                        "protocol_mode": item.protocol_mode,
+                        "google_cookies": item.google_cookies,
+                        "login_account": item.login_account,
+                        "login_password": item.login_password,
+                        "proxy_url": item.proxy_url,
+                        "auto_refresh_enabled": item.auto_refresh_enabled,
+                        "refresh_interval_minutes": item.refresh_interval_minutes,
                     }
                     if _supports_kwarg(token_manager.update_token, "extension_route_key"):
                         import_update_kwargs["extension_route_key"] = (
@@ -1532,6 +2036,13 @@ async def import_tokens(
                     existing.video_enabled = item.video_enabled
                     existing.image_concurrency = item.image_concurrency
                     existing.video_concurrency = item.video_concurrency
+                    existing.protocol_mode = item.protocol_mode
+                    existing.google_cookies = item.google_cookies or ""
+                    existing.login_account = item.login_account or ""
+                    existing.login_password = item.login_password or ""
+                    existing.proxy_url = item.proxy_url or ""
+                    existing.auto_refresh_enabled = item.auto_refresh_enabled
+                    existing.refresh_interval_minutes = item.refresh_interval_minutes
                     updated += 1
                 else:
                     # 添加新Token
@@ -1542,6 +2053,13 @@ async def import_tokens(
                         "video_enabled": item.video_enabled,
                         "image_concurrency": item.image_concurrency,
                         "video_concurrency": item.video_concurrency,
+                        "protocol_mode": item.protocol_mode,
+                        "google_cookies": item.google_cookies,
+                        "login_account": item.login_account,
+                        "login_password": item.login_password,
+                        "proxy_url": item.proxy_url,
+                        "auto_refresh_enabled": item.auto_refresh_enabled,
+                        "refresh_interval_minutes": item.refresh_interval_minutes,
                     }
                     if _supports_kwarg(token_manager.add_token, "extension_route_key"):
                         import_add_kwargs["extension_route_key"] = (
@@ -1971,7 +2489,17 @@ def _mask_secret(value: str) -> str:
     return f"{text[:6]}...{text[-4:]}"
 
 
-def _geminigen_account_payload(account) -> Dict[str, Any]:
+def _geminigen_account_payload(account, generation_stats: Optional[Dict[str, int]] = None) -> Dict[str, Any]:
+    active_benefits = []
+    raw_benefits = getattr(account, "active_benefits_json", None)
+    if raw_benefits:
+        try:
+            parsed_benefits = json.loads(raw_benefits)
+            if isinstance(parsed_benefits, list):
+                active_benefits = parsed_benefits
+        except Exception:
+            active_benefits = []
+    generation_stats = generation_stats or {}
     return {
         "id": account.id,
         "label": account.label,
@@ -1990,11 +2518,51 @@ def _geminigen_account_payload(account) -> Dict[str, Any]:
         "video_concurrency": account.video_concurrency,
         "image_in_flight": account.image_in_flight,
         "video_in_flight": account.video_in_flight,
+        "image_generated_today": int(generation_stats.get("image_generated_today") or 0),
+        "image_generated_total": int(generation_stats.get("image_generated_total") or 0),
+        "video_generated_today": int(generation_stats.get("video_generated_today") or 0),
+        "video_generated_total": int(generation_stats.get("video_generated_total") or 0),
         "last_status": account.last_status or "",
         "last_error": account.last_error or "",
         "last_used_at": account.last_used_at.isoformat() if account.last_used_at else None,
+        "profile_user_id": account.profile_user_id,
+        "profile_uuid": account.profile_uuid,
+        "profile_email": account.profile_email,
+        "profile_full_name": account.profile_full_name,
+        "profile_is_active": account.profile_is_active if account.profile_is_active is not None else None,
+        "available_credit": account.available_credit,
+        "plan_credit": account.plan_credit,
+        "purchased_credit": account.purchased_credit,
+        "locked_credit": account.locked_credit,
+        "subscription_credit": account.subscription_credit,
+        "plan_name": account.plan_name,
+        "plan_expire_at": account.plan_expire_at.isoformat() if account.plan_expire_at else None,
+        "active_benefits": active_benefits,
+        "remaining_bulk_videos": account.remaining_bulk_videos,
+        "remaining_daily_videos": account.remaining_daily_videos,
+        "remaining_grok_max_daily_videos": account.remaining_grok_max_daily_videos,
+        "remaining_grok_max_daily_720p_videos": account.remaining_grok_max_daily_720p_videos,
+        "remaining_grok_max_daily_10s_videos": account.remaining_grok_max_daily_10s_videos,
+        "profile_synced_at": account.profile_synced_at.isoformat() if account.profile_synced_at else None,
+        "profile_sync_status": account.profile_sync_status or "",
+        "profile_sync_error": account.profile_sync_error or "",
         "created_at": account.created_at.isoformat() if account.created_at else None,
         "updated_at": account.updated_at.isoformat() if account.updated_at else None,
+    }
+
+
+def _geminigen_config_payload(cfg) -> Dict[str, Any]:
+    return {
+        "enabled": bool(cfg.enabled),
+        "video_enabled": bool(getattr(cfg, "video_enabled", True)),
+        "base_url": cfg.base_url,
+        "poll_interval_image_sec": cfg.poll_interval_image_sec,
+        "poll_interval_video_sec": cfg.poll_interval_video_sec,
+        "timeout_image_sec": cfg.timeout_image_sec,
+        "timeout_video_sec": cfg.timeout_video_sec,
+        "global_image_concurrency": cfg.global_image_concurrency,
+        "global_video_concurrency": cfg.global_video_concurrency,
+        "cache_outputs": bool(cfg.cache_outputs),
     }
 
 
@@ -2293,21 +2861,17 @@ async def sync_runway_models(token: str = Depends(verify_admin_token)):
 async def get_geminigen_admin_config(token: str = Depends(verify_admin_token)):
     cfg = await db.get_geminigen_config()
     accounts = await db.list_geminigen_accounts()
+    generation_stats = await db.get_geminigen_account_generation_stats([account.id for account in accounts if account.id])
+    if geminigen_service is not None:
+        geminigen_service.schedule_stale_account_profile_refresh(accounts)
     return {
         "success": True,
-        "config": {
-            "enabled": bool(cfg.enabled),
-            "base_url": cfg.base_url,
-            "poll_interval_image_sec": cfg.poll_interval_image_sec,
-            "poll_interval_video_sec": cfg.poll_interval_video_sec,
-            "timeout_image_sec": cfg.timeout_image_sec,
-            "timeout_video_sec": cfg.timeout_video_sec,
-            "global_image_concurrency": cfg.global_image_concurrency,
-            "global_video_concurrency": cfg.global_video_concurrency,
-            "cache_outputs": bool(cfg.cache_outputs),
-        },
-        "accounts": [_geminigen_account_payload(account) for account in accounts],
-        "models": GeminiGenService.model_catalog(),
+        "config": _geminigen_config_payload(cfg),
+        "accounts": [
+            _geminigen_account_payload(account, generation_stats.get(int(account.id or 0), {}))
+            for account in accounts
+        ],
+        "models": GeminiGenService.model_catalog(video_enabled=bool(getattr(cfg, "video_enabled", True))),
     }
 
 
@@ -2318,6 +2882,7 @@ async def update_geminigen_admin_config(
 ):
     cfg = await db.update_geminigen_config(
         enabled=request.enabled,
+        video_enabled=request.video_enabled,
         base_url=request.base_url,
         poll_interval_image_sec=request.poll_interval_image_sec,
         poll_interval_video_sec=request.poll_interval_video_sec,
@@ -2329,17 +2894,7 @@ async def update_geminigen_admin_config(
     )
     return {
         "success": True,
-        "config": {
-            "enabled": bool(cfg.enabled),
-            "base_url": cfg.base_url,
-            "poll_interval_image_sec": cfg.poll_interval_image_sec,
-            "poll_interval_video_sec": cfg.poll_interval_video_sec,
-            "timeout_image_sec": cfg.timeout_image_sec,
-            "timeout_video_sec": cfg.timeout_video_sec,
-            "global_image_concurrency": cfg.global_image_concurrency,
-            "global_video_concurrency": cfg.global_video_concurrency,
-            "cache_outputs": bool(cfg.cache_outputs),
-        },
+        "config": _geminigen_config_payload(cfg),
     }
 
 
@@ -2616,29 +3171,54 @@ async def get_system_info(token: str = Depends(verify_admin_token)):
 # ========== Additional Routes for Frontend Compatibility ==========
 
 @router.post("/api/login")
-async def login(request: LoginRequest):
+async def login(payload: LoginRequest, request: Request, response: Response):
     """Login endpoint (alias for /api/admin/login)"""
-    return await admin_login(request)
+    return await admin_login(payload, request, response)
 
 
 @router.post("/api/logout")
-async def logout(token: str = Depends(verify_admin_token)):
+async def logout(
+    request: Request,
+    response: Response,
+    token: str = Depends(verify_admin_token),
+):
     """Logout endpoint (alias for /api/admin/logout)"""
-    return await admin_logout(token)
+    return await admin_logout(request, response, token)
 
 
 @router.get("/health")
 async def health_check():
     """Public health check endpoint - no auth required"""
     try:
-        return await build_public_health_snapshot(db)
+        snapshot = await build_public_health_snapshot(db)
+        snapshot["database_ready"] = True
+        return snapshot
     except Exception:
-        return {"backend_running": True, "has_active_tokens": False}
+        return JSONResponse(
+            status_code=503,
+            content={
+                "backend_running": True,
+                "database_ready": False,
+                "has_active_tokens": False,
+                "error": "database_unavailable",
+            },
+        )
 
 
 @router.get("/api/stats")
-async def get_stats(token: str = Depends(verify_admin_token)):
+async def get_stats(
+    request: Request,
+    response: Response,
+    token: str = Depends(verify_admin_token),
+):
     """Get statistics for dashboard"""
+    if get_admin_token_from_cookie(request) != token:
+        _set_admin_session_cookie(
+            response,
+            request,
+            token,
+            remember_me=True,
+        )
     return await db.get_dashboard_stats()
 
 
@@ -2646,6 +3226,7 @@ async def get_stats(token: str = Depends(verify_admin_token)):
 async def get_logs(
     limit: int = 50,
     offset: int = 0,
+    search: Optional[str] = Query(None, description="Search request logs by job id or text fragment"),
     exclude_operations: Optional[str] = Query(
         None,
         description="Comma-separated operation values to exclude (e.g. generate_image,generate_video)",
@@ -2658,9 +3239,10 @@ async def get_logs(
     exclude_list = None
     if exclude_operations and exclude_operations.strip():
         exclude_list = [x.strip() for x in exclude_operations.split(",") if x.strip()]
-    total = await db.count_request_logs(exclude_operations=exclude_list)
+    search_text = (search or "").strip()
+    total = await db.count_request_logs(exclude_operations=exclude_list, search=search_text)
     logs = await db.get_logs(
-        limit=limit, offset=offset, include_payload=False, exclude_operations=exclude_list
+        limit=limit, offset=offset, include_payload=False, exclude_operations=exclude_list, search=search_text
     )
 
     result = []
@@ -2670,8 +3252,10 @@ async def get_logs(
             status_code = int(raw_status_code) if raw_status_code is not None else None
         except (TypeError, ValueError):
             status_code = None
+        captcha_ua = _extract_captcha_user_agent_metadata(log.get("response_body_excerpt"))
         result.append({
             "id": log.get("id"),
+            "job_id": log.get("job_id") or _extract_log_job_id(log.get("response_body_excerpt")),
             "token_id": log.get("token_id"),
             "token_email": log.get("token_email"),
             "token_username": log.get("token_username"),
@@ -2686,6 +3270,8 @@ async def get_logs(
             "created_at": log.get("created_at"),
             "updated_at": log.get("updated_at"),
             "error_summary": _extract_error_summary(log.get("response_body_excerpt")) if status_code is not None and status_code >= 400 else "",
+            "captcha_user_agent_set": captcha_ua["captcha_user_agent_set"],
+            "captcha_provider": captcha_ua["captcha_provider"],
         })
     return {"logs": result, "total": total, "limit": limit, "offset": offset}
 
@@ -2701,9 +3287,11 @@ async def get_log_detail(
         raise HTTPException(status_code=404, detail="日志不存在")
 
     error_summary = _extract_error_summary(log.get("response_body"))
+    captcha_ua = _extract_captcha_user_agent_metadata(log.get("response_body"))
 
     return {
         "id": log.get("id"),
+        "job_id": log.get("job_id") or _extract_log_job_id(log.get("response_body"), log.get("request_body")),
         "token_id": log.get("token_id"),
         "token_email": log.get("token_email"),
         "token_username": log.get("token_username"),
@@ -2718,6 +3306,8 @@ async def get_log_detail(
         "created_at": log.get("created_at"),
         "updated_at": log.get("updated_at"),
         "error_summary": error_summary,
+        "captcha_user_agent_set": captcha_ua["captcha_user_agent_set"],
+        "captcha_provider": captcha_ua["captcha_provider"],
         "request_body": log.get("request_body"),
         "response_body": log.get("response_body"),
     }
@@ -2781,11 +3371,13 @@ async def update_admin_config(
 
 @router.post("/api/admin/password")
 async def update_admin_password(
-    request: ChangePasswordRequest,
+    payload: ChangePasswordRequest,
+    request: Request,
+    response: Response,
     token: str = Depends(verify_admin_token)
 ):
     """Update admin password"""
-    return await change_password(request, token)
+    return await change_password(payload, request, response, token)
 
 
 @router.post("/api/admin/apikey")
@@ -2999,6 +3591,33 @@ async def get_managed_api_key_adobe_usage(
     }
 
 
+@router.get("/api/admin/managed-apikeys/{key_id}/generation-stats")
+async def get_managed_api_key_generation_stats(
+    key_id: int,
+    token: str = Depends(verify_admin_token),
+):
+    """Durable dashboard-style generation counters for one managed API key."""
+    detail = await db.get_api_key_detail(key_id)
+    if not detail:
+        raise HTTPException(status_code=404, detail="Managed API key not found")
+    native_image_models = [
+        model_id
+        for model_id, model_config in MODEL_CONFIG.items()
+        if model_config.get("type") == "image"
+    ]
+    native_video_models = [
+        model_id
+        for model_id, model_config in MODEL_CONFIG.items()
+        if model_config.get("type") == "video"
+    ]
+    stats = await db.get_api_key_generation_stats(
+        key_id,
+        native_image_models=native_image_models,
+        native_video_models=native_video_models,
+    )
+    return {"success": True, "key_id": key_id, **stats}
+
+
 @router.get("/api/admin/managed-apikeys/audit")
 async def list_managed_api_key_audit(
     key_id: Optional[int] = None,
@@ -3014,6 +3633,15 @@ async def list_managed_api_key_audit(
     return {"success": True, "logs": logs, "total": total, "limit": limit, "offset": offset}
 
 
+@router.delete("/api/admin/managed-apikeys/audit")
+async def clear_managed_api_key_audit(
+    token: str = Depends(verify_admin_token),
+):
+    """Clear all managed API key audit logs."""
+    deleted = await db.clear_api_key_audit_logs()
+    return {"success": True, "message": "Managed API key audit logs cleared", "deleted": deleted}
+
+
 @router.get("/api/admin/managed-apikeys/{key_id}/projects")
 async def list_managed_api_key_projects(
     key_id: int,
@@ -3022,6 +3650,7 @@ async def list_managed_api_key_projects(
     token: str = Depends(verify_admin_token),
 ):
     """Paginated VideoFX projects scoped to a managed API key + per-account current project cursors."""
+    raise HTTPException(status_code=410, detail="Project management has been removed")
     detail = await db.get_api_key_detail(key_id)
     if not detail:
         raise HTTPException(status_code=404, detail="Managed API key not found")
@@ -3101,6 +3730,7 @@ async def create_managed_api_key_project(
     token: str = Depends(verify_admin_token),
 ):
     """Create a VideoFX project for a token assigned to this managed key; tags projects.api_key_id."""
+    raise HTTPException(status_code=410, detail="Project management has been removed")
     detail = await db.get_api_key_detail(key_id)
     if not detail:
         raise HTTPException(status_code=404, detail="Managed API key not found")
@@ -3437,14 +4067,17 @@ async def update_generation_timeout(
 
 @router.get("/api/token-refresh/config")
 async def get_token_refresh_config(token: str = Depends(verify_admin_token)):
-    """Get scheduled AT auto refresh configuration."""
+    """Get scheduled AT and protocol ST refresh configuration."""
     captcha_config = await db.get_captcha_config()
+    protocol_config = await db.get_token_refresh_config()
     return {
         "success": True,
         "config": {
             "at_auto_refresh_enabled": bool(
                 getattr(captcha_config, "session_refresh_scheduler_enabled", False)
-            )
+            ),
+            "protocol_refresh_enabled": protocol_config.enabled,
+            "refresh_interval_minutes": protocol_config.refresh_interval_minutes,
         }
     }
 
@@ -3464,11 +4097,35 @@ async def update_token_refresh_enabled(
     }
 
 
+@router.post("/api/token-refresh/config")
+async def update_protocol_token_refresh_config(
+    request: TokenRefreshConfigRequest,
+    token: str = Depends(verify_admin_token),
+):
+    """Update global protocol ST refresh settings."""
+    updated = await db.update_token_refresh_config(
+        enabled=request.enabled,
+        refresh_interval_minutes=request.refresh_interval_minutes,
+    )
+    return {
+        "success": True,
+        "config": {
+            "protocol_refresh_enabled": updated.enabled,
+            "refresh_interval_minutes": updated.refresh_interval_minutes,
+        },
+    }
+
+
 async def _sync_runtime_cache_config():
     from . import routes
     if routes.generation_handler and routes.generation_handler.file_cache:
         file_cache = routes.generation_handler.file_cache
         file_cache.set_timeout(config.cache_timeout)
+        await file_cache.configure_backend(
+            config.cache_provider,
+            config.cache_delivery_mode,
+            validate=config.cache_provider == "digitalocean",
+        )
         await file_cache.refresh_cleanup_task()
 
 # ========== Cache Configuration Endpoints ==========
@@ -3478,6 +4135,9 @@ async def get_cache_config(token: str = Depends(verify_admin_token)):
     """Get cache configuration"""
     cache_config = await db.get_cache_config()
     cache_base_url = config.cache_base_url
+    from . import routes
+    file_cache = routes.generation_handler.file_cache if routes.generation_handler else None
+    do_env = file_cache.digitalocean_environment(cache_config.cache_delivery_mode) if file_cache else {}
 
     # Calculate effective base URL
     effective_base_url = cache_base_url if cache_base_url else f"http://127.0.0.1:8000"
@@ -3492,7 +4152,28 @@ async def get_cache_config(token: str = Depends(verify_admin_token)):
             "timeout": cache_config.cache_timeout,
             "timeout_days": timeout_days,
             "base_url": cache_base_url or "",
-            "effective_base_url": effective_base_url
+            "effective_base_url": effective_base_url if cache_config.cache_delivery_mode != "cdn" else do_env.get("cdn_base_url", ""),
+            "provider": cache_config.cache_provider,
+            "delivery_mode": cache_config.cache_delivery_mode,
+            "digitalocean": {
+                "configured": bool(do_env.get("configured")),
+                "healthy": bool(
+                    cache_config.cache_provider == "local"
+                    or (
+                        file_cache is not None
+                        and getattr(file_cache, "provider", "") == "digitalocean"
+                        and bool(do_env.get("configured"))
+                    )
+                ),
+                "missing": do_env.get("missing", []),
+                "region": do_env.get("region", ""),
+                "bucket": do_env.get("bucket", ""),
+                "prefix": do_env.get("prefix", "flow2api/cache"),
+                "cdn_base_url": do_env.get("cdn_base_url", ""),
+                "access_key_configured": bool(do_env.get("access_key_configured")),
+                "api_token_configured": bool(do_env.get("api_token_configured")),
+                "cdn_endpoint_configured": bool(do_env.get("cdn_endpoint_configured")),
+            },
         }
     }
 
@@ -3503,7 +4184,7 @@ async def get_cache_stats(token: str = Depends(verify_admin_token)):
     from . import routes
     if not routes.generation_handler or not routes.generation_handler.file_cache:
         raise HTTPException(status_code=503, detail="File cache not initialized")
-    stats = routes.generation_handler.file_cache.get_dir_stats()
+    stats = await routes.generation_handler.file_cache.get_stats()
     return {"success": True, **stats}
 
 
@@ -3513,28 +4194,45 @@ async def list_cache_files(token: str = Depends(verify_admin_token)):
     from . import routes
     if not routes.generation_handler or not routes.generation_handler.file_cache:
         raise HTTPException(status_code=503, detail="File cache not initialized")
-    files = routes.generation_handler.file_cache.list_gallery_files()
+    files = await routes.generation_handler.file_cache.list_files()
     return {"success": True, "files": files}
 
 
 @router.get("/api/cache/admin/file/{filename}")
-async def get_cache_file_admin_preview(filename: str, token: str = Depends(verify_admin_token)):
+async def get_cache_file_admin_preview(
+    filename: str,
+    request: Request,
+    token: str = Depends(verify_admin_token),
+):
     """Stream a cache file for the admin UI (Bearer auth). Plain <img src> cannot use managed-key /api/cache/blob/… URLs."""
     from . import routes
 
     if not routes.generation_handler or not routes.generation_handler.file_cache:
         raise HTTPException(status_code=503, detail="File cache not initialized")
     safe_name = Path(filename).name
-    cache_dir = routes.generation_handler.file_cache.cache_dir.resolve()
-    file_path = (cache_dir / safe_name).resolve()
     try:
-        file_path.relative_to(cache_dir)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid path")
-    if not file_path.is_file():
+        cached = await routes.generation_handler.file_cache.open_cached(
+            safe_name, request.headers.get("range")
+        )
+    except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Cache file not found")
-    media_type = mimetypes.guess_type(safe_name)[0] or "application/octet-stream"
-    return FileResponse(path=file_path, media_type=media_type, filename=safe_name)
+    except ValueError as exc:
+        raise HTTPException(status_code=416, detail=str(exc))
+    except Exception as exc:
+        if "404" in str(exc) or "Not Found" in str(exc):
+            raise HTTPException(status_code=404, detail="Cache file not found")
+        raise
+    headers = {"Accept-Ranges": "bytes", "Content-Length": str(cached.content_length)}
+    if cached.content_range:
+        headers["Content-Range"] = cached.content_range
+    if cached.etag:
+        headers["ETag"] = cached.etag
+    return StreamingResponse(
+        cached.body,
+        status_code=cached.status_code,
+        media_type=cached.content_type,
+        headers=headers,
+    )
 
 
 @router.post("/api/cache/clear")
@@ -3544,7 +4242,10 @@ async def clear_cache_files(token: str = Depends(verify_admin_token)):
     if not routes.generation_handler or not routes.generation_handler.file_cache:
         raise HTTPException(status_code=503, detail="File cache not initialized")
     try:
-        removed_count, removed_bytes = routes.generation_handler.file_cache.clear_all_files()
+        file_cache = routes.generation_handler.file_cache
+        removed_count, removed_bytes = await file_cache.backend.clear()
+        if file_cache.db is not None and hasattr(file_cache.db, "delete_all_cache_file_metadata"):
+            await file_cache.db.delete_all_cache_file_metadata()
         return {
             "success": True,
             "message": "Cache cleared",
@@ -3580,6 +4281,19 @@ async def update_cache_config_full(
     enabled = request.get("enabled")
     timeout = request.get("timeout")
     base_url = request.get("base_url")
+    provider = request.get("provider")
+    delivery_mode = request.get("delivery_mode")
+
+    if provider is not None:
+        provider = str(provider).strip().lower()
+        if provider not in {"local", "digitalocean"}:
+            raise HTTPException(status_code=400, detail="Cache provider must be local or digitalocean")
+    if delivery_mode is not None:
+        delivery_mode = str(delivery_mode).strip().lower()
+        if delivery_mode not in {"proxy", "cdn"}:
+            raise HTTPException(status_code=400, detail="Delivery mode must be proxy or cdn")
+    if provider == "local":
+        delivery_mode = "proxy"
 
     if timeout is not None:
         try:
@@ -3595,13 +4309,49 @@ async def update_cache_config_full(
                 detail=f"Cache timeout cannot exceed 7 days ({max_cache_seconds} seconds)",
             )
 
-    await db.update_cache_config(enabled=enabled, timeout=timeout, base_url=base_url)
+    from . import routes
+    file_cache = routes.generation_handler.file_cache if routes.generation_handler else None
+    current = await db.get_cache_config()
+    target_provider = provider or current.cache_provider
+    target_mode = delivery_mode or current.cache_delivery_mode
+    changed_backend = target_provider != current.cache_provider or target_mode != current.cache_delivery_mode
+    if file_cache and changed_backend:
+        stats = await file_cache.get_stats()
+        if int(stats.get("file_count", 0)) > 0:
+            raise HTTPException(status_code=409, detail="Clear the current cache before changing provider or delivery mode")
+    if file_cache and target_provider == "digitalocean":
+        try:
+            await file_cache.validate_backend(target_provider, target_mode)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"DigitalOcean validation failed: {exc}")
+
+    await db.update_cache_config(
+        enabled=enabled,
+        timeout=timeout,
+        base_url=base_url,
+        provider=provider,
+        delivery_mode=delivery_mode,
+    )
 
     # 🔥 Hot reload: sync database config to memory
     await db.reload_config_to_memory()
     await _sync_runtime_cache_config()
 
     return {"success": True, "message": "缓存配置更新成功"}
+
+
+@router.post("/api/cache/provider/test")
+async def test_cache_provider(request: dict, token: str = Depends(verify_admin_token)):
+    from . import routes
+    if not routes.generation_handler or not routes.generation_handler.file_cache:
+        raise HTTPException(status_code=503, detail="File cache not initialized")
+    provider = str(request.get("provider") or "digitalocean").strip().lower()
+    delivery_mode = str(request.get("delivery_mode") or "proxy").strip().lower()
+    try:
+        status = await routes.generation_handler.file_cache.validate_backend(provider, delivery_mode)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Provider validation failed: {exc}")
+    return {"success": True, "status": status}
 
 
 @router.post("/api/cache/base-url")
@@ -3634,6 +4384,7 @@ async def update_captcha_config(
     yescaptcha_task_type = normalize_yescaptcha_task_type(request.get("yescaptcha_task_type"))
     capmonster_api_key = request.get("capmonster_api_key")
     capmonster_base_url = request.get("capmonster_base_url")
+    capmonster_min_score = request.get("capmonster_min_score")
     ezcaptcha_api_key = request.get("ezcaptcha_api_key")
     ezcaptcha_base_url = request.get("ezcaptcha_base_url")
     capsolver_api_key = request.get("capsolver_api_key")
@@ -3711,6 +4462,13 @@ async def update_captcha_config(
         browser_count = max(1, min(20, int(browser_count or 1)))
     except Exception:
         return {"success": False, "message": "browser_count must be an integer between 1 and 20"}
+    if capmonster_min_score is not None:
+        try:
+            capmonster_min_score = float(capmonster_min_score)
+        except (TypeError, ValueError):
+            return {"success": False, "message": "CapMonster minimum score must be a number between 0.1 and 0.9"}
+        if capmonster_min_score < 0.1 or capmonster_min_score > 0.9:
+            return {"success": False, "message": "CapMonster minimum score must be between 0.1 and 0.9"}
     try:
         browser_personal_fresh_restart_every_n_solves = max(
             0,
@@ -3756,6 +4514,7 @@ async def update_captcha_config(
         yescaptcha_task_type=yescaptcha_task_type,
         capmonster_api_key=capmonster_api_key,
         capmonster_base_url=capmonster_base_url,
+        capmonster_min_score=capmonster_min_score,
         ezcaptcha_api_key=ezcaptcha_api_key,
         ezcaptcha_base_url=ezcaptcha_base_url,
         capsolver_api_key=capsolver_api_key,
@@ -3804,24 +4563,29 @@ async def update_captcha_config(
     await db.reload_config_to_memory()
 
     # 如果使用 browser 打码，热重载浏览器数量配置
-    if captcha_method == "browser":
-        try:
-            from ..services.browser_captcha import BrowserCaptchaService
-            service = await BrowserCaptchaService.get_instance(db)
-            await service.reload_browser_count()
-        except Exception:
-            pass
-
-    # 如果使用 personal 打码，热重载配置
-    if captcha_method == "personal":
-        try:
-            from ..services.browser_captcha_personal import BrowserCaptchaService
-            service = await BrowserCaptchaService.get_instance(db)
-            await service.reload_config()
-        except Exception as e:
-            print(f"[Admin] Personal 配置热更新失败: {e}")
+    if captcha_method in {"browser", "personal"}:
+        runtime_prepare_started = _schedule_captcha_runtime_prepare(captcha_method)
+        return {
+            "success": True,
+            "message": "Captcha configuration updated successfully",
+            "runtime_prepare_started": runtime_prepare_started,
+            "runtime_status_method": captcha_method,
+        }
 
     return {"success": True, "message": "验证码配置更新成功"}
+
+
+@router.get("/api/captcha/runtime-status")
+async def get_captcha_runtime_status(
+    method: str = "browser",
+    token: str = Depends(verify_admin_token),
+):
+    runtime_method = _normalize_runtime_method(method)
+    task = captcha_runtime_prepare_tasks.get(runtime_method)
+    status = get_runtime_status(runtime_method)
+    status["method"] = runtime_method
+    status["task_running"] = bool(task and not task.done())
+    return status
 
 
 @router.get("/api/captcha/config")
@@ -3835,6 +4599,7 @@ async def get_captcha_config(token: str = Depends(verify_admin_token)):
         "yescaptcha_task_type": captcha_config.yescaptcha_task_type,
         "capmonster_api_key": captcha_config.capmonster_api_key,
         "capmonster_base_url": captcha_config.capmonster_base_url,
+        "capmonster_min_score": captcha_config.capmonster_min_score,
         "ezcaptcha_api_key": captcha_config.ezcaptcha_api_key,
         "ezcaptcha_base_url": captcha_config.ezcaptcha_base_url,
         "capsolver_api_key": captcha_config.capsolver_api_key,
@@ -4027,6 +4792,16 @@ async def test_captcha_score(
 
 # ========== Plugin Configuration Endpoints ==========
 
+async def _verify_plugin_connection_token(authorization: Optional[str]) -> None:
+    plugin_config = await db.get_plugin_config()
+    provided_token = authorization[7:] if authorization and authorization.startswith("Bearer ") else authorization
+    if not plugin_config.connection_token or not secrets.compare_digest(
+        str(provided_token or ""),
+        str(plugin_config.connection_token),
+    ):
+        raise HTTPException(status_code=401, detail="Invalid connection token")
+
+
 @router.get("/api/plugin/config")
 async def get_plugin_config(request: Request, token: str = Depends(verify_admin_token)):
     """Get plugin configuration"""
@@ -4090,20 +4865,8 @@ async def update_plugin_config(
 @router.post("/api/plugin/update-token")
 async def plugin_update_token(request: dict, authorization: Optional[str] = Header(None)):
     """Receive token update from Chrome extension (no admin auth required, uses connection_token)"""
-    # Verify connection token
+    await _verify_plugin_connection_token(authorization)
     plugin_config = await db.get_plugin_config()
-
-    # Extract token from Authorization header
-    provided_token = None
-    if authorization:
-        if authorization.startswith("Bearer "):
-            provided_token = authorization[7:]
-        else:
-            provided_token = authorization
-
-    # Check if token matches
-    if not plugin_config.connection_token or provided_token != plugin_config.connection_token:
-        raise HTTPException(status_code=401, detail="Invalid connection token")
 
     # Extract session token from request
     session_token = request.get("session_token")
@@ -4145,7 +4908,14 @@ async def plugin_update_token(request: dict, authorization: Optional[str] = Head
                 token_id=existing_token.id,
                 st=session_token,
                 at=at,
-                at_expires=at_expires
+                at_expires=at_expires,
+                protocol_mode=request.get("protocol_mode"),
+                google_cookies=request.get("google_cookies"),
+                login_account=request.get("login_account"),
+                login_password=request.get("login_password"),
+                proxy_url=request.get("proxy_url"),
+                auto_refresh_enabled=request.get("auto_refresh_enabled"),
+                refresh_interval_minutes=request.get("refresh_interval_minutes"),
             )
 
             # Check if auto-enable is enabled and token is disabled
@@ -4170,7 +4940,14 @@ async def plugin_update_token(request: dict, authorization: Optional[str] = Head
         try:
             new_token = await token_manager.add_token(
                 st=session_token,
-                remark="Added by Chrome Extension"
+                remark="Added by Chrome Extension",
+                protocol_mode=request.get("protocol_mode", "session"),
+                google_cookies=request.get("google_cookies"),
+                login_account=request.get("login_account"),
+                login_password=request.get("login_password"),
+                proxy_url=request.get("proxy_url"),
+                auto_refresh_enabled=request.get("auto_refresh_enabled", True),
+                refresh_interval_minutes=request.get("refresh_interval_minutes", 120),
             )
 
             return {
@@ -4181,3 +4958,43 @@ async def plugin_update_token(request: dict, authorization: Optional[str] = Head
             }
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Failed to add token: {str(e)}")
+
+
+@router.post("/api/plugin/check-tokens")
+async def plugin_check_tokens(
+    request: Optional[dict] = None,
+    authorization: Optional[str] = Header(None),
+):
+    """Return token status for external syncers using the plugin connection token."""
+    await _verify_plugin_connection_token(authorization)
+
+    requested_emails = (request or {}).get("emails") if isinstance(request, dict) else None
+    email_filter = {
+        str(email or "").strip().lower()
+        for email in (requested_emails if isinstance(requested_emails, list) else [])
+        if str(email or "").strip()
+    }
+    result = []
+    for row in await db.get_all_tokens_with_stats():
+        email = str(row.get("email") or "").strip()
+        if email_filter and email.lower() not in email_filter:
+            continue
+        try:
+            token_obj = Token(**row)
+        except Exception:
+            token_obj = None
+        result.append({
+            "id": row.get("id"),
+            "email": email,
+            "is_active": bool(row.get("is_active")),
+            "needs_refresh": token_manager.needs_at_refresh(token_obj) if token_obj else True,
+            "at_expires": to_iso(row.get("at_expires")) if row.get("at_expires") else None,
+            "last_used_at": to_iso(row.get("last_used_at")) if row.get("last_used_at") else None,
+            "protocol_mode": row.get("protocol_mode") or "session",
+            "auto_refresh_enabled": bool(row.get("auto_refresh_enabled", True)),
+            "refresh_interval_minutes": row.get("refresh_interval_minutes") or 120,
+            "last_st_refresh_at": to_iso(row.get("last_st_refresh_at")) if row.get("last_st_refresh_at") else None,
+            "last_st_refresh_result": row.get("last_st_refresh_result") or "",
+            "credits": row.get("credits", 0),
+        })
+    return {"success": True, "tokens": result}

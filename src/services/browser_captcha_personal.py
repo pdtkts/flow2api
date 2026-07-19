@@ -39,6 +39,7 @@ from .browser_cookie_utils import (
 
 # flow2api 缺少的配置常量和函数，内联定义
 TOKEN_POOL_SIZE_MAX = 500
+PERSONAL_POOL_MAX_TOTAL_RESIDENT_TABS = 50
 
 def resolve_effective_browser_count(value) -> int:
     try:
@@ -65,6 +66,32 @@ PERSONAL_GOOGLE_FAMILY_COOKIE_MIRROR_URLS = (
     "https://www.google.com/",
     "https://www.recaptcha.net/",
 )
+_recaptcha_session_cookies: Optional[Dict[str, str]] = None
+_recaptcha_session_cookies_fetched_at: float = 0.0
+_RECAPTCHA_SESSION_COOKIES_TTL = 3600.0
+
+
+def get_cached_session_cookies() -> Optional[Dict[str, str]]:
+    if not _recaptcha_session_cookies:
+        return None
+    if time.time() - _recaptcha_session_cookies_fetched_at > _RECAPTCHA_SESSION_COOKIES_TTL:
+        return None
+    return dict(_recaptcha_session_cookies)
+
+
+def set_cached_session_cookies(cookies: Dict[str, str]) -> None:
+    global _recaptcha_session_cookies, _recaptcha_session_cookies_fetched_at
+    _recaptcha_session_cookies = dict(cookies)
+    _recaptcha_session_cookies_fetched_at = time.time()
+
+
+def clear_cached_session_cookies() -> None:
+    """Clear runtime-level Google session cookies after browser replacement."""
+    global _recaptcha_session_cookies, _recaptcha_session_cookies_fetched_at
+    _recaptcha_session_cookies = None
+    _recaptcha_session_cookies_fetched_at = 0.0
+
+
 PERSONAL_HEADLESS_VISIBLE_SPOOF_SOURCE = r"""
 (() => {
     const marker = "__personalHeadlessVisibleSpoofInstalled__";
@@ -690,6 +717,8 @@ _RUNTIME_ERROR_KEYWORDS = (
     "has been closed",
     "browser has been closed",
     "target closed",
+    "has no attribute \"closed\"",
+    "has no attribute 'closed'",
     "connection closed",
     "connection lost",
     "connection refused",
@@ -700,6 +729,9 @@ _RUNTIME_ERROR_KEYWORDS = (
     "no session with given id",
     "cannot find context with specified id",
     "websocket is not open",
+    "websocket unavailable",
+    "'nonetype' object has no attribute 'send'",
+    '"nonetype" object has no attribute "send"',
     "no close frame received or sent",
     "cannot call write to closing transport",
     "cannot write to closing transport",
@@ -803,9 +835,36 @@ def _finalize_nodriver_send_task(connection, transaction, tx_id: int, task: asyn
             )
 
 
+def _is_nodriver_connection_closed(connection_instance) -> bool:
+    """Handle connection-state differences across nodriver versions."""
+    try:
+        return bool(getattr(connection_instance, "closed"))
+    except AttributeError:
+        pass
+    except Exception:
+        return True
+
+    websocket = getattr(connection_instance, "websocket", None)
+    if websocket is None:
+        return True
+
+    try:
+        return bool(getattr(websocket, "close_code", None))
+    except Exception:
+        return True
+
+
 def _patch_nodriver_connection_instance(connection_instance):
     """在连接实例级别收口 websocket.send 的后台异常。"""
     if not connection_instance or getattr(connection_instance, "_flow2api_send_patched", False):
+        return
+    if (
+        not callable(getattr(connection_instance, "send", None))
+        or not callable(getattr(connection_instance, "connect", None))
+        or not callable(getattr(connection_instance, "_register_handlers", None))
+        or not hasattr(connection_instance, "mapper")
+        or not hasattr(connection_instance, "__count__")
+    ):
         return
 
     try:
@@ -814,18 +873,61 @@ def _patch_nodriver_connection_instance(connection_instance):
         debug_logger.log_warning(f"[BrowserCaptcha] 加载 nodriver.connection 失败，跳过连接补丁: {e}")
         return
 
+    class _CompatTransaction:
+        """Fallback for nodriver releases whose Transaction signature changed."""
+
+        def __init__(self, cdp_generator, tx_id: int):
+            method, *params = next(cdp_generator).values()
+            params = params.pop() if params else {}
+            self.id = tx_id
+            self.message = json.dumps({"method": method, "params": params, "id": tx_id})
+            self._cdp_generator = cdp_generator
+            self._future = asyncio.get_running_loop().create_future()
+
+        def __call__(self, **response):
+            if self._future.done():
+                return
+            if "error" in response:
+                self._future.set_exception(RuntimeError(str(response["error"])))
+                return
+            try:
+                self._cdp_generator.send(response.get("result"))
+            except StopIteration as exc:
+                self._future.set_result(exc.value)
+            except Exception as exc:
+                self._future.set_exception(exc)
+
+        def __await__(self):
+            return self._future.__await__()
+
+        def done(self) -> bool:
+            return self._future.done()
+
+        def cancel(self):
+            self._future.cancel()
+
     async def patched_send(self, cdp_obj, _is_update=False):
-        if self.closed:
+        if _is_nodriver_connection_closed(self):
             await self.connect()
         if not _is_update:
             await self._register_handlers()
 
-        transaction = nodriver_connection_module.Transaction(cdp_obj)
         tx_id = next(self.__count__)
-        transaction.id = tx_id
+        try:
+            transaction = nodriver_connection_module.Transaction(cdp_obj)
+            transaction.id = tx_id
+        except Exception:
+            transaction = _CompatTransaction(cdp_obj, tx_id)
         self.mapper[tx_id] = transaction
 
-        send_task = asyncio.create_task(self.websocket.send(transaction.message))
+        websocket = getattr(self, "websocket", None)
+        if websocket is None:
+            self.mapper.pop(tx_id, None)
+            if not transaction.done():
+                transaction.cancel()
+            raise ConnectionError("nodriver websocket unavailable after connect")
+
+        send_task = asyncio.create_task(websocket.send(transaction.message))
         send_task.add_done_callback(
             lambda task, connection=self, tx=transaction, current_tx_id=tx_id:
             _finalize_nodriver_send_task(connection, tx, current_tx_id, task)
@@ -1304,6 +1406,8 @@ class ResidentTabInfo:
         self.use_count = 0  # 使用次数
         self.fingerprint: Optional[Dict[str, Any]] = None
         self.cookie_signature: Optional[str] = None
+        self.session_cookies: Optional[Dict[str, str]] = None
+        self.session_cookies_fetched_at: float = 0.0
         self.solve_lock = asyncio.Lock()  # 串行化同一标签页上的执行，降低并发冲突
         self.pending_assignment_count = 0  # 选中但尚未真正进入 solve_lock 的请求数
 
@@ -1317,6 +1421,7 @@ class TokenPoolLease:
     token_id: Optional[int]
     slot_id: Optional[str]
     worker_index: Optional[int]
+    solve_bundle: Optional[Dict[str, Any]]
     created_at: float
     expires_at: float
 
@@ -1362,7 +1467,7 @@ class BrowserCaptchaService:
         max_resident_tabs_override: Optional[int] = None,
     ):
         """初始化服务"""
-        self.headless = bool(getattr(config, "personal_headless", False))  # 是否无头由配置控制
+        self.headless = bool(getattr(config, "personal_headless", False))
         self.browser = None
         self._initialized = False
         self.website_key = "6LdsFiUsAAAAAIjVDZcuLhaHiDn5nnHVXVRQGeMV"
@@ -2543,7 +2648,7 @@ class BrowserCaptchaService:
             from nodriver import cdp
 
             await self._run_with_timeout(
-                self.browser.connection.send(cdp.browser.get_version()),
+                self.browser.send(cdp.browser.get_version()),
                 timeout_seconds=3.0,
                 label="browser.health_probe",
             )
@@ -2682,7 +2787,7 @@ class BrowserCaptchaService:
             from nodriver import cdp
 
             version_info = await self._run_with_timeout(
-                self.browser.connection.send(cdp.browser.get_version()),
+                self.browser.send(cdp.browser.get_version()),
                 timeout_seconds=5.0,
                 label="browser.get_version:runtime_profile",
             )
@@ -2705,6 +2810,10 @@ class BrowserCaptchaService:
 
         normalized_user_agent = str(user_agent or "").strip() or None
         normalized_product = str(product or "").strip() or None
+        if normalized_user_agent:
+            normalized_user_agent = normalized_user_agent.replace("HeadlessChrome/", "Chrome/")
+        if normalized_product:
+            normalized_product = normalized_product.replace("HeadlessChrome/", "Chrome/")
         return normalized_user_agent, normalized_product
 
     def _get_runtime_surface_profile(self) -> Dict[str, Any]:
@@ -2867,7 +2976,7 @@ class BrowserCaptchaService:
                 for permission_name, permission_setting in configured_permissions:
                     try:
                         await self._run_with_timeout(
-                            self.browser.connection.send(
+                            self.browser.send(
                                 cdp.browser.set_permission(
                                     permission=cdp.browser.PermissionDescriptor(name=permission_name),
                                     setting=permission_setting,
@@ -2885,7 +2994,7 @@ class BrowserCaptchaService:
                         ):
                             raise
                         await self._run_with_timeout(
-                            self.browser.connection.send(
+                            self.browser.send(
                                 cdp.browser.set_permission(
                                     permission=cdp.browser.PermissionDescriptor(name=permission_name),
                                     setting=permission_setting,
@@ -3133,6 +3242,32 @@ class BrowserCaptchaService:
             {"width": 1920, "height": 1080, "hardwareConcurrency": 12, "deviceMemory": 8},
         )
         base_profile = dict(desktop_profiles[digest[0] % len(desktop_profiles)])
+        gpu_profiles = (
+            {
+                "vendor": "Google Inc. (Intel)",
+                "renderer": "ANGLE (Intel, Intel(R) UHD Graphics 620 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+                "unmaskedVendor": "Intel Inc.",
+                "unmaskedRenderer": "Intel(R) UHD Graphics 620",
+            },
+            {
+                "vendor": "Google Inc. (NVIDIA)",
+                "renderer": "ANGLE (NVIDIA, NVIDIA GeForce GTX 1650 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+                "unmaskedVendor": "NVIDIA Corporation",
+                "unmaskedRenderer": "NVIDIA GeForce GTX 1650",
+            },
+            {
+                "vendor": "Google Inc. (AMD)",
+                "renderer": "ANGLE (AMD, AMD Radeon(TM) Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)",
+                "unmaskedVendor": "ATI Technologies Inc.",
+                "unmaskedRenderer": "AMD Radeon(TM) Graphics",
+            },
+        )
+        gpu_profile = dict(gpu_profiles[digest[11] % len(gpu_profiles)])
+        gpu_arch = "turing"
+        if "Intel" in str(gpu_profile.get("unmaskedVendor") or gpu_profile.get("vendor") or ""):
+            gpu_arch = "gen-9"
+        elif "ATI" in str(gpu_profile.get("unmaskedVendor") or "") or "AMD" in str(gpu_profile.get("vendor") or ""):
+            gpu_arch = "rdna"
         width = int(base_profile["width"])
         height = int(base_profile["height"])
         taskbar_height = 40 + int(digest[1] % 32)
@@ -3178,6 +3313,10 @@ class BrowserCaptchaService:
                 "hardwareConcurrency": int(base_profile["hardwareConcurrency"]),
                 "deviceMemory": int(base_profile["deviceMemory"]),
                 "maxTouchPoints": 0,
+                "cookieEnabled": True,
+                "onLine": True,
+                "pdfViewerEnabled": True,
+                "doNotTrack": "1",
                 "webdriver": False,
             },
             "screen": {
@@ -3194,6 +3333,124 @@ class BrowserCaptchaService:
                 "outerWidth": outer_width,
                 "outerHeight": outer_height,
                 "devicePixelRatio": device_scale_factor,
+                "visualViewport": {
+                    "width": viewport_width,
+                    "height": viewport_height,
+                    "scale": device_scale_factor,
+                    "offsetLeft": 0,
+                    "offsetTop": 0,
+                    "pageLeft": 0,
+                    "pageTop": 0,
+                },
+            },
+            "network": {
+                "type": "wifi",
+                "effectiveType": "4g",
+                "rtt": 45 + int(digest[12] % 75),
+                "downlink": round(6.0 + (int(digest[13] % 95) / 10.0), 1),
+                "saveData": False,
+            },
+            "performance": {
+                "navigationType": "navigate",
+                "redirectCount": 0,
+                "paintStart": 90 + int(digest[14] % 70),
+                "paintEnd": 150 + int(digest[15] % 95),
+            },
+            "graphics": {
+                **gpu_profile,
+                "version": "WebGL 1.0 (OpenGL ES 2.0 Chromium)",
+                "shadingLanguageVersion": "WebGL GLSL ES 1.0 (OpenGL ES GLSL ES 1.0 Chromium)",
+                "maxTextureSize": 16384,
+                "maxRenderbufferSize": 16384,
+                "maxCombinedTextureImageUnits": 32,
+                "maxCubeMapTextureSize": 16384,
+                "maxTextureImageUnits": 16,
+                "maxVertexTextureImageUnits": 16,
+                "maxVertexAttribs": 16,
+                "maxVertexUniformVectors": 4096,
+                "maxFragmentUniformVectors": 1024,
+                "aliasedLineWidthRange": [1, 1],
+                "aliasedPointSizeRange": [1, 1024],
+                "supportedExtensions": [
+                    "ANGLE_instanced_arrays",
+                    "EXT_blend_minmax",
+                    "EXT_color_buffer_half_float",
+                    "EXT_float_blend",
+                    "EXT_frag_depth",
+                    "EXT_shader_texture_lod",
+                    "EXT_sRGB",
+                    "OES_element_index_uint",
+                    "OES_fbo_render_mipmap",
+                    "OES_standard_derivatives",
+                    "OES_texture_float",
+                    "OES_texture_float_linear",
+                    "OES_texture_half_float",
+                    "OES_texture_half_float_linear",
+                    "OES_vertex_array_object",
+                    "WEBGL_color_buffer_float",
+                    "WEBGL_compressed_texture_s3tc",
+                    "WEBGL_debug_renderer_info",
+                    "WEBGL_debug_shaders",
+                    "WEBGL_depth_texture",
+                    "WEBGL_draw_buffers",
+                    "WEBGL_lose_context",
+                ],
+                "shaderPrecision": {
+                    "highFloat": {"rangeMin": 127, "rangeMax": 127, "precision": 23},
+                    "mediumFloat": {"rangeMin": 127, "rangeMax": 127, "precision": 23},
+                    "lowFloat": {"rangeMin": 127, "rangeMax": 127, "precision": 23},
+                    "highInt": {"rangeMin": 31, "rangeMax": 30, "precision": 0},
+                    "mediumInt": {"rangeMin": 31, "rangeMax": 30, "precision": 0},
+                    "lowInt": {"rangeMin": 31, "rangeMax": 30, "precision": 0},
+                },
+            },
+            "webgpu": {
+                "vendor": str(gpu_profile.get("unmaskedVendor") or gpu_profile.get("vendor") or ""),
+                "architecture": gpu_arch,
+                "device": str(gpu_profile.get("unmaskedRenderer") or gpu_profile.get("renderer") or ""),
+                "description": str(gpu_profile.get("renderer") or ""),
+                "isFallbackAdapter": False,
+                "preferredCanvasFormat": "bgra8unorm",
+                "features": [
+                    "depth-clip-control",
+                    "texture-compression-bc",
+                    "timestamp-query",
+                ],
+                "limits": {
+                    "maxTextureDimension1D": 8192,
+                    "maxTextureDimension2D": 8192,
+                    "maxTextureDimension3D": 2048,
+                    "maxTextureArrayLayers": 256,
+                    "maxBindGroups": 4,
+                    "maxBindingsPerBindGroup": 1000,
+                    "maxBufferSize": 268435456,
+                    "maxStorageBufferBindingSize": 134217728,
+                    "maxUniformBufferBindingSize": 65536,
+                    "maxVertexBuffers": 8,
+                    "maxVertexAttributes": 16,
+                    "maxVertexBufferArrayStride": 2048,
+                    "maxInterStageShaderComponents": 60,
+                    "maxComputeWorkgroupStorageSize": 16384,
+                    "maxComputeInvocationsPerWorkgroup": 256,
+                    "maxComputeWorkgroupSizeX": 256,
+                    "maxComputeWorkgroupSizeY": 256,
+                    "maxComputeWorkgroupSizeZ": 64,
+                    "maxComputeWorkgroupsPerDimension": 65535,
+                },
+            },
+            "font": {
+                "families": [
+                    "Arial",
+                    "Calibri",
+                    "Cambria",
+                    "Consolas",
+                    "Courier New",
+                    "Georgia",
+                    "Microsoft YaHei",
+                    "Segoe UI",
+                    "Times New Roman",
+                    "Verdana",
+                ],
             },
             "userAgentMetadata": {
                 "platform": str(os_profile["ua_ch_platform"]),
@@ -3219,6 +3476,36 @@ class BrowserCaptchaService:
                 "Accept-Language": str(locale_profile["acceptLanguage"]),
                 "DNT": "1",
             },
+            "mediaQueries": {
+                "prefersColorScheme": "light",
+                "prefersReducedMotion": "no-preference",
+                "prefersContrast": "no-preference",
+                "forcedColors": "none",
+                "hover": "hover",
+                "anyHover": "hover",
+                "pointer": "fine",
+                "anyPointer": "fine",
+                "orientation": "landscape" if viewport_width >= viewport_height else "portrait",
+            },
+            "storage": {
+                "quota": 120000000000 + int(digest[16] % 20) * 1000000000,
+                "usage": 8000000 + int(digest[17] % 20) * 250000,
+                "usageDetails": {
+                    "indexedDB": 1000000 + int(digest[18] % 8) * 100000,
+                    "caches": 1000000 + int(digest[19] % 8) * 100000,
+                    "serviceWorkerRegistrations": 0,
+                },
+                "persisted": False,
+            },
+            "behavior": {
+                "documentHidden": False,
+                "visibilityState": "visible",
+                "hasFocus": True,
+                "userActivation": {
+                    "hasBeenActive": True,
+                    "isActive": False,
+                },
+            },
             "mediaDevices": {
                 "devices": [
                     {
@@ -3241,6 +3528,40 @@ class BrowserCaptchaService:
                     },
                 ],
             },
+            "mimeTypes": [
+                {
+                    "type": "application/pdf",
+                    "suffixes": "pdf",
+                    "description": "Portable Document Format",
+                    "pluginName": "PDF Viewer",
+                },
+                {
+                    "type": "text/pdf",
+                    "suffixes": "pdf",
+                    "description": "Portable Document Format",
+                    "pluginName": "PDF Viewer",
+                },
+            ],
+            "plugins": [
+                {
+                    "name": "PDF Viewer",
+                    "filename": "internal-pdf-viewer",
+                    "description": "Portable Document Format",
+                    "mimeTypes": ["application/pdf", "text/pdf"],
+                },
+                {
+                    "name": "Chrome PDF Viewer",
+                    "filename": "internal-pdf-viewer",
+                    "description": "Portable Document Format",
+                    "mimeTypes": ["application/pdf", "text/pdf"],
+                },
+                {
+                    "name": "Chromium PDF Viewer",
+                    "filename": "internal-pdf-viewer",
+                    "description": "Portable Document Format",
+                    "mimeTypes": ["application/pdf", "text/pdf"],
+                },
+            ],
             "webrtc": {
                 "candidateMaskIp": "0.0.0.0",
             },
@@ -3264,9 +3585,14 @@ class BrowserCaptchaService:
         def signed_unit(index: int, scale: float) -> float:
             return round((((digest[index] / 255.0) * 2.0) - 1.0) * scale, 8)
 
+        runtime_profile = dict(self._runtime_surface_profile or {})
+        window_profile = runtime_profile.get("window") or {}
+        viewport_width = int(window_profile.get("innerWidth", 1280) or 1280)
+        viewport_height = int(window_profile.get("innerHeight", 720) or 720)
+
         return {
             "seed": hashlib.md5(seed_material).hexdigest()[:16],
-            "runtime": dict(self._runtime_surface_profile or {}),
+            "runtime": runtime_profile,
             "canvas": {
                 "rgba": [
                     non_zero_byte_delta(0),
@@ -3287,6 +3613,18 @@ class BrowserCaptchaService:
                 "byteDelta": non_zero_byte_delta(9),
                 "stride": 17 + (digest[10] % 13),
             },
+            "capability": {
+                "bluetoothAvailable": bool(digest[11] < 51),
+                "usbDeviceCount": digest[12] % 4,
+                "serialPortCount": digest[13] % 3,
+                "hidDeviceCount": digest[14] % 4,
+                "mediaCodecSmooth": bool(digest[15] < 230),
+                "speechVoiceCount": 2 + (digest[16] % 4),
+                "screenX": (digest[17] % 17) - 8,
+                "screenY": (digest[18] % 17) - 8,
+                "orientationType": "landscape-primary" if viewport_width >= viewport_height else "portrait-primary",
+                "orientationAngle": 0 if viewport_width >= viewport_height else 90,
+            },
         }
 
     def _build_tab_fingerprint_spoof_source(self, tab) -> str:
@@ -3306,6 +3644,7 @@ class BrowserCaptchaService:
     const config = __CONFIG_JSON__;
     window[marker] = config.seed;
     const runtimeProfile = config.runtime || {};
+    const capability = config.capability || {};
 
     const setValue = (target, key, value) => {
         try {
@@ -3360,6 +3699,76 @@ class BrowserCaptchaService:
         }
     };
 
+    const stableNow = () => {
+        try {
+            return Math.max(0, Number(performance && performance.now && performance.now()) || 0);
+        } catch (e) {
+            return Date.now() % 100000;
+        }
+    };
+
+    const makeEventTargetLike = (target) => {
+        const listeners = {};
+        defineMethod(target, "addEventListener", (type, listener) => {
+            if (typeof listener !== "function") {
+                return;
+            }
+            const name = String(type || "");
+            listeners[name] = listeners[name] || [];
+            if (!listeners[name].includes(listener)) {
+                listeners[name].push(listener);
+            }
+        });
+        defineMethod(target, "removeEventListener", (type, listener) => {
+            const name = String(type || "");
+            listeners[name] = (listeners[name] || []).filter((item) => item !== listener);
+        });
+        defineMethod(target, "dispatchEvent", (event) => {
+            const name = String(event && event.type || "");
+            for (const listener of listeners[name] || []) {
+                try {
+                    listener.call(target, event);
+                } catch (e) {}
+            }
+            return true;
+        });
+        return target;
+    };
+
+    const makeArrayLike = (items, namedKey, proto) => {
+        const sourceItems = Array.isArray(items) ? items : [];
+        const target = {};
+        try {
+            if (proto) {
+                Object.setPrototypeOf(target, proto);
+            }
+        } catch (e) {}
+        defineGetter(target, "length", () => sourceItems.length);
+        sourceItems.forEach((item, index) => {
+            defineGetter(target, String(index), () => item);
+            const namedValue = item && item[namedKey];
+            if (namedValue) {
+                defineGetter(target, String(namedValue), () => item);
+            }
+        });
+        defineMethod(target, "item", (index) => {
+            const normalizedIndex = Number(index);
+            return Number.isFinite(normalizedIndex) ? (sourceItems[normalizedIndex] || null) : null;
+        });
+        defineMethod(target, "namedItem", (name) => {
+            const normalizedName = String(name || "");
+            return sourceItems.find((item) => String(item && item[namedKey] || "") === normalizedName) || null;
+        });
+        if (typeof Symbol !== "undefined" && Symbol.iterator) {
+            defineMethod(target, Symbol.iterator, function* () {
+                for (const item of sourceItems) {
+                    yield item;
+                }
+            });
+        }
+        return target;
+    };
+
     const navigatorProfile = runtimeProfile.navigator || {};
     const localeProfile = runtimeProfile.locale || {};
     const permissionsProfile = runtimeProfile.permissions || {};
@@ -3368,6 +3777,16 @@ class BrowserCaptchaService:
     const windowProfile = runtimeProfile.window || {};
     const mediaDevicesProfile = runtimeProfile.mediaDevices || {};
     const webRtcProfile = runtimeProfile.webrtc || {};
+    const networkProfile = runtimeProfile.network || {};
+    const performanceProfile = runtimeProfile.performance || {};
+    const graphicsProfile = runtimeProfile.graphics || {};
+    const webgpuProfile = runtimeProfile.webgpu || {};
+    const fontProfile = runtimeProfile.font || {};
+    const storageProfile = runtimeProfile.storage || {};
+    const mediaQueryProfile = runtimeProfile.mediaQueries || {};
+    const behaviorProfile = runtimeProfile.behavior || {};
+    const mimeTypesProfile = Array.isArray(runtimeProfile.mimeTypes) ? runtimeProfile.mimeTypes : [];
+    const pluginsProfile = Array.isArray(runtimeProfile.plugins) ? runtimeProfile.plugins : [];
     const maskedIp = String(webRtcProfile.candidateMaskIp || "0.0.0.0");
     const sanitizeIpText = (input) => String(input || "").replace(/\\b(?:\\d{1,3}\\.){3}\\d{1,3}\\b/g, maskedIp);
 
@@ -3388,6 +3807,10 @@ class BrowserCaptchaService:
     patchNavigatorMetric("hardwareConcurrency");
     patchNavigatorMetric("deviceMemory");
     patchNavigatorMetric("maxTouchPoints");
+    patchNavigatorMetric("cookieEnabled");
+    patchNavigatorMetric("onLine");
+    patchNavigatorMetric("pdfViewerEnabled");
+    patchNavigatorMetric("doNotTrack");
     if (navigatorProfile.webdriver !== undefined) {
         defineGetter(Navigator.prototype, "webdriver", () => false);
         defineGetter(navigator, "webdriver", () => false);
@@ -3431,6 +3854,67 @@ class BrowserCaptchaService:
         defineGetter(navigator, "userAgentData", () => userAgentData);
     }
 
+    if (pluginsProfile.length || mimeTypesProfile.length) {
+        const pluginObjects = [];
+        const mimeObjects = [];
+        const pluginByName = {};
+        for (const pluginProfile of pluginsProfile) {
+            const pluginObject = {
+                name: String(pluginProfile.name || ""),
+                filename: String(pluginProfile.filename || ""),
+                description: String(pluginProfile.description || ""),
+            };
+            try {
+                if (window.Plugin && window.Plugin.prototype) {
+                    Object.setPrototypeOf(pluginObject, window.Plugin.prototype);
+                }
+            } catch (e) {}
+            pluginObjects.push(pluginObject);
+            if (pluginObject.name) {
+                pluginByName[pluginObject.name] = pluginObject;
+            }
+        }
+        for (const mimeProfile of mimeTypesProfile) {
+            const enabledPlugin = pluginByName[String(mimeProfile.pluginName || "")] || pluginObjects[0] || null;
+            const mimeObject = {
+                type: String(mimeProfile.type || ""),
+                suffixes: String(mimeProfile.suffixes || ""),
+                description: String(mimeProfile.description || ""),
+                enabledPlugin,
+            };
+            try {
+                if (window.MimeType && window.MimeType.prototype) {
+                    Object.setPrototypeOf(mimeObject, window.MimeType.prototype);
+                }
+            } catch (e) {}
+            mimeObjects.push(mimeObject);
+        }
+        for (const pluginObject of pluginObjects) {
+            const pluginProfile = pluginsProfile.find((item) => String(item.name || "") === pluginObject.name) || {};
+            const pluginMimeTypes = (Array.isArray(pluginProfile.mimeTypes) ? pluginProfile.mimeTypes : [])
+                .map((type) => mimeObjects.find((item) => item.type === String(type || "")))
+                .filter(Boolean);
+            defineGetter(pluginObject, "length", () => pluginMimeTypes.length);
+            pluginMimeTypes.forEach((mimeObject, index) => {
+                defineGetter(pluginObject, String(index), () => mimeObject);
+                if (mimeObject.type) {
+                    defineGetter(pluginObject, mimeObject.type, () => mimeObject);
+                }
+            });
+            defineMethod(pluginObject, "item", (index) => pluginMimeTypes[Number(index)] || null);
+            defineMethod(pluginObject, "namedItem", (name) => {
+                const normalizedName = String(name || "");
+                return pluginMimeTypes.find((item) => item.type === normalizedName) || null;
+            });
+        }
+        const pluginArray = makeArrayLike(pluginObjects, "name", window.PluginArray && window.PluginArray.prototype);
+        const mimeTypeArray = makeArrayLike(mimeObjects, "type", window.MimeTypeArray && window.MimeTypeArray.prototype);
+        defineGetter(Navigator.prototype, "plugins", () => pluginArray);
+        defineGetter(navigator, "plugins", () => pluginArray);
+        defineGetter(Navigator.prototype, "mimeTypes", () => mimeTypeArray);
+        defineGetter(navigator, "mimeTypes", () => mimeTypeArray);
+    }
+
     const screenProfile = runtimeProfile.screen || {};
     const patchScreenMetric = (key) => {
         if (typeof screenProfile[key] !== "number") {
@@ -3463,6 +3947,120 @@ class BrowserCaptchaService:
     patchWindowMetric("outerHeight");
     patchWindowMetric("devicePixelRatio");
 
+    const ensureVisualViewportEnvironment = () => {
+        const viewportProfile = windowProfile.visualViewport || {};
+        const visualViewport = makeEventTargetLike(window.visualViewport || {});
+        const patchViewportMetric = (key, fallbackValue) => {
+            const value = viewportProfile[key] !== undefined ? viewportProfile[key] : fallbackValue;
+            defineGetter(visualViewport, key, () => Number(value || 0));
+        };
+        patchViewportMetric("width", windowProfile.innerWidth || 1280);
+        patchViewportMetric("height", windowProfile.innerHeight || 720);
+        patchViewportMetric("scale", windowProfile.devicePixelRatio || 1);
+        patchViewportMetric("offsetLeft", 0);
+        patchViewportMetric("offsetTop", 0);
+        patchViewportMetric("pageLeft", 0);
+        patchViewportMetric("pageTop", 0);
+        defineGetter(visualViewport, "onresize", () => null);
+        defineGetter(visualViewport, "onscroll", () => null);
+        defineGetter(window, "visualViewport", () => visualViewport);
+    };
+    ensureVisualViewportEnvironment();
+
+    const ensureMatchMediaEnvironment = () => {
+        const originalMatchMedia = typeof window.matchMedia === "function"
+            ? window.matchMedia.bind(window)
+            : null;
+        const normalizeQuery = (query) => String(query || "").replace(/\\s+/g, " ").trim().toLowerCase();
+        const parsePx = (text) => {
+            const match = String(text || "").match(/(-?\\d+(?:\\.\\d+)?)px/);
+            return match ? Number(match[1]) : null;
+        };
+        const resolveMediaMatch = (query) => {
+            const normalized = normalizeQuery(query);
+            const width = Number(windowProfile.innerWidth || 1280);
+            const height = Number(windowProfile.innerHeight || 720);
+            const dpr = Number(windowProfile.devicePixelRatio || 1);
+            if (!normalized) {
+                return false;
+            }
+            if (normalized.includes("prefers-color-scheme")) {
+                const expected = String(mediaQueryProfile.prefersColorScheme || "light").toLowerCase();
+                return normalized.includes(expected);
+            }
+            if (normalized.includes("prefers-reduced-motion")) {
+                const expected = String(mediaQueryProfile.prefersReducedMotion || "no-preference").toLowerCase();
+                return normalized.includes(expected);
+            }
+            if (normalized.includes("prefers-contrast")) {
+                const expected = String(mediaQueryProfile.prefersContrast || "no-preference").toLowerCase();
+                return normalized.includes(expected);
+            }
+            if (normalized.includes("forced-colors")) {
+                const expected = String(mediaQueryProfile.forcedColors || "none").toLowerCase();
+                return normalized.includes(expected);
+            }
+            if (normalized.includes("(hover:")) {
+                return normalized.includes(String(mediaQueryProfile.hover || "hover").toLowerCase());
+            }
+            if (normalized.includes("(any-hover:")) {
+                return normalized.includes(String(mediaQueryProfile.anyHover || "hover").toLowerCase());
+            }
+            if (normalized.includes("(pointer:")) {
+                return normalized.includes(String(mediaQueryProfile.pointer || "fine").toLowerCase());
+            }
+            if (normalized.includes("(any-pointer:")) {
+                return normalized.includes(String(mediaQueryProfile.anyPointer || "fine").toLowerCase());
+            }
+            if (normalized.includes("orientation")) {
+                return normalized.includes(String(mediaQueryProfile.orientation || (width >= height ? "landscape" : "portrait")).toLowerCase());
+            }
+            if (normalized.includes("min-width")) {
+                const value = parsePx(normalized);
+                return value === null ? false : width >= value;
+            }
+            if (normalized.includes("max-width")) {
+                const value = parsePx(normalized);
+                return value === null ? false : width <= value;
+            }
+            if (normalized.includes("min-height")) {
+                const value = parsePx(normalized);
+                return value === null ? false : height >= value;
+            }
+            if (normalized.includes("max-height")) {
+                const value = parsePx(normalized);
+                return value === null ? false : height <= value;
+            }
+            if (normalized.includes("resolution") || normalized.includes("device-pixel-ratio")) {
+                const match = normalized.match(/(-?\\d+(?:\\.\\d+)?)(?:dppx|x)/);
+                return match ? dpr >= Number(match[1]) : dpr >= 1;
+            }
+            if (originalMatchMedia) {
+                try {
+                    return Boolean(originalMatchMedia(query).matches);
+                } catch (e) {}
+            }
+            return false;
+        };
+        defineMethod(window, "matchMedia", (query) => {
+            const media = String(query || "");
+            const target = makeEventTargetLike({
+                media,
+                matches: resolveMediaMatch(media),
+                onchange: null,
+            });
+            if (window.MediaQueryList && window.MediaQueryList.prototype) {
+                try {
+                    Object.setPrototypeOf(target, window.MediaQueryList.prototype);
+                } catch (e) {}
+            }
+            defineMethod(target, "addListener", (listener) => target.addEventListener("change", listener));
+            defineMethod(target, "removeListener", (listener) => target.removeEventListener("change", listener));
+            return target;
+        });
+    };
+    ensureMatchMediaEnvironment();
+
     const localeCode = String(localeProfile.code || navigatorProfile.language || "");
     const timezoneId = String(timezoneProfile.id || "");
     const patchIntlResolvedOptions = (ctor) => {
@@ -3485,16 +4083,23 @@ class BrowserCaptchaService:
     patchIntlResolvedOptions(window.Intl && window.Intl.NumberFormat);
     patchIntlResolvedOptions(window.Intl && window.Intl.Collator);
     patchIntlResolvedOptions(window.Intl && window.Intl.PluralRules);
+    patchIntlResolvedOptions(window.Intl && window.Intl.RelativeTimeFormat);
+    patchIntlResolvedOptions(window.Intl && window.Intl.ListFormat);
+    patchIntlResolvedOptions(window.Intl && window.Intl.DisplayNames);
+    patchIntlResolvedOptions(window.Intl && window.Intl.Segmenter);
 
-    const buildPermissionStatus = (state) => ({
-        state,
-        onchange: null,
-        addEventListener() {},
-        removeEventListener() {},
-        dispatchEvent() {
-            return true;
-        },
-    });
+    const buildPermissionStatus = (state) => {
+        const status = makeEventTargetLike({
+            state,
+            onchange: null,
+        });
+        try {
+            if (window.PermissionStatus && window.PermissionStatus.prototype) {
+                Object.setPrototypeOf(status, window.PermissionStatus.prototype);
+            }
+        } catch (e) {}
+        return status;
+    };
     if (navigator.permissions) {
         const permissionsTarget = navigator.permissions;
         const permissionsProto = Object.getPrototypeOf(permissionsTarget);
@@ -3515,20 +4120,139 @@ class BrowserCaptchaService:
         defineMethod(permissionsTarget, "query", patchedQuery);
     }
 
+    if (networkProfile && Object.keys(networkProfile).length > 0) {
+        const networkInfo = makeEventTargetLike(navigator.connection || {});
+        const patchNetworkMetric = (key, fallbackValue) => {
+            const value = networkProfile[key] !== undefined ? networkProfile[key] : fallbackValue;
+            defineGetter(networkInfo, key, () => cloneValue(value));
+        };
+        patchNetworkMetric("type", "wifi");
+        patchNetworkMetric("effectiveType", "4g");
+        patchNetworkMetric("rtt", 75);
+        patchNetworkMetric("downlink", 10);
+        patchNetworkMetric("saveData", false);
+        defineGetter(networkInfo, "onchange", () => null);
+        defineGetter(Navigator.prototype, "connection", () => networkInfo);
+        defineGetter(navigator, "connection", () => networkInfo);
+        defineGetter(Navigator.prototype, "mozConnection", () => networkInfo);
+        defineGetter(navigator, "mozConnection", () => networkInfo);
+        defineGetter(Navigator.prototype, "webkitConnection", () => networkInfo);
+        defineGetter(navigator, "webkitConnection", () => networkInfo);
+    }
+
     const ensureMediaDevices = () => {
         let target = navigator.mediaDevices || null;
         if (!target) {
             target = {};
         }
-        const devices = Array.isArray(mediaDevicesProfile.devices) ? mediaDevicesProfile.devices : [];
+        const devices = (Array.isArray(mediaDevicesProfile.devices) ? mediaDevicesProfile.devices : []).map((device) => {
+            const mediaDevice = {
+                deviceId: String(device.deviceId || ""),
+                groupId: String(device.groupId || ""),
+                kind: String(device.kind || ""),
+                label: String(device.label || ""),
+                toJSON() {
+                    return {
+                        deviceId: this.deviceId,
+                        groupId: this.groupId,
+                        kind: this.kind,
+                        label: this.label,
+                    };
+                },
+            };
+            try {
+                if (window.MediaDeviceInfo && window.MediaDeviceInfo.prototype) {
+                    Object.setPrototypeOf(mediaDevice, window.MediaDeviceInfo.prototype);
+                }
+            } catch (e) {}
+            return mediaDevice;
+        });
         const deniedMedia = () => Promise.reject(new DOMException("Permission denied", "NotAllowedError"));
-        defineMethod(target, "enumerateDevices", async () => cloneValue(devices));
+        defineGetter(target, "ondevicechange", () => null);
+        defineMethod(target, "enumerateDevices", async () => devices.slice());
         defineMethod(target, "getUserMedia", deniedMedia);
         defineMethod(target, "getDisplayMedia", deniedMedia);
+        defineMethod(target, "getSupportedConstraints", () => ({
+            aspectRatio: true,
+            autoGainControl: true,
+            channelCount: true,
+            deviceId: true,
+            echoCancellation: true,
+            facingMode: true,
+            frameRate: true,
+            groupId: true,
+            height: true,
+            latency: true,
+            noiseSuppression: true,
+            sampleRate: true,
+            sampleSize: true,
+            width: true,
+        }));
         defineGetter(Navigator.prototype, "mediaDevices", () => target);
         defineGetter(navigator, "mediaDevices", () => target);
     };
     ensureMediaDevices();
+
+    const ensureFontFaceEnvironment = () => {
+        const knownFonts = Array.isArray(fontProfile.families) ? fontProfile.families : [];
+        if (!window.FontFace) {
+            class PersonalFontFace {
+                constructor(family, source, descriptors) {
+                    this.family = String(family || "");
+                    this.source = source;
+                    this.descriptors = descriptors || {};
+                    this.status = "unloaded";
+                    this.loaded = Promise.resolve(this);
+                }
+                load() {
+                    this.status = "loaded";
+                    this.loaded = Promise.resolve(this);
+                    return this.loaded;
+                }
+            }
+            setValue(window, "FontFace", PersonalFontFace);
+        }
+        const existingFontSet = document.fonts || null;
+        const fontSet = existingFontSet || makeEventTargetLike({
+                status: "loaded",
+                ready: Promise.resolve(),
+                size: knownFonts.length,
+            });
+        const originalFontCheck = typeof fontSet.check === "function" ? fontSet.check.bind(fontSet) : null;
+        const originalFontLoad = typeof fontSet.load === "function" ? fontSet.load.bind(fontSet) : null;
+        defineMethod(fontSet, "check", (font, text) => {
+            const normalizedFont = String(font || "").toLowerCase();
+            if (knownFonts.some((family) => normalizedFont.includes(String(family).toLowerCase()))) {
+                return true;
+            }
+            return originalFontCheck ? Boolean(originalFontCheck(font, text)) : false;
+        });
+        defineMethod(fontSet, "load", async (font, text) => {
+            const normalizedFont = String(font || "").toLowerCase();
+            if (knownFonts.some((family) => normalizedFont.includes(String(family).toLowerCase()))) {
+                return [];
+            }
+            return originalFontLoad ? originalFontLoad(font, text) : [];
+        });
+        if (typeof fontSet.add !== "function") {
+            defineMethod(fontSet, "add", () => fontSet);
+        }
+        if (typeof fontSet.delete !== "function") {
+            defineMethod(fontSet, "delete", () => false);
+        }
+        if (typeof fontSet.clear !== "function") {
+            defineMethod(fontSet, "clear", () => undefined);
+        }
+        if (typeof fontSet.forEach !== "function") {
+            defineMethod(fontSet, "forEach", () => undefined);
+        }
+        if (typeof Symbol !== "undefined" && Symbol.iterator && typeof fontSet[Symbol.iterator] !== "function") {
+            defineMethod(fontSet, Symbol.iterator, function* () {});
+        }
+        defineGetter(Document.prototype, "fonts", () => fontSet);
+        defineGetter(document, "fonts", () => fontSet);
+    };
+    ensureFontFaceEnvironment();
 
     const patchRtcSessionDescription = (ctor) => {
         if (!ctor || !ctor.prototype) {
@@ -3685,32 +4409,751 @@ class BrowserCaptchaService:
                 return result;
             };
         }
+        const originalMeasureText = CanvasRenderingContext2D.prototype.measureText;
+        if (typeof originalMeasureText === "function") {
+            CanvasRenderingContext2D.prototype.measureText = function(text) {
+                const result = originalMeasureText.apply(this, arguments);
+                try {
+                    const knownFonts = Array.isArray(fontProfile.families) ? fontProfile.families : [];
+                    const fontText = String(this.font || "").toLowerCase();
+                    const hasKnownFont = knownFonts.some((family) => fontText.includes(String(family).toLowerCase()));
+                    if (hasKnownFont && result && typeof result.width === "number") {
+                        const delta = (String(text || "").length % 7) * 0.003;
+                        Object.defineProperty(result, "width", {
+                            configurable: true,
+                            enumerable: true,
+                            value: result.width + delta,
+                        });
+                    }
+                } catch (e) {}
+                return result;
+            };
+        }
     }
 
     const patchWebGL = (proto) => {
-        if (!proto || typeof proto.readPixels !== "function") {
+        if (!proto) {
             return;
         }
-        const originalReadPixels = proto.readPixels;
-        proto.readPixels = function(...args) {
-            const output = args.find((item) => item && typeof item.length === "number" && typeof item.BYTES_PER_ELEMENT === "number");
-            const result = originalReadPixels.apply(this, args);
-            try {
-                if (output && output.length) {
-                    const stride = Math.max(1, Number(config.webgl.stride || 23));
-                    const delta = Number(config.webgl.delta || 1);
-                    for (let i = 0; i < output.length; i += stride) {
-                        const nextValue = Number(output[i] || 0) + delta;
-                        output[i] = Math.max(0, Math.min(255, nextValue));
+        if (typeof proto.getParameter === "function") {
+            const originalGetParameter = proto.getParameter;
+            proto.getParameter = function(parameter) {
+                try {
+                    const normalizedParameter = Number(parameter);
+                    if (normalizedParameter === 37445) {
+                        return String(graphicsProfile.unmaskedVendor || graphicsProfile.vendor || "Google Inc.");
+                    }
+                    if (normalizedParameter === 37446) {
+                        return String(graphicsProfile.unmaskedRenderer || graphicsProfile.renderer || "ANGLE");
+                    }
+                    if (normalizedParameter === 7936 && graphicsProfile.vendor) {
+                        return String(graphicsProfile.vendor);
+                    }
+                    if (normalizedParameter === 7937 && graphicsProfile.renderer) {
+                        return String(graphicsProfile.renderer);
+                    }
+                    if (normalizedParameter === 7938 && graphicsProfile.version) {
+                        return String(graphicsProfile.version);
+                    }
+                    if (normalizedParameter === 35724 && graphicsProfile.shadingLanguageVersion) {
+                        return String(graphicsProfile.shadingLanguageVersion);
+                    }
+                    if (normalizedParameter === 3379 && graphicsProfile.maxTextureSize) {
+                        return Number(graphicsProfile.maxTextureSize);
+                    }
+                    if (normalizedParameter === 34024 && graphicsProfile.maxRenderbufferSize) {
+                        return Number(graphicsProfile.maxRenderbufferSize);
+                    }
+                    if (normalizedParameter === 35661 && graphicsProfile.maxCombinedTextureImageUnits) {
+                        return Number(graphicsProfile.maxCombinedTextureImageUnits);
+                    }
+                    if (normalizedParameter === 34076 && graphicsProfile.maxCubeMapTextureSize) {
+                        return Number(graphicsProfile.maxCubeMapTextureSize);
+                    }
+                    if (normalizedParameter === 34930 && graphicsProfile.maxTextureImageUnits) {
+                        return Number(graphicsProfile.maxTextureImageUnits);
+                    }
+                    if (normalizedParameter === 35660 && graphicsProfile.maxVertexTextureImageUnits) {
+                        return Number(graphicsProfile.maxVertexTextureImageUnits);
+                    }
+                    if (normalizedParameter === 34921 && graphicsProfile.maxVertexAttribs) {
+                        return Number(graphicsProfile.maxVertexAttribs);
+                    }
+                    if (normalizedParameter === 36347 && graphicsProfile.maxVertexUniformVectors) {
+                        return Number(graphicsProfile.maxVertexUniformVectors);
+                    }
+                    if (normalizedParameter === 36349 && graphicsProfile.maxFragmentUniformVectors) {
+                        return Number(graphicsProfile.maxFragmentUniformVectors);
+                    }
+                    if (normalizedParameter === 33902 && Array.isArray(graphicsProfile.aliasedPointSizeRange)) {
+                        return new Float32Array(graphicsProfile.aliasedPointSizeRange.map(Number));
+                    }
+                    if (normalizedParameter === 33901 && Array.isArray(graphicsProfile.aliasedLineWidthRange)) {
+                        return new Float32Array(graphicsProfile.aliasedLineWidthRange.map(Number));
+                    }
+                } catch (e) {}
+                return originalGetParameter.apply(this, arguments);
+            };
+        }
+        if (typeof proto.getShaderPrecisionFormat === "function") {
+            const originalGetShaderPrecisionFormat = proto.getShaderPrecisionFormat;
+            proto.getShaderPrecisionFormat = function(shaderType, precisionType) {
+                try {
+                    const precisionProfile = graphicsProfile.shaderPrecision || {};
+                    const normalizedPrecision = Number(precisionType);
+                    let selected = null;
+                    if (normalizedPrecision === 36338) {
+                        selected = precisionProfile.highFloat;
+                    } else if (normalizedPrecision === 36337) {
+                        selected = precisionProfile.mediumFloat;
+                    } else if (normalizedPrecision === 36336) {
+                        selected = precisionProfile.lowFloat;
+                    } else if (normalizedPrecision === 36341) {
+                        selected = precisionProfile.highInt;
+                    } else if (normalizedPrecision === 36340) {
+                        selected = precisionProfile.mediumInt;
+                    } else if (normalizedPrecision === 36339) {
+                        selected = precisionProfile.lowInt;
+                    }
+                    if (selected) {
+                        return {
+                            rangeMin: Number(selected.rangeMin || 0),
+                            rangeMax: Number(selected.rangeMax || 0),
+                            precision: Number(selected.precision || 0),
+                        };
+                    }
+                } catch (e) {}
+                return originalGetShaderPrecisionFormat.apply(this, arguments);
+            };
+        }
+        if (typeof proto.readPixels === "function") {
+            const originalReadPixels = proto.readPixels;
+            proto.readPixels = function(...args) {
+                const output = args.find((item) => item && typeof item.length === "number" && typeof item.BYTES_PER_ELEMENT === "number");
+                const result = originalReadPixels.apply(this, args);
+                try {
+                    if (output && output.length) {
+                        const stride = Math.max(1, Number(config.webgl.stride || 23));
+                        const delta = Number(config.webgl.delta || 1);
+                        for (let i = 0; i < output.length; i += stride) {
+                            const nextValue = Number(output[i] || 0) + delta;
+                            output[i] = Math.max(0, Math.min(255, nextValue));
+                        }
+                    }
+                } catch (e) {}
+                return result;
+            };
+        }
+        if (typeof proto.getSupportedExtensions === "function") {
+            const originalGetSupportedExtensions = proto.getSupportedExtensions;
+            proto.getSupportedExtensions = function(...args) {
+                const result = originalGetSupportedExtensions.apply(this, args);
+                const next = Array.isArray(result) ? result.slice() : [];
+                for (const extensionName of (Array.isArray(graphicsProfile.supportedExtensions) ? graphicsProfile.supportedExtensions : [])) {
+                    if (extensionName && !next.includes(extensionName)) {
+                        next.push(extensionName);
                     }
                 }
-            } catch (e) {}
-            return result;
-        };
+                return next;
+            };
+        }
+        if (typeof proto.getExtension === "function") {
+            const originalGetExtension = proto.getExtension;
+            proto.getExtension = function(name) {
+                const extensionName = String(name || "");
+                if (extensionName === "WEBGL_debug_renderer_info") {
+                    return {
+                        UNMASKED_VENDOR_WEBGL: 37445,
+                        UNMASKED_RENDERER_WEBGL: 37446,
+                    };
+                }
+                const result = originalGetExtension.apply(this, arguments);
+                if (result) {
+                    return result;
+                }
+                const supported = Array.isArray(graphicsProfile.supportedExtensions)
+                    ? graphicsProfile.supportedExtensions
+                    : [];
+                if (supported.includes(extensionName)) {
+                    return {};
+                }
+                return result;
+            };
+        }
     };
 
     patchWebGL(window.WebGLRenderingContext && window.WebGLRenderingContext.prototype);
     patchWebGL(window.WebGL2RenderingContext && window.WebGL2RenderingContext.prototype);
+
+    const ensureGeometryEnvironment = () => {
+        const patchRectCtor = (ctor) => {
+            if (!ctor || !ctor.prototype) {
+                return;
+            }
+            if (typeof ctor.fromRect !== "function") {
+                defineMethod(ctor, "fromRect", (rect) => {
+                    const source = rect || {};
+                    return new ctor(
+                        Number(source.x || source.left || 0),
+                        Number(source.y || source.top || 0),
+                        Number(source.width || 0),
+                        Number(source.height || 0)
+                    );
+                });
+            }
+            if (typeof ctor.prototype.toJSON !== "function") {
+                defineMethod(ctor.prototype, "toJSON", function() {
+                    return {
+                        x: Number(this.x || 0),
+                        y: Number(this.y || 0),
+                        width: Number(this.width || 0),
+                        height: Number(this.height || 0),
+                        top: Number(this.top || this.y || 0),
+                        right: Number(this.right || ((this.x || 0) + (this.width || 0))),
+                        bottom: Number(this.bottom || ((this.y || 0) + (this.height || 0))),
+                        left: Number(this.left || this.x || 0),
+                    };
+                });
+            }
+        };
+        patchRectCtor(window.DOMRect);
+        patchRectCtor(window.DOMRectReadOnly);
+        if (window.DOMPoint && window.DOMPoint.prototype && typeof window.DOMPoint.prototype.toJSON !== "function") {
+            defineMethod(window.DOMPoint.prototype, "toJSON", function() {
+                return { x: Number(this.x || 0), y: Number(this.y || 0), z: Number(this.z || 0), w: Number(this.w || 1) };
+            });
+        }
+    };
+    ensureGeometryEnvironment();
+
+    const ensureCssEnvironment = () => {
+        if (!window.CSS) {
+            setValue(window, "CSS", {});
+        }
+        if (window.CSS) {
+            if (typeof window.CSS.supports !== "function") {
+                defineMethod(window.CSS, "supports", (...args) => {
+                    const property = args[0];
+                    const value = args[1];
+                    if (args.length === 1) {
+                        return typeof property === "string" && property.length > 0;
+                    }
+                    return typeof property === "string" && typeof value === "string";
+                });
+            }
+            if (typeof window.CSS.escape !== "function") {
+                defineMethod(window.CSS, "escape", (value) => String(value || "").replace(/[^a-zA-Z0-9_-]/g, "\\\\$&"));
+            }
+            if (!window.CSS.highlights) {
+                setValue(window.CSS, "highlights", new Map());
+            }
+        }
+    };
+    ensureCssEnvironment();
+
+    const ensurePerformanceEnvironment = () => {
+        if (!window.performance) {
+            return;
+        }
+        const makeEntry = (entry) => ({
+            ...entry,
+            toJSON() {
+                return { ...entry };
+            },
+        });
+        const paintStart = Number(performanceProfile.paintStart || 110);
+        const paintEnd = Number(performanceProfile.paintEnd || 180);
+        const fallbackPaintEntries = [
+            makeEntry({ name: "first-paint", entryType: "paint", startTime: paintStart, duration: 0 }),
+            makeEntry({ name: "first-contentful-paint", entryType: "paint", startTime: paintEnd, duration: 0 }),
+        ];
+        const fallbackNavigationEntry = makeEntry({
+            name: location.href,
+            entryType: "navigation",
+            startTime: 0,
+            duration: Math.max(paintEnd + 80, stableNow()),
+            initiatorType: "navigation",
+            type: String(performanceProfile.navigationType || "navigate"),
+            redirectCount: Number(performanceProfile.redirectCount || 0),
+        });
+        if (typeof performance.getEntriesByType === "function") {
+            const originalGetEntriesByType = performance.getEntriesByType.bind(performance);
+            defineMethod(performance, "getEntriesByType", (type) => {
+                const normalizedType = String(type || "");
+                const entries = originalGetEntriesByType(normalizedType) || [];
+                if (entries.length > 0) {
+                    return entries;
+                }
+                if (normalizedType === "paint") {
+                    return fallbackPaintEntries.slice();
+                }
+                if (normalizedType === "navigation") {
+                    return [fallbackNavigationEntry];
+                }
+                return entries;
+            });
+        }
+        if (typeof performance.getEntriesByName === "function") {
+            const originalGetEntriesByName = performance.getEntriesByName.bind(performance);
+            defineMethod(performance, "getEntriesByName", (name, type) => {
+                const entries = originalGetEntriesByName(name, type) || [];
+                if (entries.length > 0) {
+                    return entries;
+                }
+                const normalizedName = String(name || "");
+                const normalizedType = String(type || "");
+                if ((!normalizedType || normalizedType === "paint") && normalizedName === "first-contentful-paint") {
+                    return [fallbackPaintEntries[1]];
+                }
+                if ((!normalizedType || normalizedType === "paint") && normalizedName === "first-paint") {
+                    return [fallbackPaintEntries[0]];
+                }
+                return entries;
+            });
+        }
+    };
+    ensurePerformanceEnvironment();
+
+    const ensureNavigationEnvironment = () => {
+        if (window.navigation) {
+            return;
+        }
+        const currentEntry = makeEventTargetLike({
+            id: "current",
+            key: "current",
+            index: 0,
+            sameDocument: true,
+            url: location.href,
+            getState: () => null,
+        });
+        const navigation = makeEventTargetLike({
+            currentEntry,
+            transition: null,
+            activation: { from: null, entry: currentEntry, navigationType: "push", activationStart: 0 },
+            canGoBack: history.length > 1,
+            canGoForward: false,
+            onnavigate: null,
+            onnavigatesuccess: null,
+            onnavigateerror: null,
+            entries: () => [currentEntry],
+        });
+        const navigationResult = () => ({
+            committed: Promise.resolve(currentEntry),
+            finished: Promise.resolve(currentEntry),
+        });
+        defineMethod(navigation, "navigate", navigationResult);
+        defineMethod(navigation, "reload", navigationResult);
+        defineMethod(navigation, "back", navigationResult);
+        defineMethod(navigation, "forward", navigationResult);
+        defineMethod(navigation, "traverseTo", navigationResult);
+        defineMethod(navigation, "updateCurrentEntry", () => undefined);
+        setValue(window, "navigation", navigation);
+    };
+    ensureNavigationEnvironment();
+
+    const ensureCapabilityEnvironment = () => {
+        const chromeObject = window.chrome || {};
+        if (!chromeObject.app) {
+            chromeObject.app = {
+                isInstalled: false,
+                InstallState: { DISABLED: "disabled", INSTALLED: "installed", NOT_INSTALLED: "not_installed" },
+                RunningState: { CANNOT_RUN: "cannot_run", READY_TO_RUN: "ready_to_run", RUNNING: "running" },
+                getDetails: () => null,
+                getIsInstalled: () => false,
+                runningState: () => "cannot_run",
+            };
+        }
+        if (typeof chromeObject.csi !== "function") {
+            chromeObject.csi = () => ({
+                startE: Date.now() - Math.floor(stableNow()),
+                onloadT: Date.now(),
+                pageT: Math.floor(stableNow()),
+                tran: 15,
+            });
+        }
+        if (typeof chromeObject.loadTimes !== "function") {
+            chromeObject.loadTimes = () => {
+                const nowSeconds = Date.now() / 1000;
+                return {
+                    requestTime: nowSeconds - 1.2,
+                    startLoadTime: nowSeconds - 1.1,
+                    commitLoadTime: nowSeconds - 0.8,
+                    finishDocumentLoadTime: nowSeconds - 0.2,
+                    finishLoadTime: nowSeconds - 0.1,
+                    firstPaintTime: nowSeconds - 0.6,
+                    firstPaintAfterLoadTime: 0,
+                    navigationType: String(performanceProfile.navigationType || "Other"),
+                    wasFetchedViaSpdy: true,
+                    wasNpnNegotiated: true,
+                    npnNegotiatedProtocol: "h2",
+                    wasAlternateProtocolAvailable: false,
+                    connectionInfo: "h2",
+                };
+            };
+        }
+        if (!chromeObject.runtime) {
+            chromeObject.runtime = {
+                PlatformOs: { MAC: "mac", WIN: "win", ANDROID: "android", CROS: "cros", LINUX: "linux", OPENBSD: "openbsd" },
+                PlatformArch: { ARM: "arm", ARM64: "arm64", X86_32: "x86-32", X86_64: "x86-64" },
+                PlatformNaclArch: { ARM: "arm", X86_32: "x86-32", X86_64: "x86-64" },
+                RequestUpdateCheckStatus: { THROTTLED: "throttled", NO_UPDATE: "no_update", UPDATE_AVAILABLE: "update_available" },
+            };
+        }
+        if (!window.chrome) {
+            setValue(window, "chrome", chromeObject);
+        }
+
+        const storage = navigator.storage || {};
+        defineMethod(storage, "estimate", async () => ({
+            quota: Number(storageProfile.quota || 120000000000),
+            usage: Number(storageProfile.usage || 0),
+            usageDetails: cloneValue(storageProfile.usageDetails || {}),
+        }));
+        defineMethod(storage, "persist", async () => Boolean(storageProfile.persisted));
+        defineMethod(storage, "persisted", async () => Boolean(storageProfile.persisted));
+        defineGetter(Navigator.prototype, "storage", () => storage);
+        defineGetter(navigator, "storage", () => storage);
+
+        if (!window.caches) {
+            const cacheStore = new Map();
+            const cacheStorage = {
+                async keys() {
+                    return Array.from(cacheStore.keys());
+                },
+                async has(name) {
+                    return cacheStore.has(String(name || ""));
+                },
+                async delete(name) {
+                    return cacheStore.delete(String(name || ""));
+                },
+                async match() {
+                    return undefined;
+                },
+                async open(name) {
+                    const key = String(name || "");
+                    if (!cacheStore.has(key)) {
+                        cacheStore.set(key, {
+                            async match() { return undefined; },
+                            async matchAll() { return []; },
+                            async add() { return undefined; },
+                            async addAll() { return undefined; },
+                            async put() { return undefined; },
+                            async delete() { return false; },
+                            async keys() { return []; },
+                        });
+                    }
+                    return cacheStore.get(key);
+                },
+            };
+            setValue(window, "caches", cacheStorage);
+        }
+
+        if (!window.indexedDB) {
+            const makeRequest = () => {
+                const request = makeEventTargetLike({
+                    result: undefined,
+                    error: null,
+                    source: null,
+                    transaction: null,
+                    readyState: "done",
+                    onsuccess: null,
+                    onerror: null,
+                    onblocked: null,
+                    onupgradeneeded: null,
+                });
+                setTimeout(() => {
+                    try {
+                        if (typeof request.onsuccess === "function") {
+                            request.onsuccess.call(request, { type: "success", target: request });
+                        }
+                        request.dispatchEvent({ type: "success", target: request });
+                    } catch (e) {}
+                }, 0);
+                return request;
+            };
+            setValue(window, "indexedDB", {
+                open: () => makeRequest(),
+                deleteDatabase: () => makeRequest(),
+                databases: async () => [],
+                cmp: (first, second) => (first === second ? 0 : (first > second ? 1 : -1)),
+            });
+        }
+        if (!navigator.credentials) {
+            const credentials = {
+                create: async () => null,
+                get: async () => null,
+                store: async (credential) => credential || null,
+                preventSilentAccess: async () => undefined,
+            };
+            defineGetter(Navigator.prototype, "credentials", () => credentials);
+            defineGetter(navigator, "credentials", () => credentials);
+        }
+        if (!navigator.locks) {
+            const locks = {
+                query: async () => ({ held: [], pending: [] }),
+                request: async (name, options, callback) => {
+                    const cb = typeof options === "function" ? options : callback;
+                    return typeof cb === "function" ? cb({ name: String(name || ""), mode: "exclusive" }) : undefined;
+                },
+            };
+            defineGetter(Navigator.prototype, "locks", () => locks);
+            defineGetter(navigator, "locks", () => locks);
+        }
+        if (!navigator.keyboard) {
+            const keyboard = {
+                getLayoutMap: async () => new Map([
+                    ["KeyA", "a"],
+                    ["KeyS", "s"],
+                    ["KeyD", "d"],
+                    ["KeyF", "f"],
+                    ["Digit1", "1"],
+                    ["Digit2", "2"],
+                ]),
+                lock: async () => undefined,
+                unlock: () => undefined,
+            };
+            defineGetter(Navigator.prototype, "keyboard", () => keyboard);
+            defineGetter(navigator, "keyboard", () => keyboard);
+        }
+        if (!navigator.scheduling) {
+            const scheduling = { isInputPending: () => false };
+            defineGetter(Navigator.prototype, "scheduling", () => scheduling);
+            defineGetter(navigator, "scheduling", () => scheduling);
+        }
+        if (!window.scheduler) {
+            setValue(window, "scheduler", {
+                postTask: (callback) => Promise.resolve().then(() => (typeof callback === "function" ? callback() : undefined)),
+                yield: () => Promise.resolve(),
+            });
+        }
+        if (!window.trustedTypes) {
+            const trustedTypes = {
+                emptyHTML: "",
+                emptyScript: "",
+                createPolicy: (name, rules) => ({ name: String(name || ""), ...Object(rules || {}) }),
+                getAttributeType: () => null,
+                getPropertyType: () => null,
+                isHTML: () => false,
+                isScript: () => false,
+                isScriptURL: () => false,
+            };
+            setValue(window, "trustedTypes", trustedTypes);
+        }
+        if (!navigator.bluetooth) {
+            const bluetooth = makeEventTargetLike({
+                getAvailability: async () => capability.bluetoothAvailable === true,
+                requestDevice: async () => { throw new DOMException("User cancelled the request.", "NotFoundError"); },
+                requestLEScan: async () => { throw new DOMException("Not supported", "NotSupportedError"); },
+                onavailabilitychanged: null,
+            });
+            defineGetter(Navigator.prototype, "bluetooth", () => bluetooth);
+            defineGetter(navigator, "bluetooth", () => bluetooth);
+        }
+        if (!navigator.usb) {
+            const usb = makeEventTargetLike({
+                getDevices: async () => Array.from({length: Number(capability.usbDeviceCount || 0)}, (_, index) => ({vendorId: 7531 + index, productId: 9021 + index, deviceName: "USB Input Device"})),
+                requestDevice: async () => { throw new DOMException("No device selected.", "NotFoundError"); },
+                onconnect: null,
+                ondisconnect: null,
+            });
+            defineGetter(Navigator.prototype, "usb", () => usb);
+            defineGetter(navigator, "usb", () => usb);
+        }
+        if (!navigator.serial) {
+            const serial = makeEventTargetLike({
+                getPorts: async () => Array.from({length: Number(capability.serialPortCount || 0)}, () => ({readable: null, writable: null})),
+                requestPort: async () => { throw new DOMException("No port selected.", "NotFoundError"); },
+                onconnect: null,
+                ondisconnect: null,
+            });
+            defineGetter(Navigator.prototype, "serial", () => serial);
+            defineGetter(navigator, "serial", () => serial);
+        }
+        if (!navigator.hid) {
+            const hid = makeEventTargetLike({
+                getDevices: async () => Array.from({length: Number(capability.hidDeviceCount || 0)}, (_, index) => ({opened: false, vendorId: 6702 + index, productId: 3310 + index, productName: "HID-compliant device", collections: []})),
+                requestDevice: async () => { throw new DOMException("No device selected.", "NotFoundError"); },
+                onconnect: null,
+                ondisconnect: null,
+            });
+            defineGetter(Navigator.prototype, "hid", () => hid);
+            defineGetter(navigator, "hid", () => hid);
+        }
+        if (!navigator.clipboard) {
+            const clipboard = {read: async () => [], readText: async () => "", write: async () => undefined, writeText: async () => undefined};
+            defineGetter(Navigator.prototype, "clipboard", () => clipboard);
+            defineGetter(navigator, "clipboard", () => clipboard);
+        }
+        if (!navigator.mediaCapabilities) {
+            const mediaCapabilities = {
+                decodingInfo: async () => ({supported: true, smooth: capability.mediaCodecSmooth !== false, powerEfficient: capability.mediaCodecSmooth !== false, keySystemAccess: null}),
+                encodingInfo: async () => ({supported: true, smooth: capability.mediaCodecSmooth !== false, powerEfficient: capability.mediaCodecSmooth !== false}),
+            };
+            defineGetter(Navigator.prototype, "mediaCapabilities", () => mediaCapabilities);
+            defineGetter(navigator, "mediaCapabilities", () => mediaCapabilities);
+        }
+        if (!navigator.serviceWorker) {
+            const registration = makeEventTargetLike({installing: null, waiting: null, active: null, scope: "", updateViaCache: "imports", unregister: async () => true, update: async () => registration});
+            const serviceWorker = makeEventTargetLike({controller: null, ready: Promise.resolve(registration), register: async () => registration, getRegistration: async () => undefined, getRegistrations: async () => [], startMessages: () => undefined});
+            defineGetter(Navigator.prototype, "serviceWorker", () => serviceWorker);
+            defineGetter(navigator, "serviceWorker", () => serviceWorker);
+        }
+        if (!navigator.mediaSession) {
+            const mediaSession = {metadata: null, playbackState: "none", setActionHandler: () => undefined, setPositionState: () => undefined};
+            defineGetter(Navigator.prototype, "mediaSession", () => mediaSession);
+            defineGetter(navigator, "mediaSession", () => mediaSession);
+        }
+        if (!navigator.wakeLock) {
+            const sentinel = makeEventTargetLike({type: "screen", released: false, release: async () => { sentinel.released = true; }, onrelease: null});
+            const wakeLock = {request: async () => sentinel};
+            defineGetter(Navigator.prototype, "wakeLock", () => wakeLock);
+            defineGetter(navigator, "wakeLock", () => wakeLock);
+        }
+        if (!navigator.presentation) {
+            const presentation = {defaultRequest: null, receiver: null, getAvailability: async () => makeEventTargetLike({value: false, onchange: null})};
+            defineGetter(Navigator.prototype, "presentation", () => presentation);
+            defineGetter(navigator, "presentation", () => presentation);
+        }
+        if (!window.openDatabase) {
+            setValue(window, "openDatabase", (name, version) => ({version: String(version || "1.0"), changeVersion: () => undefined, transaction: () => undefined, readTransaction: () => undefined}));
+        }
+        if (!window.speechSynthesis) {
+            const voices = [{name: "Microsoft David", lang: "en-US", default: true}, {name: "Microsoft Zira", lang: "en-US", default: false}];
+            setValue(window, "speechSynthesis", makeEventTargetLike({pending: false, speaking: false, paused: false, speak: () => undefined, cancel: () => undefined, pause: () => undefined, resume: () => undefined, getVoices: () => voices.slice(0, Number(capability.speechVoiceCount || 2)), onvoiceschanged: null}));
+        }
+        try {
+            defineGetter(window, "screenX", () => Number(capability.screenX || 0));
+            defineGetter(window, "screenY", () => Number(capability.screenY || 0));
+            if (window.screen) {
+                const orientation = makeEventTargetLike({type: capability.orientationType || "landscape-primary", angle: Number(capability.orientationAngle || 0), lock: async () => undefined, unlock: () => undefined});
+                defineGetter(window.screen, "orientation", () => orientation);
+            }
+        } catch (e) {}
+    };
+    ensureCapabilityEnvironment();
+
+    const ensureWebGpuEnvironment = () => {
+        if (!webgpuProfile || Object.keys(webgpuProfile).length <= 0) {
+            return;
+        }
+        const adapterInfo = {
+            vendor: String(webgpuProfile.vendor || graphicsProfile.unmaskedVendor || ""),
+            architecture: String(webgpuProfile.architecture || ""),
+            device: String(webgpuProfile.device || graphicsProfile.unmaskedRenderer || ""),
+            description: String(webgpuProfile.description || graphicsProfile.renderer || ""),
+            subgroupMinSize: 4,
+            subgroupMaxSize: 128,
+        };
+        const features = new Set(Array.isArray(webgpuProfile.features) ? webgpuProfile.features : []);
+        const limits = cloneValue(webgpuProfile.limits || {});
+        const device = makeEventTargetLike({
+            features,
+            limits,
+            lost: new Promise(() => {}),
+            label: "",
+            onuncapturederror: null,
+            pushErrorScope: () => undefined,
+            popErrorScope: async () => null,
+            createBuffer: () => ({}),
+            createTexture: () => ({}),
+            createSampler: () => ({}),
+            createBindGroupLayout: () => ({}),
+            createPipelineLayout: () => ({}),
+            createBindGroup: () => ({}),
+            createShaderModule: () => ({}),
+            createComputePipeline: () => ({}),
+            createRenderPipeline: () => ({}),
+            createCommandEncoder: () => ({}),
+            createQuerySet: () => ({}),
+            destroy: () => undefined,
+        });
+        const adapter = {
+            features,
+            limits,
+            isFallbackAdapter: Boolean(webgpuProfile.isFallbackAdapter),
+            info: adapterInfo,
+            requestAdapterInfo: async () => cloneValue(adapterInfo),
+            requestDevice: async () => device,
+        };
+        const gpu = navigator.gpu || {};
+        defineGetter(gpu, "wgslLanguageFeatures", () => new Set(["readonly_and_readwrite_storage_textures", "packed_4x8_integer_dot_product"]));
+        defineMethod(gpu, "getPreferredCanvasFormat", () => String(webgpuProfile.preferredCanvasFormat || "bgra8unorm"));
+        defineMethod(gpu, "requestAdapter", async () => adapter);
+        defineGetter(Navigator.prototype, "gpu", () => gpu);
+        defineGetter(navigator, "gpu", () => gpu);
+    };
+    ensureWebGpuEnvironment();
+
+    const ensureBehaviorEnvironment = () => {
+        const visibilityState = String(behaviorProfile.visibilityState || "visible");
+        const documentHidden = Boolean(behaviorProfile.documentHidden);
+        defineGetter(Document.prototype, "visibilityState", () => visibilityState);
+        defineGetter(document, "visibilityState", () => visibilityState);
+        defineGetter(Document.prototype, "hidden", () => documentHidden);
+        defineGetter(document, "hidden", () => documentHidden);
+        if (typeof document.hasFocus === "function") {
+            defineMethod(document, "hasFocus", () => Boolean(behaviorProfile.hasFocus !== false));
+        }
+        const activationProfile = behaviorProfile.userActivation || {};
+        const userActivation = {
+            hasBeenActive: activationProfile.hasBeenActive !== false,
+            isActive: Boolean(activationProfile.isActive),
+        };
+        defineGetter(Navigator.prototype, "userActivation", () => userActivation);
+        defineGetter(navigator, "userActivation", () => userActivation);
+        if (!window.IdleDetector) {
+            class PersonalIdleDetector extends EventTarget {
+                constructor() {
+                    super();
+                    this.userState = "active";
+                    this.screenState = "unlocked";
+                    this.onchange = null;
+                }
+                static requestPermission() {
+                    return Promise.resolve("denied");
+                }
+                start() {
+                    return Promise.resolve();
+                }
+            }
+            setValue(window, "IdleDetector", PersonalIdleDetector);
+        }
+    };
+    ensureBehaviorEnvironment();
+
+    const ensureXrEnvironment = () => {
+        if (navigator.xr) {
+            return;
+        }
+        const xrSystem = makeEventTargetLike({
+            ondevicechange: null,
+        });
+        defineMethod(xrSystem, "isSessionSupported", async () => false);
+        defineMethod(xrSystem, "supportsSession", async () => false);
+        defineMethod(xrSystem, "requestSession", async () => {
+            throw new DOMException("The specified session configuration is not supported.", "NotSupportedError");
+        });
+        defineGetter(Navigator.prototype, "xr", () => xrSystem);
+        defineGetter(navigator, "xr", () => xrSystem);
+    };
+    ensureXrEnvironment();
+
+    const sanitizeStackText = (value) => String(value || "")
+        .split("\\n")
+        .filter((line) => !/personalFingerprint|HeadlessVisible|evaluate_on_new_document|nodriver|cdp|__puppeteer|debugger eval/i.test(line))
+        .join("\\n");
+    if (window.Error && typeof Error.captureStackTrace === "function") {
+        const originalCaptureStackTrace = Error.captureStackTrace;
+        defineMethod(Error, "captureStackTrace", function(targetObject, constructorOpt) {
+            const result = originalCaptureStackTrace.call(this, targetObject, constructorOpt);
+            try {
+                if (targetObject && typeof targetObject.stack === "string") {
+                    setValue(targetObject, "stack", sanitizeStackText(targetObject.stack));
+                }
+            } catch (e) {}
+            return result;
+        });
+    }
 
     if (window.AudioBuffer && AudioBuffer.prototype && typeof AudioBuffer.prototype.getChannelData === "function") {
         const originalGetChannelData = AudioBuffer.prototype.getChannelData;
@@ -3784,7 +5227,7 @@ class BrowserCaptchaService:
                 label=f"page.add_script_to_evaluate_on_new_document:fingerprint:{label}",
             )
             debug_logger.log_info(
-                f"[BrowserCaptcha] 已注入 Canvas/WebGL/Audio 指纹轻扰动脚本 "
+                f"[BrowserCaptcha] 已注入 Canvas/WebGL/Audio 与浏览器环境补齐脚本 "
                 f"(label={label}, target={getattr(tab, 'target_id', None) or '<none>'})"
             )
             try:
@@ -3794,7 +5237,7 @@ class BrowserCaptchaService:
             return True
         except Exception as e:
             debug_logger.log_warning(
-                f"[BrowserCaptcha] 注入指纹轻扰动脚本失败 ({label}): {e}"
+                f"[BrowserCaptcha] 注入浏览器环境补齐脚本失败 ({label}): {e}"
             )
             return False
 
@@ -4431,7 +5874,7 @@ class BrowserCaptchaService:
                 )
 
         browser_context_id = await self._run_with_timeout(
-            browser.connection.send(
+            browser.send(
                 cdp.target.create_browser_context(
                     dispose_on_detach=True,
                 )
@@ -4444,7 +5887,7 @@ class BrowserCaptchaService:
         try:
             async def _send_create_target():
                 return await self._run_with_timeout(
-                    browser.connection.send(
+                    browser.send(
                         cdp.target.create_target(
                             initial_url,
                             browser_context_id=browser_context_id,
@@ -4531,7 +5974,7 @@ class BrowserCaptchaService:
                 from nodriver import cdp
 
                 return await self._run_with_timeout(
-                    self.browser.connection.send(
+                    self.browser.send(
                         cdp.storage.get_cookies(browser_context_id=browser_context_id)
                     ),
                     timeout_seconds or self._command_timeout_seconds,
@@ -4555,7 +5998,7 @@ class BrowserCaptchaService:
         timeout_seconds: Optional[float] = None,
     ):
         return await self._run_with_timeout(
-            self.browser.connection.send(command),
+            self.browser.send(command),
             timeout_seconds or self._command_timeout_seconds,
             label or "browser.command",
         )
@@ -5071,7 +6514,7 @@ class BrowserCaptchaService:
             from nodriver import cdp
 
             await self._run_with_timeout(
-                target_browser.connection.send(
+                target_browser.send(
                     cdp.target.dispose_browser_context(browser_context_id)
                 ),
                 timeout_seconds=5.0,
@@ -5165,7 +6608,7 @@ class BrowserCaptchaService:
             )
 
         await self._run_with_timeout(
-            self.browser.connection.send(cookie_command),
+            self.browser.send(cookie_command),
             timeout_seconds=timeout_seconds,
             label=label,
         )
@@ -5401,6 +6844,8 @@ class BrowserCaptchaService:
         if not cookie_signature:
             self._remember_token_affinity(int(token_key), resident_info.slot_id, resident_info)
             resident_info.cookie_signature = None
+            resident_info.session_cookies = None
+            resident_info.session_cookies_fetched_at = 0.0
             return False
 
         if (
@@ -5446,6 +6891,8 @@ class BrowserCaptchaService:
 
             resident_info.token_id = int(token_key)
             resident_info.cookie_signature = cookie_signature
+            resident_info.session_cookies = None
+            resident_info.session_cookies_fetched_at = 0.0
             self._remember_token_affinity(int(token_key), resident_info.slot_id, resident_info)
             debug_logger.log_info(
                 f"[BrowserCaptcha] 已向 context 注入 cookie (slot={resident_info.slot_id}, token_id={token_key}, cookies={cookie_count})"
@@ -5682,6 +7129,8 @@ class BrowserCaptchaService:
             if current_token_id == int(token_key) and not current_cookie_signature:
                 self._remember_token_affinity(int(token_key), resident_info.slot_id, resident_info)
                 resident_info.cookie_signature = None
+                resident_info.session_cookies = None
+                resident_info.session_cookies_fetched_at = 0.0
                 return True
 
             try:
@@ -5696,7 +7145,7 @@ class BrowserCaptchaService:
                     else:
                         clear_cookie_command = cdp.storage.clear_cookies(browser_context_id=browser_context_id)
                     await self._run_with_timeout(
-                        self.browser.connection.send(
+                        self.browser.send(
                             clear_cookie_command
                         ),
                         timeout_seconds=8.0,
@@ -5732,6 +7181,8 @@ class BrowserCaptchaService:
 
             self._remember_token_affinity(int(token_key), resident_info.slot_id, resident_info)
             resident_info.cookie_signature = None
+            resident_info.session_cookies = None
+            resident_info.session_cookies_fetched_at = 0.0
             return True
 
         async with resident_info.solve_lock:
@@ -5756,6 +7207,16 @@ class BrowserCaptchaService:
                     f"[BrowserCaptcha] token_id={token_key} cookie 注入后页面未能按时 ready (slot={resident_info.slot_id})"
                 )
                 return False
+
+            warmup_ok = await self._warmup_google_context_cookies(
+                resident_info,
+                label=f"{label}:google_warmup",
+            )
+            if not warmup_ok:
+                debug_logger.log_warning(
+                    f"[BrowserCaptcha] token_id={token_key} Google cookie warmup incomplete "
+                    f"after cookie binding (slot={resident_info.slot_id})"
+                )
 
             resident_info.recaptcha_ready = await self._wait_for_recaptcha(resident_info.tab)
             if not resident_info.recaptcha_ready:
@@ -6713,6 +8174,7 @@ class BrowserCaptchaService:
         self._refresh_runtime_fingerprint_spoof_seed()
         self._last_fingerprint = None
         self._last_fingerprint_at = 0.0
+        clear_cached_session_cookies()
         self._mark_browser_health(False)
         self._reset_browser_rotation_budget()
         self._reset_local_recaptcha_asset_caches(purge_disk=False)
@@ -7673,6 +9135,7 @@ class BrowserCaptchaService:
                                 label=launch_label,
                             )
                             self._browser_process_pid = self._get_browser_process_pid(self.browser)
+                            await asyncio.sleep(0.1)
                             break
                         except Exception as start_error:
                             last_start_error = start_error
@@ -8826,6 +10289,16 @@ class BrowserCaptchaService:
                     const ua = navigator.userAgent || "";
                     const lang = navigator.language || "";
                     const languages = Array.isArray(navigator.languages) ? navigator.languages.slice() : [];
+                    const normalizedLanguages = languages
+                        .map((item) => String(item || "").trim().split(";")[0].trim())
+                        .filter(Boolean);
+                    const acceptLanguage = normalizedLanguages.length
+                        ? normalizedLanguages.slice(0, 3).map((item, index) => {
+                            if (index === 0) return item;
+                            const q = Math.max(0.1, 1 - (index * 0.1)).toFixed(1);
+                            return `${item};q=${q}`;
+                        }).join(",")
+                        : (lang || "");
                     const uaData = navigator.userAgentData || null;
                     let secChUa = "";
                     let secChUaMobile = "";
@@ -8845,7 +10318,7 @@ class BrowserCaptchaService:
 
                     return {
                         user_agent: ua,
-                        accept_language: lang,
+                        accept_language: acceptLanguage,
                         sec_ch_ua: secChUa,
                         sec_ch_ua_mobile: secChUaMobile,
                         sec_ch_ua_platform: secChUaPlatform,
@@ -8863,9 +10336,9 @@ class BrowserCaptchaService:
                         screen_avail_height: Number(screen.availHeight || 0),
                     };
                 }
-            """, label="extract_tab_fingerprint", timeout_seconds=8.0)
+            """, label="extract_tab_fingerprint", timeout_seconds=8.0, return_by_value=True)
             if not isinstance(fingerprint, dict):
-                return None
+                fingerprint = {}
 
             result: Dict[str, Any] = {"proxy_url": self._proxy_url}
             for key in (
@@ -8899,6 +10372,40 @@ class BrowserCaptchaService:
                 value = fingerprint.get(key)
                 if isinstance(value, (int, float)) and float(value) > 0:
                     result[key] = int(value) if float(value).is_integer() else float(value)
+            if not str(result.get("user_agent") or "").strip():
+                fallback_ua = await self._tab_evaluate(
+                    tab,
+                    "navigator.userAgent || ''",
+                    label="extract_tab_fingerprint:fallback_ua",
+                    timeout_seconds=3.0,
+                    return_by_value=True,
+                )
+                fallback_lang = await self._tab_evaluate(
+                    tab,
+                    """
+                    (() => {
+                        const lang = navigator.language || "";
+                        const languages = Array.isArray(navigator.languages)
+                            ? navigator.languages.slice(0, 3).map((item) => String(item || "").trim().split(";")[0].trim())
+                            : [];
+                        if (!languages.length) return lang;
+                        return languages.map((item, index) => {
+                            const value = String(item || "").trim();
+                            if (!value) return "";
+                            if (index === 0) return value;
+                            const q = Math.max(0.1, 1 - (index * 0.1)).toFixed(1);
+                            return `${value};q=${q}`;
+                        }).filter(Boolean).join(",");
+                    })()
+                    """,
+                    label="extract_tab_fingerprint:fallback_accept_language",
+                    timeout_seconds=3.0,
+                    return_by_value=True,
+                )
+                if isinstance(fallback_ua, str) and fallback_ua.strip():
+                    result["user_agent"] = fallback_ua.strip()
+                if isinstance(fallback_lang, str) and fallback_lang.strip():
+                    result["accept_language"] = fallback_lang.strip()
             return result
         except Exception as e:
             debug_logger.log_warning(f"[BrowserCaptcha] 提取 nodriver 指纹失败: {e}")
@@ -8921,6 +10428,98 @@ class BrowserCaptchaService:
         else:
             self._last_fingerprint = None
             self._last_fingerprint_at = 0.0
+
+    def _build_solve_bundle(
+        self,
+        *,
+        token: str,
+        project_id: str,
+        action: str,
+        token_id: Optional[int],
+        slot_id: Optional[str],
+        fingerprint: Optional[Dict[str, Any]] = None,
+        session_cookies: Optional[Dict[str, str]] = None,
+        issued_at: Optional[float] = None,
+        expires_at: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        normalized_fingerprint = dict(fingerprint) if isinstance(fingerprint, dict) and fingerprint else None
+        proxy_url = str(((normalized_fingerprint or {}).get("proxy_url") or self._proxy_url or "")).strip()
+        if normalized_fingerprint is not None and proxy_url and not str(normalized_fingerprint.get("proxy_url") or "").strip():
+            normalized_fingerprint["proxy_url"] = proxy_url
+
+        bundled_session_cookies: Optional[Dict[str, str]] = None
+        if isinstance(session_cookies, dict) and session_cookies:
+            bundled_session_cookies = dict(session_cookies)
+        elif not slot_id:
+            runtime_cookies = get_cached_session_cookies()
+            if isinstance(runtime_cookies, dict) and runtime_cookies:
+                bundled_session_cookies = dict(runtime_cookies)
+        issued_timestamp = float(issued_at or time.time())
+        expires_timestamp = float(
+            expires_at
+            or (issued_timestamp + float(getattr(config, "token_pool_ttl_seconds", 120) or 120))
+        )
+        return {
+            "token": token,
+            "project_id": project_id,
+            "action": action,
+            "token_id": token_id,
+            "slot_id": slot_id,
+            "worker_index": getattr(self, "_worker_index", None),
+            "fingerprint": normalized_fingerprint,
+            "proxy_url": proxy_url,
+            "session_cookies": bundled_session_cookies,
+            "issued_at": issued_timestamp,
+            "expires_at": expires_timestamp,
+        }
+
+    async def _cache_session_cookies_for_computed(
+        self,
+        resident_info: ResidentTabInfo,
+    ) -> Optional[Dict[str, str]]:
+        """Cache the exact tab's Google-family cookies for solve-bundle consumers."""
+        if not resident_info or not resident_info.tab:
+            return None
+        cookies = await self._get_browser_cookies(
+            "computed_session_cookie_cache",
+            timeout_seconds=6.0,
+            browser_context_id=getattr(resident_info, "browser_context_id", None),
+        )
+        collected: Dict[str, str] = {}
+        allowed_names = {
+            "SID",
+            "SSID",
+            "APISID",
+            "SAPISID",
+            "HSID",
+            "NID",
+            "ENID",
+            "AEC",
+            "SIDCC",
+            "SEARCH_SAMESITE",
+            "CONSENT",
+            "OTZ",
+        }
+        for cookie in cookies or []:
+            serialized = self._serialize_browser_cookie_for_storage(cookie) or {}
+            name = str(serialized.get("name") or "").strip()
+            value = str(serialized.get("value") or "").strip()
+            domain = str(serialized.get("domain") or "").strip().lower().lstrip(".")
+            if (
+                name
+                and value
+                and domain.endswith(("google.com", "recaptcha.net", "labs.google"))
+                and any(key in name for key in allowed_names)
+            ):
+                collected[name] = value
+        if collected:
+            resident_info.session_cookies = dict(collected)
+            resident_info.session_cookies_fetched_at = time.time()
+            set_cached_session_cookies(collected)
+            return dict(collected)
+        if isinstance(resident_info.session_cookies, dict) and resident_info.session_cookies:
+            return dict(resident_info.session_cookies)
+        return None
 
     async def _solve_with_resident_tab(
         self,
@@ -8961,10 +10560,12 @@ class BrowserCaptchaService:
         self._remember_project_affinity(project_id, slot_id, resident_info)
         self._resident_error_streaks.pop(slot_id, None)
         self._mark_browser_health(True)
-        if resident_info.fingerprint:
-            self._remember_fingerprint(resident_info.fingerprint)
-        else:
-            resident_info.fingerprint = await self._refresh_last_fingerprint(resident_info.tab)
+        resident_info.fingerprint = await self._refresh_last_fingerprint(resident_info.tab)
+        self._remember_fingerprint(resident_info.fingerprint)
+        try:
+            await self._cache_session_cookies_for_computed(resident_info)
+        except Exception:
+            pass
         debug_logger.log_info(
             "[BrowserCaptcha] ✅ Token生成成功"
             f"（slot={slot_id}, 耗时 {duration_ms:.0f}ms, "
@@ -9411,6 +11012,63 @@ class BrowserCaptchaService:
             return None, None, None
         return token, slot_id, token_id
 
+    async def get_token_bundle(
+        self,
+        project_id: str,
+        action: str = "IMAGE_GENERATION",
+        token_id: Optional[int] = None,
+    ) -> Optional[Dict[str, Any]]:
+        token, slot_id = await self._get_token_direct(
+            project_id,
+            action=action,
+            token_id=token_id,
+            return_slot_id=True,
+        )
+        if not token:
+            return None
+        resident_info = None
+        if slot_id:
+            async with self._resident_lock:
+                resident_info = self._resident_tabs.get(slot_id)
+        if (
+            resident_info
+            and token_id is not None
+            and resident_info.token_id != int(token_id)
+        ):
+            debug_logger.log_warning(
+                f"[BrowserCaptcha] refusing mismatched slot identity in solve bundle "
+                f"(slot={slot_id}, expected_token_id={token_id}, "
+                f"resident_token_id={resident_info.token_id})"
+            )
+            resident_info = None
+        if resident_info and not resident_info.session_cookies:
+            try:
+                await self._cache_session_cookies_for_computed(resident_info)
+            except Exception as cookie_error:
+                debug_logger.log_warning(
+                    f"[BrowserCaptcha] solve-bundle cookie extraction failed "
+                    f"(slot={slot_id}, project={project_id}, token_id={token_id}): {cookie_error}"
+                )
+        fingerprint = (
+            dict(resident_info.fingerprint)
+            if resident_info and isinstance(resident_info.fingerprint, dict) and resident_info.fingerprint
+            else (self.get_last_fingerprint() if not slot_id else None)
+        )
+        session_cookies = (
+            dict(resident_info.session_cookies)
+            if resident_info and isinstance(resident_info.session_cookies, dict) and resident_info.session_cookies
+            else None
+        )
+        return self._build_solve_bundle(
+            token=token,
+            project_id=project_id,
+            action=action,
+            token_id=token_id,
+            slot_id=slot_id,
+            fingerprint=fingerprint,
+            session_cookies=session_cookies,
+        )
+
     async def _create_resident_tab(
         self,
         slot_id: str,
@@ -9506,6 +11164,16 @@ class BrowserCaptchaService:
                 return None
 
             # 等待 reCAPTCHA 加载
+            warmup_ok = await self._warmup_google_context_cookies(
+                resident_info,
+                label=f"resident_init:{slot_id}",
+            )
+            if not warmup_ok:
+                debug_logger.log_warning(
+                    f"[BrowserCaptcha] Google cookie warmup incomplete during resident init "
+                    f"(slot={slot_id}, project={project_id}, token_id={token_id})"
+                )
+
             recaptcha_ready = await self._wait_for_recaptcha(tab)
 
             if not recaptcha_ready:
@@ -9518,6 +11186,13 @@ class BrowserCaptchaService:
 
             resident_info.recaptcha_ready = True
             resident_info.fingerprint = await self._refresh_last_fingerprint(tab)
+            try:
+                await self._cache_session_cookies_for_computed(resident_info)
+            except Exception as cookie_error:
+                debug_logger.log_warning(
+                    f"[BrowserCaptcha] resident cookie extraction failed after init "
+                    f"(slot={slot_id}, project={project_id}, token_id={token_id}): {cookie_error}"
+                )
             self._mark_browser_health(True)
 
             debug_logger.log_info(
@@ -9641,6 +11316,16 @@ class BrowserCaptchaService:
                         debug_logger.log_error("[BrowserCaptcha] [Legacy] 打开 labs 引导页失败")
                         return None
 
+                    warmup_ok = await self._warmup_google_context_cookies(
+                        legacy_info,
+                        label=f"legacy:{project_id}",
+                    )
+                    if not warmup_ok:
+                        debug_logger.log_warning(
+                            f"[BrowserCaptcha] [Legacy] Google cookie warmup incomplete "
+                            f"(project={project_id}, token_id={token_id})"
+                        )
+
                     # 等待 reCAPTCHA 加载
                     recaptcha_ready = await self._wait_for_recaptcha(tab)
 
@@ -9664,7 +11349,14 @@ class BrowserCaptchaService:
                             project_id=project_id,
                         )
                         self._mark_browser_health(True)
-                        await self._refresh_last_fingerprint(tab)
+                        legacy_info.fingerprint = await self._refresh_last_fingerprint(tab)
+                        try:
+                            await self._cache_session_cookies_for_computed(legacy_info)
+                        except Exception as cookie_error:
+                            debug_logger.log_warning(
+                                f"[BrowserCaptcha] [Legacy] cookie extraction failed "
+                                f"(project={project_id}, token_id={token_id}): {cookie_error}"
+                            )
                         debug_logger.log_info(
                             "[BrowserCaptcha] [Legacy] ✅ Token获取成功"
                             f"（耗时 {duration_ms:.0f}ms, browser_solve_count={browser_solve_count}）"
@@ -9702,6 +11394,23 @@ class BrowserCaptchaService:
         if not self._last_fingerprint:
             return None
         return dict(self._last_fingerprint)
+
+    async def get_current_user_agent(self) -> Optional[str]:
+        """Return the best available User-Agent for this browser runtime."""
+        fingerprint = self.get_last_fingerprint()
+        if isinstance(fingerprint, dict):
+            user_agent = str(fingerprint.get("user_agent") or "").strip()
+            if user_agent:
+                return user_agent
+
+        runtime_profile = self._get_runtime_surface_profile()
+        if isinstance(runtime_profile, dict):
+            user_agent = str(runtime_profile.get("userAgent") or "").strip()
+            if user_agent:
+                return user_agent
+
+        live_user_agent, _ = await self._get_live_browser_runtime_identity()
+        return str(live_user_agent or "").strip() or None
 
     async def _clear_browser_cache(self):
         """清理浏览器全部缓存"""
@@ -10376,14 +12085,14 @@ class _PersonalBrowserPoolService:
         except Exception:
             configured_browser_count = 1
 
-        total_tabs = self._resolve_total_resident_tabs()
+        per_worker_tabs = self._resolve_worker_resident_tabs()
         worker_limits = self._worker_tab_limits or self._build_worker_tab_limits(
-            total_tabs,
-            min(configured_browser_count, total_tabs),
+            per_worker_tabs,
+            configured_browser_count,
         )
         refill_capacity = max(
             1,
-            sum(1 for limit in worker_limits if int(limit or 0) > 0),
+            sum(max(0, int(limit or 0)) for limit in worker_limits),
         )
         if target_size is None:
             return refill_capacity
@@ -10554,15 +12263,57 @@ class _PersonalBrowserPoolService:
         return BrowserCaptchaService._normalize_token_key(token_id)
 
     @staticmethod
-    def _resolve_total_resident_tabs(limit: Optional[int] = None) -> int:
+    def _resolve_worker_resident_tabs(limit: Optional[int] = None) -> int:
         raw_value = config.personal_max_resident_tabs if limit is None else limit
         return resolve_effective_personal_max_resident_tabs(raw_value)
 
     @staticmethod
-    def _build_worker_tab_limits(total_tabs: int, worker_count: int) -> list[int]:
-        normalized_worker_count = max(1, min(max(1, total_tabs), int(worker_count or 1)))
-        base, remainder = divmod(max(1, int(total_tabs or 1)), normalized_worker_count)
-        return [base + (1 if index < remainder else 0) for index in range(normalized_worker_count)]
+    def _build_worker_tab_limits(
+        per_worker_tabs: int,
+        worker_count: int,
+        *,
+        total_limit: Optional[int] = None,
+        allow_zero: bool = False,
+    ) -> list[int]:
+        normalized_worker_count = resolve_effective_browser_count(worker_count)
+        normalized_per_worker_tabs = resolve_effective_personal_max_resident_tabs(per_worker_tabs)
+        desired_total = normalized_worker_count * normalized_per_worker_tabs
+        effective_total = min(PERSONAL_POOL_MAX_TOTAL_RESIDENT_TABS, desired_total)
+        if total_limit is not None:
+            try:
+                effective_total = min(effective_total, max(1, int(total_limit or 1)))
+            except Exception:
+                pass
+        effective_total = max(1, effective_total)
+
+        active_worker_count = min(normalized_worker_count, effective_total)
+        base, remainder = divmod(effective_total, active_worker_count)
+        limits = [
+            base + (1 if index < remainder else 0)
+            for index in range(active_worker_count)
+        ]
+        if allow_zero and len(limits) < normalized_worker_count:
+            limits.extend([0] * (normalized_worker_count - len(limits)))
+        return limits
+
+    @staticmethod
+    def _resolve_effective_pool_tab_capacity(
+        *,
+        browser_count: Optional[int] = None,
+        per_worker_tabs: Optional[int] = None,
+    ) -> int:
+        resolved_browser_count = resolve_effective_browser_count(
+            BrowserCaptchaService._resolve_configured_browser_count()
+            if browser_count is None
+            else browser_count
+        )
+        resolved_per_worker_tabs = resolve_effective_personal_max_resident_tabs(
+            config.personal_max_resident_tabs if per_worker_tabs is None else per_worker_tabs
+        )
+        return min(
+            PERSONAL_POOL_MAX_TOTAL_RESIDENT_TABS,
+            resolved_browser_count * resolved_per_worker_tabs,
+        )
 
     @staticmethod
     def _parse_worker_index_from_slot_id(slot_id: Optional[str]) -> Optional[int]:
@@ -10686,6 +12437,23 @@ class _PersonalBrowserPoolService:
         )
 
     @staticmethod
+    def _worker_has_pending_fresh_restart(worker: BrowserCaptchaService) -> bool:
+        restart_task = getattr(worker, "_fresh_profile_restart_task", None)
+        return bool(
+            getattr(worker, "_fresh_profile_restart_pending", False)
+            or (restart_task is not None and not restart_task.done())
+        )
+
+    def _worker_runtime_unavailable_score(self, worker: BrowserCaptchaService) -> int:
+        if self._worker_has_live_runtime(worker):
+            return 0
+        if self._worker_launch_cooldown_remaining_seconds(worker) > 0.0:
+            return 3
+        if getattr(worker, "_initialized", False):
+            return 2
+        return 1
+
+    @staticmethod
     def _worker_launch_cooldown_remaining_seconds(worker: BrowserCaptchaService) -> float:
         try:
             return max(0.0, float(worker._get_browser_launch_cooldown_remaining_seconds() or 0.0))
@@ -10698,16 +12466,19 @@ class _PersonalBrowserPoolService:
         worker: BrowserCaptchaService,
         *,
         affinity_preferred: bool = False,
-    ) -> tuple[int, int, int, int, int, int]:
+    ) -> tuple[int, int, int, int, int, int, int]:
         reservations = int(self._worker_dispatch_reservations.get(worker_index, 0) or 0)
-        runtime_cold = 0 if self._worker_has_live_runtime(worker) else 1
+        fresh_restart_penalty = 1 if self._worker_has_pending_fresh_restart(worker) else 0
+        runtime_unavailable = self._worker_runtime_unavailable_score(worker)
         launch_cooldown_penalty = 1 if self._worker_launch_cooldown_remaining_seconds(worker) > 0.0 else 0
+        busy_score = reservations + self._worker_busy_score(worker)
         resident_cold = 0 if worker.get_resident_count() > 0 else 1
         round_robin_offset = (worker_index - self._round_robin_index) % max(len(self._workers), 1)
         affinity_penalty = 0 if affinity_preferred else 1
         return (
-            reservations + self._worker_busy_score(worker),
-            runtime_cold,
+            fresh_restart_penalty,
+            busy_score,
+            runtime_unavailable,
             launch_cooldown_penalty,
             resident_cold,
             affinity_penalty,
@@ -10953,16 +12724,19 @@ class _PersonalBrowserPoolService:
         token_id = bucket_meta.get("token_id")
 
         try:
-            token, slot_id = await self._get_token_direct(
+            solve_bundle = await self._get_token_bundle_direct(
                 project_id,
                 action=action,
                 token_id=token_id,
-                return_slot_id=True,
                 allow_affinity=False,
                 remember_affinity=False,
             )
+            if not isinstance(solve_bundle, dict):
+                return
+            token = str(solve_bundle.get("token") or "").strip()
             if not token:
                 return
+            slot_id = str(solve_bundle.get("slot_id") or "").strip() or None
 
             created_at = time.time()
             lease = TokenPoolLease(
@@ -10973,6 +12747,7 @@ class _PersonalBrowserPoolService:
                 token_id=token_id,
                 slot_id=slot_id,
                 worker_index=self._parse_worker_index_from_slot_id(slot_id),
+                solve_bundle=dict(solve_bundle),
                 created_at=created_at,
                 expires_at=created_at + float(getattr(config, "token_pool_ttl_seconds", 120) or 120),
             )
@@ -11172,7 +12947,24 @@ class _PersonalBrowserPoolService:
                     preferred_affinity_worker_index = candidate
                     break
 
-            if preferred_affinity_worker_index is not None:
+            if (
+                preferred_affinity_worker_index is not None
+                and not self._worker_has_pending_fresh_restart(
+                    self._workers[preferred_affinity_worker_index]
+                )
+                and self._worker_busy_score(self._workers[preferred_affinity_worker_index]) == 0
+                and self._worker_launch_cooldown_remaining_seconds(
+                    self._workers[preferred_affinity_worker_index]
+                ) <= 0.0
+                and (
+                    self._worker_has_live_runtime(self._workers[preferred_affinity_worker_index])
+                    or not getattr(
+                        self._workers[preferred_affinity_worker_index],
+                        "_initialized",
+                        False,
+                    )
+                )
+            ):
                 selected_worker_index = preferred_affinity_worker_index
                 self._worker_dispatch_reservations[selected_worker_index] = (
                     int(self._worker_dispatch_reservations.get(selected_worker_index, 0) or 0) + 1
@@ -11213,7 +13005,31 @@ class _PersonalBrowserPoolService:
                 for worker_index in candidate_indexes
                 if int(getattr(self._workers[worker_index], "_max_resident_tabs", 0) or 0) > 0
             ] or candidate_indexes
-            selected_worker_index = selectable_indexes[0]
+            non_restarting_indexes = [
+                worker_index
+                for worker_index in selectable_indexes
+                if not self._worker_has_pending_fresh_restart(self._workers[worker_index])
+            ]
+            if non_restarting_indexes:
+                selectable_indexes = non_restarting_indexes
+            live_or_unstarted_indexes = [
+                worker_index
+                for worker_index in selectable_indexes
+                if (
+                    self._worker_has_live_runtime(self._workers[worker_index])
+                    or not getattr(self._workers[worker_index], "_initialized", False)
+                )
+            ]
+            if live_or_unstarted_indexes:
+                selectable_indexes = live_or_unstarted_indexes
+            selected_worker_index = min(
+                selectable_indexes,
+                key=lambda worker_index: self._worker_dispatch_score(
+                    worker_index,
+                    self._workers[worker_index],
+                    affinity_preferred=worker_index == preferred_affinity_worker_index,
+                ),
+            )
             self._worker_dispatch_reservations[selected_worker_index] = (
                 int(self._worker_dispatch_reservations.get(selected_worker_index, 0) or 0) + 1
             )
@@ -11227,7 +13043,10 @@ class _PersonalBrowserPoolService:
                 f"(project_id={project_id or '<empty>'}, token_id={token_id}, "
                 f"selected={selected_worker_index + 1}, candidates={[index + 1 for index in candidate_indexes]}, "
                 f"selectable={[index + 1 for index in selectable_indexes]}, "
+                f"affinity={(preferred_affinity_worker_index + 1) if preferred_affinity_worker_index is not None else None}, "
                 f"reservations={self._worker_dispatch_reservations.get(selected_worker_index, 0)}, "
+                f"live={self._worker_has_live_runtime(self._workers[selected_worker_index])}, "
+                f"fresh_restart={self._worker_has_pending_fresh_restart(self._workers[selected_worker_index])}, "
                 f"elapsed={time.monotonic() - acquire_started_at:.3f}s)"
             )
             return selected_worker_index, self._workers[selected_worker_index]
@@ -11293,11 +13112,12 @@ class _PersonalBrowserPoolService:
             async with self._worker_dispatch_lock:
                 self.headless = bool(getattr(config, "personal_headless", False))
                 configured_browser_count = BrowserCaptchaService._resolve_configured_browser_count()
-                total_tabs = self._resolve_total_resident_tabs()
+                per_worker_tabs = self._resolve_worker_resident_tabs()
                 worker_limits = self._build_worker_tab_limits(
-                    total_tabs,
-                    min(configured_browser_count, total_tabs),
+                    per_worker_tabs,
+                    configured_browser_count,
                 )
+                effective_total_tabs = sum(max(0, int(limit or 0)) for limit in worker_limits)
 
                 current_worker_count = len(self._workers)
                 if current_worker_count > len(worker_limits):
@@ -11332,6 +13152,15 @@ class _PersonalBrowserPoolService:
                     if 0 <= worker_index < len(self._workers) and count > 0
                 }
                 self._round_robin_index %= max(len(self._workers), 1)
+                debug_logger.log_info(
+                    "[BrowserCaptchaPool] Personal 池配置已生效 "
+                    f"(browser_count={configured_browser_count}, "
+                    f"per_worker_tabs={per_worker_tabs}, "
+                    f"effective_workers={len(worker_limits)}, "
+                    f"effective_total_tabs={effective_total_tabs}, "
+                    f"worker_limits={worker_limits}, "
+                    f"fresh_restart_every={getattr(config, 'browser_personal_fresh_restart_every_n_solves', 10)})"
+                )
 
         for worker in extra_workers:
             try:
@@ -11481,6 +13310,67 @@ class _PersonalBrowserPoolService:
 
         return (None, None) if return_slot_id else None
 
+    async def _get_token_bundle_direct(
+        self,
+        project_id: str,
+        action: str = "IMAGE_GENERATION",
+        token_id: Optional[int] = None,
+        *,
+        allow_affinity: bool = True,
+        remember_affinity: bool = True,
+    ) -> Optional[Dict[str, Any]]:
+        await self._ensure_workers()
+        if not self._workers:
+            return None
+
+        excluded_indexes: set[int] = set()
+        max_attempts = min(len(self._workers), 3)
+        for _ in range(max_attempts):
+            worker_index = None
+            worker = None
+            try:
+                worker_index, worker = await self._acquire_worker(
+                    project_id=project_id,
+                    token_id=token_id,
+                    excluded_indexes=excluded_indexes,
+                    ensure_workers=False,
+                    allow_affinity=allow_affinity,
+                )
+                excluded_indexes.add(worker_index)
+                solve_bundle = await worker.get_token_bundle(
+                    project_id,
+                    action=action,
+                    token_id=token_id,
+                )
+            except Exception as e:
+                worker_label = worker_index + 1 if worker_index is not None else "unknown"
+                debug_logger.log_warning(
+                    f"[BrowserCaptchaPool] 浏览器实例打码(bundle)失败，尝试切换其他实例 (worker={worker_label}): {e}"
+                )
+                if BrowserCaptchaService._is_memory_pressure_browser_launch_error(e):
+                    await self._reclaim_pool_memory_pressure(
+                        reason=f"direct_token_bundle:{project_id or '<empty>'}",
+                        exclude_indexes=excluded_indexes,
+                    )
+                continue
+            finally:
+                await self._release_worker_reservation(worker_index)
+
+            if not isinstance(solve_bundle, dict) or not str(solve_bundle.get("token") or "").strip():
+                continue
+
+            slot_id = str(solve_bundle.get("slot_id") or "").strip() or None
+            self._last_successful_worker_index = worker_index
+            if remember_affinity:
+                self._remember_affinity(
+                    project_id=project_id,
+                    token_id=token_id,
+                    slot_id=slot_id,
+                    worker_index=worker_index,
+                )
+            return solve_bundle
+        return None
+
     async def get_token(
         self,
         project_id: str,
@@ -11556,6 +13446,77 @@ class _PersonalBrowserPoolService:
         )
         return lease.token, lease.slot_id, lease.token_id
 
+    async def get_token_bundle(
+        self,
+        project_id: str,
+        action: str = "IMAGE_GENERATION",
+        token_id: Optional[int] = None,
+    ) -> Optional[Dict[str, Any]]:
+        if not self._is_token_pool_enabled():
+            return await self._get_token_bundle_direct(
+                project_id,
+                action=action,
+                token_id=token_id,
+            )
+
+        target_size = self._get_token_pool_bucket_target_size(
+            project_id=project_id,
+            action=action,
+        )
+        if target_size <= 0:
+            return await self._get_token_bundle_direct(
+                project_id,
+                action=action,
+                token_id=token_id,
+            )
+
+        bucket_key = self._build_token_pool_bucket_key(
+            project_id=project_id,
+            action=action,
+            token_id=token_id,
+        )
+        lease = await self._wait_for_token_pool_token(
+            bucket_key=bucket_key,
+            project_id=project_id,
+            action=action,
+            token_id=token_id,
+        )
+        if lease is None:
+            bucket_snapshot = self._summarize_token_pool_bucket(bucket_key, now_value=time.time())
+            raise TokenPoolTimeoutError(
+                "token 池等待超时且未命中可用 token "
+                f"(action_bucket={bucket_snapshot['action']}, project_id={project_id or '<empty>'}, "
+                f"token_id={token_id}, action={action}, ready={bucket_snapshot['ready_count']}, "
+                f"waiting={bucket_snapshot['waiting_requests']}, inflight={bucket_snapshot['refill_inflight']})"
+            )
+
+        if lease.worker_index is not None:
+            self._last_successful_worker_index = lease.worker_index
+        self._remember_affinity(
+            project_id=project_id,
+            token_id=token_id if lease.token_id == token_id else None,
+            slot_id=lease.slot_id,
+            worker_index=lease.worker_index,
+        )
+        if isinstance(lease.solve_bundle, dict) and lease.solve_bundle:
+            return dict(lease.solve_bundle)
+
+        worker_fingerprint = self.get_last_fingerprint()
+        proxy_url = str((worker_fingerprint or {}).get("proxy_url") or "").strip()
+        return {
+            "token": lease.token,
+            "project_id": lease.project_id,
+            "action": lease.action,
+            "token_id": lease.token_id,
+            "slot_id": lease.slot_id,
+            "worker_index": lease.worker_index,
+            "fingerprint": dict(worker_fingerprint) if isinstance(worker_fingerprint, dict) and worker_fingerprint else None,
+            "proxy_url": proxy_url,
+            "session_cookies": None,
+            "issued_at": lease.created_at,
+            "expires_at": lease.expires_at,
+        }
+
     async def report_flow_error(
         self,
         project_id: str,
@@ -11618,6 +13579,53 @@ class _PersonalBrowserPoolService:
         if not self._workers:
             raise RuntimeError("没有可用的浏览器实例")
         await self._workers[0].open_login_window()
+
+    async def warmup_resident_tabs(
+        self,
+        project_ids: Optional[list[str]] = None,
+        limit: int = 1,
+    ) -> list[Optional[str]]:
+        await self._ensure_workers()
+        if not project_ids or not self._workers:
+            return []
+
+        total_limit = max(1, min(
+            int(limit or 1),
+            self._resolve_effective_pool_tab_capacity(browser_count=len(self._workers)),
+        ))
+        worker_limits = self._build_worker_tab_limits(
+            self._resolve_worker_resident_tabs(),
+            len(self._workers),
+            total_limit=total_limit,
+            allow_zero=True,
+        )
+        project_buckets = self._build_project_buckets_for_workers(
+            [str(project_id).strip() for project_id in project_ids if str(project_id or "").strip()],
+            worker_limits=worker_limits,
+        )
+
+        warmup_tasks = [
+            worker.warmup_resident_tabs(project_buckets[index], limit=worker_limits[index])
+            for index, worker in enumerate(self._workers)
+            if index < len(project_buckets) and project_buckets[index] and worker_limits[index] > 0
+        ]
+        if not warmup_tasks:
+            return []
+
+        warmed_slots: list[Optional[str]] = []
+        results = await asyncio.gather(*warmup_tasks, return_exceptions=True)
+        for result in results:
+            if isinstance(result, Exception):
+                debug_logger.log_warning(
+                    f"[BrowserCaptchaPool] resident tabs 预热 worker 失败: {result}"
+                )
+                continue
+            for slot_id in result or []:
+                if slot_id:
+                    warmed_slots.append(slot_id)
+                    if len(warmed_slots) >= total_limit:
+                        return warmed_slots
+        return warmed_slots
 
     async def refresh_session_token(self, project_id: str, token_id: Optional[int] = None) -> Optional[str]:
         await self._ensure_workers()
@@ -11784,6 +13792,39 @@ class _PersonalBrowserPoolService:
             fingerprint = worker.get_last_fingerprint()
             if fingerprint:
                 return fingerprint
+        return None
+
+    async def get_current_user_agent(self) -> Optional[str]:
+        """Return a browser User-Agent, preferring the last successful worker."""
+        fingerprint = self.get_last_fingerprint()
+        if isinstance(fingerprint, dict):
+            user_agent = str(fingerprint.get("user_agent") or "").strip()
+            if user_agent:
+                return user_agent
+
+        candidate_indexes: list[int] = []
+        if (
+            self._last_successful_worker_index is not None
+            and 0 <= self._last_successful_worker_index < len(self._workers)
+        ):
+            candidate_indexes.append(self._last_successful_worker_index)
+        candidate_indexes.extend(
+            index for index in range(len(self._workers)) if index not in candidate_indexes
+        )
+
+        for worker_index in candidate_indexes:
+            worker = self._workers[worker_index]
+            try:
+                user_agent = await worker.get_current_user_agent()
+            except Exception as exc:
+                debug_logger.log_warning(
+                    f"[BrowserCaptchaPool] Failed to read User-Agent from worker "
+                    f"{worker_index + 1}: {exc}"
+                )
+                continue
+            normalized_user_agent = str(user_agent or "").strip()
+            if normalized_user_agent:
+                return normalized_user_agent
         return None
 
     async def get_custom_token(

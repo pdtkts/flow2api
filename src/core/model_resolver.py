@@ -12,7 +12,9 @@ Example:
 """
 
 import re
+from io import BytesIO
 from typing import Optional, Dict, Any, Tuple
+from ..core.account_tiers import is_native_4k_model
 from ..core.logger import debug_logger
 
 # ──────────────────────────────────────────────
@@ -123,6 +125,67 @@ ASPECT_RATIO_FLOAT_MAP = {
 }
 
 
+def _aspect_from_dimensions(
+    width: int,
+    height: int,
+    *,
+    video_mode: bool = False,
+) -> Optional[str]:
+    if width <= 0 or height <= 0:
+        return None
+
+    ratio = width / height
+    inferred = min(
+        ASPECT_RATIO_FLOAT_MAP.items(),
+        key=lambda item: abs(ratio - item[1]),
+    )[0]
+
+    if video_mode and inferred not in {"landscape", "portrait"}:
+        return "portrait" if height > width else "landscape"
+    return inferred
+
+
+def _infer_aspect_ratio_from_images(
+    images: Any,
+    *,
+    video_mode: bool = False,
+) -> Optional[str]:
+    if not isinstance(images, (list, tuple)):
+        return None
+
+    source_bytes = next(
+        (
+            bytes(item)
+            for item in images
+            if isinstance(item, (bytes, bytearray)) and item
+        ),
+        None,
+    )
+    if not source_bytes:
+        return None
+
+    try:
+        from PIL import Image, ImageOps
+
+        with Image.open(BytesIO(source_bytes)) as image:
+            normalized = ImageOps.exif_transpose(image)
+            width, height = normalized.size
+    except Exception as exc:
+        debug_logger.log_warning(
+            f"[MODEL_RESOLVER] Failed to inspect reference image dimensions; "
+            f"using configured/default aspect ratio: {exc}"
+        )
+        return None
+
+    inferred = _aspect_from_dimensions(width, height, video_mode=video_mode)
+    if inferred:
+        debug_logger.log_info(
+            f"[MODEL_RESOLVER] Inferred aspect ratio from reference image: "
+            f"{width}x{height} -> {inferred}"
+        )
+    return inferred
+
+
 # ──────────────────────────────────────────────
 # 视频模型简化名映射
 # ──────────────────────────────────────────────
@@ -148,6 +211,10 @@ VIDEO_BASE_MODELS = {
         "landscape": "veo_3_1_t2v_fast_6s",
         "portrait": "veo_3_1_t2v_fast_portrait_6s",
     },
+    "veo_3_1_t2v_fast_8s": {
+        "landscape": "veo_3_1_t2v_fast_8s",
+        "portrait": "veo_3_1_t2v_fast_portrait_8s",
+    },
     "veo_3_1_t2v": {
         "landscape": "veo_3_1_t2v_landscape",
         "portrait": "veo_3_1_t2v_portrait",
@@ -159,6 +226,10 @@ VIDEO_BASE_MODELS = {
     "veo_3_1_t2v_6s": {
         "landscape": "veo_3_1_t2v_6s",
         "portrait": "veo_3_1_t2v_portrait_6s",
+    },
+    "veo_3_1_t2v_8s": {
+        "landscape": "veo_3_1_t2v_8s",
+        "portrait": "veo_3_1_t2v_portrait_8s",
     },
     "veo_3_1_t2v_4s_4k": {
         "landscape": "veo_3_1_t2v_4s_4k",
@@ -175,6 +246,14 @@ VIDEO_BASE_MODELS = {
     "veo_3_1_t2v_6s_1080p": {
         "landscape": "veo_3_1_t2v_6s_1080p",
         "portrait": "veo_3_1_t2v_portrait_6s_1080p",
+    },
+    "veo_3_1_t2v_8s_4k": {
+        "landscape": "veo_3_1_t2v_8s_4k",
+        "portrait": "veo_3_1_t2v_portrait_8s_4k",
+    },
+    "veo_3_1_t2v_8s_1080p": {
+        "landscape": "veo_3_1_t2v_8s_1080p",
+        "portrait": "veo_3_1_t2v_portrait_8s_1080p",
     },
     "veo_3_1_t2v_4k": {
         "landscape": "veo_3_1_t2v_4k",
@@ -196,6 +275,14 @@ VIDEO_BASE_MODELS = {
         "landscape": "veo_3_1_t2v_lite_6s_landscape",
         "portrait": "veo_3_1_t2v_lite_6s_portrait",
     },
+    "veo_3_1_t2v_lite_8s": {
+        "landscape": "veo_3_1_t2v_lite_8s_landscape",
+        "portrait": "veo_3_1_t2v_lite_8s_portrait",
+    },
+    "omni": {
+        "landscape": "omni",
+        "portrait": "omni_portrait",
+    },
     # I2V models
     "veo_3_1_i2v_s_fast_fl": {
         "landscape": "veo_3_1_i2v_s_fast_fl",
@@ -208,6 +295,10 @@ VIDEO_BASE_MODELS = {
     "veo_3_1_i2v_s_fast_6s_fl": {
         "landscape": "veo_3_1_i2v_s_fast_6s_fl",
         "portrait": "veo_3_1_i2v_s_fast_portrait_6s_fl",
+    },
+    "veo_3_1_i2v_s_fast_8s_fl": {
+        "landscape": "veo_3_1_i2v_s_fast_8s_fl",
+        "portrait": "veo_3_1_i2v_s_fast_portrait_8s_fl",
     },
     "veo_3_1_i2v_s_fast_ultra_fl": {
         "landscape": "veo_3_1_i2v_s_fast_ultra_fl",
@@ -229,6 +320,10 @@ VIDEO_BASE_MODELS = {
         "landscape": "veo_3_1_i2v_s_6s",
         "portrait": "veo_3_1_i2v_s_portrait_6s",
     },
+    "veo_3_1_i2v_s_8s": {
+        "landscape": "veo_3_1_i2v_s_8s",
+        "portrait": "veo_3_1_i2v_s_portrait_8s",
+    },
     "veo_3_1_i2v_s_4s_4k": {
         "landscape": "veo_3_1_i2v_s_4s_4k",
         "portrait": "veo_3_1_i2v_s_portrait_4s_4k",
@@ -244,6 +339,14 @@ VIDEO_BASE_MODELS = {
     "veo_3_1_i2v_s_6s_1080p": {
         "landscape": "veo_3_1_i2v_s_6s_1080p",
         "portrait": "veo_3_1_i2v_s_portrait_6s_1080p",
+    },
+    "veo_3_1_i2v_s_8s_4k": {
+        "landscape": "veo_3_1_i2v_s_8s_4k",
+        "portrait": "veo_3_1_i2v_s_portrait_8s_4k",
+    },
+    "veo_3_1_i2v_s_8s_1080p": {
+        "landscape": "veo_3_1_i2v_s_8s_1080p",
+        "portrait": "veo_3_1_i2v_s_portrait_8s_1080p",
     },
     "veo_3_1_i2v_s_4k": {
         "landscape": "veo_3_1_i2v_s_4k",
@@ -265,6 +368,10 @@ VIDEO_BASE_MODELS = {
         "landscape": "veo_3_1_i2v_lite_6s_landscape",
         "portrait": "veo_3_1_i2v_lite_6s_portrait",
     },
+    "veo_3_1_i2v_lite_8s": {
+        "landscape": "veo_3_1_i2v_lite_8s_landscape",
+        "portrait": "veo_3_1_i2v_lite_8s_portrait",
+    },
     "veo_3_1_interpolation_lite": {
         "landscape": "veo_3_1_interpolation_lite_landscape",
         "portrait": "veo_3_1_interpolation_lite_portrait",
@@ -277,18 +384,34 @@ VIDEO_BASE_MODELS = {
         "landscape": "veo_3_1_interpolation_lite_6s_landscape",
         "portrait": "veo_3_1_interpolation_lite_6s_portrait",
     },
+    "veo_3_1_interpolation_lite_8s": {
+        "landscape": "veo_3_1_interpolation_lite_8s_landscape",
+        "portrait": "veo_3_1_interpolation_lite_8s_portrait",
+    },
     # R2V models
     "veo_3_1_r2v_fast": {
         "landscape": "veo_3_1_r2v_fast",
         "portrait": "veo_3_1_r2v_fast_portrait",
     },
+    "veo_3_1_r2v_fast_8s": {
+        "landscape": "veo_3_1_r2v_fast_8s",
+        "portrait": "veo_3_1_r2v_fast_portrait_8s",
+    },
     "veo_3_1_r2v_fast_ultra": {
         "landscape": "veo_3_1_r2v_fast_ultra",
         "portrait": "veo_3_1_r2v_fast_portrait_ultra",
     },
+    "veo_3_1_r2v_fast_ultra_8s": {
+        "landscape": "veo_3_1_r2v_fast_ultra_8s",
+        "portrait": "veo_3_1_r2v_fast_portrait_ultra_8s",
+    },
     "veo_3_1_r2v_fast_ultra_relaxed": {
         "landscape": "veo_3_1_r2v_fast_ultra_relaxed",
         "portrait": "veo_3_1_r2v_fast_portrait_ultra_relaxed",
+    },
+    "veo_3_1_r2v_fast_ultra_relaxed_8s": {
+        "landscape": "veo_3_1_r2v_fast_ultra_relaxed_8s",
+        "portrait": "veo_3_1_r2v_fast_portrait_ultra_relaxed_8s",
     },
     # Extend models (视频续写)
     "veo_3_1_extend": {
@@ -393,15 +516,7 @@ def _extract_generation_params(request) -> Tuple[Optional[str], Optional[str]]:
         except Exception:
             return None
 
-        if width <= 0 or height <= 0:
-            return None
-
-        ratio = width / height
-        best = min(
-            ASPECT_RATIO_FLOAT_MAP.items(),
-            key=lambda item: abs(ratio - item[1]),
-        )[0]
-        return best
+        return _aspect_from_dimensions(width, height)
 
     def _image_size_from_openai_quality(value: Any) -> Optional[str]:
         raw = _normalize_str(value)
@@ -517,7 +632,10 @@ def _extract_generation_params(request) -> Tuple[Optional[str], Optional[str]]:
 
 
 def resolve_model_name(
-    model: str, request=None, model_config: Dict[str, Any] = None
+    model: str,
+    request=None,
+    model_config: Dict[str, Any] = None,
+    images: Any = None,
 ) -> str:
     """将简化模型名 + generationConfig 参数解析为内部 MODEL_CONFIG key。
 
@@ -539,6 +657,9 @@ def resolve_model_name(
         aspect_ratio, image_size = (
             _extract_generation_params(request) if request else (None, None)
         )
+
+        if not aspect_ratio:
+            aspect_ratio = _infer_aspect_ratio_from_images(images)
 
         # 默认 aspect ratio
         if not aspect_ratio:
@@ -586,6 +707,9 @@ def resolve_model_name(
             _extract_generation_params(request) if request else (None, None)
         )
 
+        if not aspect_ratio:
+            aspect_ratio = _infer_aspect_ratio_from_images(images, video_mode=True)
+
         # 视频默认横屏
         if not aspect_ratio or aspect_ratio not in ("landscape", "portrait"):
             aspect_ratio = "landscape"
@@ -617,19 +741,25 @@ def resolve_model_name(
     return model
 
 
-def get_base_model_aliases() -> Dict[str, str]:
+def get_base_model_aliases(*, include_4k: bool = True) -> Dict[str, str]:
     """返回所有简化模型名（别名）及其描述，用于 /v1/models 接口展示。"""
     aliases = {}
 
     for alias, base in IMAGE_BASE_MODELS.items():
         aspects = MODEL_SUPPORTED_ASPECTS.get(base, [])
-        sizes = MODEL_SUPPORTED_SIZES.get(base, [])
+        sizes = [
+            size
+            for size in MODEL_SUPPORTED_SIZES.get(base, [])
+            if include_4k or size.lower() != "4k"
+        ]
         desc_parts = [f"aspects: {', '.join(aspects)}"]
         if sizes:
             desc_parts.append(f"sizes: {', '.join(sizes)}")
         aliases[alias] = f"Image generation (alias) - {'; '.join(desc_parts)}"
 
     for alias in VIDEO_BASE_MODELS:
+        if not include_4k and is_native_4k_model(alias):
+            continue
         aliases[alias] = (
             "Video generation (alias) - supports landscape/portrait via generationConfig"
         )

@@ -17,8 +17,8 @@ function App() {
             <Route path="/login" element={<Login />} />
             <Route element={<ProtectedRoute />}>
               <Route path="/manage" element={<Manage />} />
+              <Route path="/test" element={<TestPage />} />
             </Route>
-            <Route path="/test" element={<TestPage />} />
           </Routes>
         </BrowserRouter>
         <Toaster position="bottom-right" />

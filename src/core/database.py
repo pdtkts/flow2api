@@ -6,9 +6,18 @@ from contextlib import asynccontextmanager
 from datetime import date, datetime
 from typing import Optional, List, Dict, Any, Tuple, Set
 from pathlib import Path
-from .config import DEFAULT_YESCAPTCHA_TASK_TYPE, get_runtime_data_dir, normalize_yescaptcha_task_type
+from .config import (
+    DEFAULT_CAPMONSTER_MIN_SCORE,
+    DEFAULT_YESCAPTCHA_TASK_TYPE,
+    get_runtime_data_dir,
+    normalize_capmonster_min_score,
+    normalize_yescaptcha_task_type,
+)
 from .runway_manifest import RUNWAY_MANIFEST_VERSION, RUNWAY_MODEL_MANIFEST
-from .storage_errors import is_sqlite_storage_full_error
+from .storage_errors import (
+    is_sqlite_recoverable_storage_error,
+    is_sqlite_storage_full_error,
+)
 from .models import (
     Token,
     TokenStats,
@@ -30,6 +39,7 @@ from .models import (
     GeminiGenConfig,
     GeminiGenAccount,
     GeminiGenTask,
+    TokenRefreshConfig,
 )
 
 
@@ -167,6 +177,21 @@ class Database:
         """Apply SQLite runtime settings for better concurrent behavior."""
         await db.execute(f"PRAGMA busy_timeout = {self._busy_timeout_ms}")
         await db.execute("PRAGMA foreign_keys = ON")
+
+    async def _configure_write_pragmas(self, db):
+        """Prefer WAL, but fall back when the mounted volume cannot create WAL files."""
+        try:
+            await db.execute("PRAGMA journal_mode = WAL")
+            await db.execute("PRAGMA synchronous = NORMAL")
+        except Exception as exc:
+            if not is_sqlite_recoverable_storage_error(exc):
+                raise
+            print(
+                "WARN SQLite WAL mode unavailable during startup "
+                f"({exc}); falling back to DELETE journal mode."
+            )
+            await db.execute("PRAGMA journal_mode = DELETE")
+            await db.execute("PRAGMA synchronous = FULL")
 
     def _current_stats_date(self) -> str:
         """Return the logical date used by daily token statistics."""
@@ -357,6 +382,7 @@ class Database:
             CREATE TABLE IF NOT EXISTS geminigen_config (
                 id INTEGER PRIMARY KEY DEFAULT 1,
                 enabled BOOLEAN DEFAULT 0,
+                video_enabled BOOLEAN DEFAULT 1,
                 base_url TEXT DEFAULT 'https://api.geminigen.ai',
                 poll_interval_image_sec REAL DEFAULT 3.0,
                 poll_interval_video_sec REAL DEFAULT 12.0,
@@ -385,6 +411,27 @@ class Database:
                 last_status TEXT,
                 last_error TEXT,
                 last_used_at TIMESTAMP,
+                profile_user_id INTEGER,
+                profile_uuid TEXT,
+                profile_email TEXT,
+                profile_full_name TEXT,
+                profile_is_active BOOLEAN,
+                available_credit INTEGER,
+                plan_credit INTEGER,
+                purchased_credit INTEGER,
+                locked_credit INTEGER,
+                subscription_credit INTEGER,
+                plan_name TEXT,
+                plan_expire_at TIMESTAMP,
+                active_benefits_json TEXT,
+                remaining_bulk_videos INTEGER,
+                remaining_daily_videos INTEGER,
+                remaining_grok_max_daily_videos INTEGER,
+                remaining_grok_max_daily_720p_videos INTEGER,
+                remaining_grok_max_daily_10s_videos INTEGER,
+                profile_synced_at TIMESTAMP,
+                profile_sync_status TEXT,
+                profile_sync_error TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
@@ -425,11 +472,33 @@ class Database:
             ("video_concurrency", "INTEGER DEFAULT 5"),
             ("image_in_flight", "INTEGER DEFAULT 0"),
             ("video_in_flight", "INTEGER DEFAULT 0"),
+            ("profile_user_id", "INTEGER"),
+            ("profile_uuid", "TEXT"),
+            ("profile_email", "TEXT"),
+            ("profile_full_name", "TEXT"),
+            ("profile_is_active", "BOOLEAN"),
+            ("available_credit", "INTEGER"),
+            ("plan_credit", "INTEGER"),
+            ("purchased_credit", "INTEGER"),
+            ("locked_credit", "INTEGER"),
+            ("subscription_credit", "INTEGER"),
+            ("plan_name", "TEXT"),
+            ("plan_expire_at", "TIMESTAMP"),
+            ("active_benefits_json", "TEXT"),
+            ("remaining_bulk_videos", "INTEGER"),
+            ("remaining_daily_videos", "INTEGER"),
+            ("remaining_grok_max_daily_videos", "INTEGER"),
+            ("remaining_grok_max_daily_720p_videos", "INTEGER"),
+            ("remaining_grok_max_daily_10s_videos", "INTEGER"),
+            ("profile_synced_at", "TIMESTAMP"),
+            ("profile_sync_status", "TEXT"),
+            ("profile_sync_error", "TEXT"),
         ]
         for column_name, column_type in account_columns:
             if not await self._column_exists(db, "geminigen_accounts", column_name):
                 await db.execute(f"ALTER TABLE geminigen_accounts ADD COLUMN {column_name} {column_type}")
         config_columns = [
+            ("video_enabled", "BOOLEAN DEFAULT 1"),
             ("global_image_concurrency", "INTEGER DEFAULT 5"),
             ("global_video_concurrency", "INTEGER DEFAULT 5"),
         ]
@@ -589,19 +658,28 @@ class Database:
             cache_enabled = False
             cache_timeout = 7200
             cache_base_url = None
+            cache_provider = "local"
+            cache_delivery_mode = "proxy"
 
             if config_dict:
                 cache_config = config_dict.get("cache", {})
                 cache_enabled = cache_config.get("enabled", False)
                 cache_timeout = cache_config.get("timeout", 7200)
                 cache_base_url = cache_config.get("base_url", "")
+                cache_provider = cache_config.get("provider", "local")
+                cache_delivery_mode = cache_config.get("delivery_mode", "proxy")
                 # Convert empty string to None
                 cache_base_url = cache_base_url if cache_base_url else None
 
             await db.execute("""
-                INSERT INTO cache_config (id, cache_enabled, cache_timeout, cache_base_url)
-                VALUES (1, ?, ?, ?)
-            """, (cache_enabled, cache_timeout, cache_base_url))
+                INSERT INTO cache_config (
+                    id, cache_enabled, cache_timeout, cache_base_url,
+                    cache_provider, cache_delivery_mode
+                ) VALUES (1, ?, ?, ?, ?, ?)
+            """, (
+                cache_enabled, cache_timeout, cache_base_url,
+                cache_provider, cache_delivery_mode,
+            ))
 
         # Ensure debug_config has a row
         cursor = await db.execute("SELECT COUNT(*) FROM debug_config")
@@ -817,8 +895,7 @@ class Database:
         """
         async with self._connect(write=True) as db:
             print("Checking database integrity and performing migrations...")
-            await db.execute("PRAGMA journal_mode = WAL")
-            await db.execute("PRAGMA synchronous = NORMAL")
+            await self._configure_write_pragmas(db)
             await self._ensure_runway_tables(db)
             await self._ensure_geminigen_tables(db)
 
@@ -832,6 +909,8 @@ class Database:
                         cache_enabled BOOLEAN DEFAULT 0,
                         cache_timeout INTEGER DEFAULT 7200,
                         cache_base_url TEXT,
+                        cache_provider TEXT DEFAULT 'local',
+                        cache_delivery_mode TEXT DEFAULT 'proxy',
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )
@@ -872,9 +951,10 @@ class Database:
                         captcha_method TEXT DEFAULT 'browser',
                         yescaptcha_api_key TEXT DEFAULT '',
                         yescaptcha_base_url TEXT DEFAULT 'https://api.yescaptcha.com',
-                        yescaptcha_task_type TEXT DEFAULT 'RecaptchaV3TaskProxylessM1',
+                        yescaptcha_task_type TEXT DEFAULT 'RecaptchaV3TaskProxylessM1S9',
                         capmonster_api_key TEXT DEFAULT '',
                         capmonster_base_url TEXT DEFAULT 'https://api.capmonster.cloud',
+                        capmonster_min_score REAL DEFAULT 0.9,
                         ezcaptcha_api_key TEXT DEFAULT '',
                         ezcaptcha_base_url TEXT DEFAULT 'https://api.ez-captcha.com',
                         capsolver_api_key TEXT DEFAULT '',
@@ -965,6 +1045,7 @@ class Database:
                         is_active BOOLEAN DEFAULT 1,
                         expires_at TIMESTAMP,
                         last_used_at TIMESTAMP,
+                        last_presence_at TIMESTAMP,
                         adobe_cloning_enabled INTEGER DEFAULT 1,
                         adobe_metadata_enabled INTEGER DEFAULT 1,
                         adobe_tracker_enabled INTEGER DEFAULT 1,
@@ -1032,6 +1113,10 @@ class Database:
                         flow_project_id TEXT,
                         media_type TEXT,
                         source_url TEXT,
+                        storage_provider TEXT DEFAULT 'local',
+                        object_key TEXT,
+                        delivery_mode TEXT DEFAULT 'proxy',
+                        size_bytes INTEGER,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         FOREIGN KEY (api_key_id) REFERENCES api_keys(id),
@@ -1056,6 +1141,15 @@ class Database:
                     ("captcha_proxy_url", "TEXT"),  # token级打码代理
                     ("extension_route_key", "TEXT"),  # extension 模式路由键
                     ("use_extension_for_generation", "INTEGER NOT NULL DEFAULT 1"),
+                    ("protocol_mode", "TEXT NOT NULL DEFAULT 'session'"),
+                    ("google_cookies", "TEXT NOT NULL DEFAULT ''"),
+                    ("login_account", "TEXT NOT NULL DEFAULT ''"),
+                    ("login_password", "TEXT NOT NULL DEFAULT ''"),
+                    ("proxy_url", "TEXT NOT NULL DEFAULT ''"),
+                    ("auto_refresh_enabled", "BOOLEAN NOT NULL DEFAULT 1"),
+                    ("refresh_interval_minutes", "INTEGER NOT NULL DEFAULT 120"),
+                    ("last_st_refresh_at", "TIMESTAMP"),
+                    ("last_st_refresh_result", "TEXT NOT NULL DEFAULT ''"),
                     ("ban_reason", "TEXT"),  # 禁用原因
                     ("banned_at", "TIMESTAMP"),  # 禁用时间
                 ]
@@ -1181,9 +1275,10 @@ class Database:
                 captcha_columns_to_add = [
                     ("browser_proxy_enabled", "BOOLEAN DEFAULT 0"),
                     ("browser_proxy_url", "TEXT"),
-                    ("yescaptcha_task_type", "TEXT DEFAULT 'RecaptchaV3TaskProxylessM1'"),
+                    ("yescaptcha_task_type", "TEXT DEFAULT 'RecaptchaV3TaskProxylessM1S9'"),
                     ("capmonster_api_key", "TEXT DEFAULT ''"),
                     ("capmonster_base_url", "TEXT DEFAULT 'https://api.capmonster.cloud'"),
+                    ("capmonster_min_score", "REAL DEFAULT 0.9"),
                     ("ezcaptcha_api_key", "TEXT DEFAULT ''"),
                     ("ezcaptcha_base_url", "TEXT DEFAULT 'https://api.ez-captcha.com'"),
                     ("capsolver_api_key", "TEXT DEFAULT ''"),
@@ -1262,6 +1357,7 @@ class Database:
             if await self._table_exists(db, "api_keys"):
                 api_keys_columns_to_add = [
                     ("key_plaintext", "TEXT"),
+                    ("last_presence_at", "TIMESTAMP"),
                     ("adobe_cloning_enabled", "INTEGER DEFAULT 1"),
                     ("adobe_metadata_enabled", "INTEGER DEFAULT 1"),
                     ("adobe_tracker_enabled", "INTEGER DEFAULT 1"),
@@ -1293,14 +1389,11 @@ class Database:
                             print(f"  ERR Failed to add column '{col_name}': {e}")
 
             if await self._table_exists(db, "cache_files"):
-                if not await self._column_exists(db, "cache_files", "flow_project_id"):
-                    try:
-                        await db.execute("ALTER TABLE cache_files ADD COLUMN flow_project_id TEXT")
-                        print("  OK Added column 'flow_project_id' to cache_files table")
-                    except Exception as e:
-                        print(f"  ERR Failed to add column 'flow_project_id' to cache_files: {e}")
+                await self._ensure_cache_backend_columns(db)
 
+            await self._ensure_operation_stats_table(db)
             await self._ensure_tokens_use_extension_for_generation_column(db)
+            await self._ensure_tokens_browser_profile_columns(db)
 
             # ========== Step 3: Ensure all config tables have default rows ==========
             # Note: This will NOT overwrite existing config rows
@@ -1314,6 +1407,7 @@ class Database:
             )
             await db.execute("CREATE INDEX IF NOT EXISTS idx_cache_files_api_key_filename ON cache_files(api_key_id, filename)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_cache_files_api_key_project ON cache_files(api_key_id, flow_project_id)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_operation_stats_operation ON operation_stats(operation)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_extension_worker_bindings_api_key_id ON extension_worker_bindings(api_key_id)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_captcha_worker_keys_active ON captcha_worker_keys(is_active)")
 
@@ -1323,8 +1417,7 @@ class Database:
     async def init_db(self):
         """Initialize database tables"""
         async with self._connect(write=True) as db:
-            await db.execute("PRAGMA journal_mode = WAL")
-            await db.execute("PRAGMA synchronous = NORMAL")
+            await self._configure_write_pragmas(db)
             # Tokens table (Flow2API版本)
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS tokens (
@@ -1350,10 +1443,45 @@ class Database:
                     captcha_proxy_url TEXT,
                     extension_route_key TEXT,
                     use_extension_for_generation INTEGER NOT NULL DEFAULT 1,
+                    auth_mode TEXT NOT NULL DEFAULT 'session_token',
+                    browser_profile_path TEXT,
+                    browser_profile_status TEXT DEFAULT 'not_created',
+                    browser_profile_email TEXT,
+                    browser_profile_name TEXT,
+                    browser_profile_login_state TEXT DEFAULT 'unknown',
+                    browser_profile_cookie_status TEXT DEFAULT 'unknown',
+                    browser_profile_st_status TEXT DEFAULT 'unknown',
+                    browser_profile_at_status TEXT DEFAULT 'unknown',
+                    browser_profile_last_opened_at TIMESTAMP,
+                    browser_profile_last_sync_at TIMESTAMP,
+                    browser_profile_last_refresh_at TIMESTAMP,
+                    browser_profile_last_error TEXT,
+                    protocol_mode TEXT NOT NULL DEFAULT 'session',
+                    google_cookies TEXT NOT NULL DEFAULT '',
+                    login_account TEXT NOT NULL DEFAULT '',
+                    login_password TEXT NOT NULL DEFAULT '',
+                    proxy_url TEXT NOT NULL DEFAULT '',
+                    auto_refresh_enabled BOOLEAN NOT NULL DEFAULT 1,
+                    refresh_interval_minutes INTEGER NOT NULL DEFAULT 120,
+                    last_st_refresh_at TIMESTAMP,
+                    last_st_refresh_result TEXT NOT NULL DEFAULT '',
                     ban_reason TEXT,
                     banned_at TIMESTAMP
                 )
             """)
+
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS token_refresh_config (
+                    id INTEGER PRIMARY KEY DEFAULT 1,
+                    enabled BOOLEAN NOT NULL DEFAULT 1,
+                    refresh_interval_minutes INTEGER NOT NULL DEFAULT 120,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            await db.execute(
+                "INSERT OR IGNORE INTO token_refresh_config "
+                "(id, enabled, refresh_interval_minutes) VALUES (1, 1, 120)"
+            )
 
             # Projects table (新增)
             await db.execute("""
@@ -1390,6 +1518,8 @@ class Database:
                     FOREIGN KEY (token_id) REFERENCES tokens(id)
                 )
             """)
+
+            await self._ensure_operation_stats_table(db)
 
             # Tasks table
             await db.execute("""
@@ -1448,6 +1578,10 @@ class Database:
                     flow_project_id TEXT,
                     media_type TEXT,
                     source_url TEXT,
+                    storage_provider TEXT DEFAULT 'local',
+                    object_key TEXT,
+                    delivery_mode TEXT DEFAULT 'proxy',
+                    size_bytes INTEGER,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (api_key_id) REFERENCES api_keys(id),
@@ -1554,6 +1688,8 @@ class Database:
                     cache_enabled BOOLEAN DEFAULT 0,
                     cache_timeout INTEGER DEFAULT 7200,
                     cache_base_url TEXT,
+                    cache_provider TEXT DEFAULT 'local',
+                    cache_delivery_mode TEXT DEFAULT 'proxy',
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
@@ -1579,9 +1715,10 @@ class Database:
                     captcha_method TEXT DEFAULT 'browser',
                     yescaptcha_api_key TEXT DEFAULT '',
                     yescaptcha_base_url TEXT DEFAULT 'https://api.yescaptcha.com',
-                    yescaptcha_task_type TEXT DEFAULT 'RecaptchaV3TaskProxylessM1',
+                    yescaptcha_task_type TEXT DEFAULT 'RecaptchaV3TaskProxylessM1S9',
                     capmonster_api_key TEXT DEFAULT '',
                     capmonster_base_url TEXT DEFAULT 'https://api.capmonster.cloud',
+                    capmonster_min_score REAL DEFAULT 0.9,
                     ezcaptcha_api_key TEXT DEFAULT '',
                     ezcaptcha_base_url TEXT DEFAULT 'https://api.ez-captcha.com',
                     capsolver_api_key TEXT DEFAULT '',
@@ -1660,6 +1797,7 @@ class Database:
                     is_active BOOLEAN DEFAULT 1,
                     expires_at TIMESTAMP,
                     last_used_at TIMESTAMP,
+                    last_presence_at TIMESTAMP,
                     adobe_cloning_enabled INTEGER DEFAULT 1,
                     adobe_metadata_enabled INTEGER DEFAULT 1,
                     adobe_tracker_enabled INTEGER DEFAULT 1,
@@ -1736,6 +1874,7 @@ class Database:
             await self._ensure_api_key_ownership_columns(db)
             await self._ensure_task_async_columns(db)
             await self._ensure_tokens_use_extension_for_generation_column(db)
+            await self._ensure_tokens_browser_profile_columns(db)
 
             # Create indexes
             await db.execute("CREATE INDEX IF NOT EXISTS idx_task_id ON tasks(task_id)")
@@ -1765,8 +1904,24 @@ class Database:
 
             # Token stats lookup index
             await db.execute("CREATE INDEX IF NOT EXISTS idx_token_stats_token_id ON token_stats(token_id)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_operation_stats_operation ON operation_stats(operation)")
 
             await db.commit()
+
+    async def _ensure_operation_stats_table(self, db) -> None:
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS operation_stats (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                operation TEXT NOT NULL UNIQUE,
+                success_count INTEGER DEFAULT 0,
+                error_count INTEGER DEFAULT 0,
+                today_success_count INTEGER DEFAULT 0,
+                today_error_count INTEGER DEFAULT 0,
+                today_date DATE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
 
     async def _ensure_tokens_use_extension_for_generation_column(self, db) -> None:
         """Add use_extension_for_generation when upgrading older tokens schemas."""
@@ -1780,6 +1935,34 @@ class Database:
                 print("  OK Added column 'use_extension_for_generation' to tokens table")
         except Exception as e:
             print(f"  ERR tokens use_extension_for_generation migration failed: {e}")
+
+    async def _ensure_tokens_browser_profile_columns(self, db) -> None:
+        """Add headed persistent-browser profile metadata to tokens."""
+        try:
+            if not await self._table_exists(db, "tokens"):
+                return
+            columns_to_add = [
+                ("auth_mode", "TEXT NOT NULL DEFAULT 'session_token'"),
+                ("browser_profile_path", "TEXT"),
+                ("browser_profile_status", "TEXT DEFAULT 'not_created'"),
+                ("browser_profile_email", "TEXT"),
+                ("browser_profile_name", "TEXT"),
+                ("browser_profile_login_state", "TEXT DEFAULT 'unknown'"),
+                ("browser_profile_cookie_status", "TEXT DEFAULT 'unknown'"),
+                ("browser_profile_st_status", "TEXT DEFAULT 'unknown'"),
+                ("browser_profile_at_status", "TEXT DEFAULT 'unknown'"),
+                ("browser_profile_last_opened_at", "TIMESTAMP"),
+                ("browser_profile_last_sync_at", "TIMESTAMP"),
+                ("browser_profile_last_refresh_at", "TIMESTAMP"),
+                ("browser_profile_last_error", "TEXT"),
+            ]
+            for col_name, col_type in columns_to_add:
+                if not await self._column_exists(db, "tokens", col_name):
+                    await db.execute(f"ALTER TABLE tokens ADD COLUMN {col_name} {col_type}")
+                    print(f"  OK Added column '{col_name}' to tokens table")
+        except Exception as e:
+            print(f"  ERR tokens browser profile migration failed: {e}")
+            raise
 
     async def _ensure_api_key_ownership_columns(self, db):
         """Add api_key_id to core tables when upgrading from older schemas (before indexes on those columns)."""
@@ -1797,12 +1980,38 @@ class Database:
                     await db.execute("ALTER TABLE request_logs ADD COLUMN api_key_id INTEGER")
                     print("  OK Added column 'api_key_id' to request_logs (init_db upgrade)")
             if await self._table_exists(db, "cache_files"):
-                if not await self._column_exists(db, "cache_files", "flow_project_id"):
-                    await db.execute("ALTER TABLE cache_files ADD COLUMN flow_project_id TEXT")
-                    print("  OK Added column 'flow_project_id' to cache_files (init_db upgrade)")
+                await self._ensure_cache_backend_columns(db)
         except Exception as e:
             print(f"  ERR api_key_id column upgrade failed: {e}")
             raise
+
+    async def _ensure_cache_backend_columns(self, db):
+        """Upgrade cache tables for selectable storage providers."""
+        cache_file_columns = {
+            "flow_project_id": "TEXT",
+            "storage_provider": "TEXT DEFAULT 'local'",
+            "object_key": "TEXT",
+            "delivery_mode": "TEXT DEFAULT 'proxy'",
+            "size_bytes": "INTEGER",
+        }
+        if await self._table_exists(db, "cache_files"):
+            for column_name, column_type in cache_file_columns.items():
+                if not await self._column_exists(db, "cache_files", column_name):
+                    await db.execute(f"ALTER TABLE cache_files ADD COLUMN {column_name} {column_type}")
+                    print(f"  OK Added column '{column_name}' to cache_files")
+            await db.execute(
+                "UPDATE cache_files SET object_key = filename "
+                "WHERE object_key IS NULL OR object_key = ''"
+            )
+
+        if await self._table_exists(db, "cache_config"):
+            for column_name, column_type in {
+                "cache_provider": "TEXT DEFAULT 'local'",
+                "cache_delivery_mode": "TEXT DEFAULT 'proxy'",
+            }.items():
+                if not await self._column_exists(db, "cache_config", column_name):
+                    await db.execute(f"ALTER TABLE cache_config ADD COLUMN {column_name} {column_type}")
+                    print(f"  OK Added column '{column_name}' to cache_config")
 
     async def _ensure_task_async_columns(self, db):
         """Add async job metadata columns to tasks for polling payload enrichment."""
@@ -1906,14 +2115,45 @@ class Database:
             cursor = await db.execute("""
                 INSERT INTO tokens (st, at, at_expires, email, name, remark, is_active,
                                    credits, user_paygate_tier, current_project_id, current_project_name,
-                                   image_enabled, video_enabled, image_concurrency, video_concurrency, captcha_proxy_url, extension_route_key, use_extension_for_generation)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                   image_enabled, video_enabled, image_concurrency, video_concurrency,
+                                   captcha_proxy_url, extension_route_key, use_extension_for_generation,
+                                   auth_mode, browser_profile_path, browser_profile_status,
+                                   browser_profile_email, browser_profile_name, browser_profile_login_state,
+                                   browser_profile_cookie_status, browser_profile_st_status, browser_profile_at_status,
+                                   browser_profile_last_opened_at, browser_profile_last_sync_at,
+                                   browser_profile_last_refresh_at, browser_profile_last_error,
+                                   protocol_mode, google_cookies, login_account, login_password, proxy_url,
+                                   auto_refresh_enabled, refresh_interval_minutes,
+                                   last_st_refresh_at, last_st_refresh_result)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (token.st, token.at, token.at_expires, token.email, token.name, token.remark,
                   token.is_active, token.credits, token.user_paygate_tier,
                   token.current_project_id, token.current_project_name,
                   token.image_enabled, token.video_enabled,
                   token.image_concurrency, token.video_concurrency, token.captcha_proxy_url, token.extension_route_key,
-                  1 if getattr(token, "use_extension_for_generation", True) else 0))
+                  1 if getattr(token, "use_extension_for_generation", True) else 0,
+                  getattr(token, "auth_mode", "session_token"),
+                  getattr(token, "browser_profile_path", None),
+                  getattr(token, "browser_profile_status", "not_created"),
+                  getattr(token, "browser_profile_email", None),
+                  getattr(token, "browser_profile_name", None),
+                  getattr(token, "browser_profile_login_state", "unknown"),
+                  getattr(token, "browser_profile_cookie_status", "unknown"),
+                  getattr(token, "browser_profile_st_status", "unknown"),
+                  getattr(token, "browser_profile_at_status", "unknown"),
+                  getattr(token, "browser_profile_last_opened_at", None),
+                  getattr(token, "browser_profile_last_sync_at", None),
+                  getattr(token, "browser_profile_last_refresh_at", None),
+                  getattr(token, "browser_profile_last_error", None),
+                  getattr(token, "protocol_mode", "session"),
+                  getattr(token, "google_cookies", ""),
+                  getattr(token, "login_account", ""),
+                  getattr(token, "login_password", ""),
+                  getattr(token, "proxy_url", ""),
+                  1 if getattr(token, "auto_refresh_enabled", True) else 0,
+                  max(1, min(10080, int(getattr(token, "refresh_interval_minutes", 120) or 120))),
+                  getattr(token, "last_st_refresh_at", None),
+                  getattr(token, "last_st_refresh_result", "")))
             await db.commit()
             token_id = cursor.lastrowid
 
@@ -2033,6 +2273,7 @@ class Database:
             token_data = dict(token_row) if token_row else {}
             stats_data = dict(stats_row) if stats_row else {}
             geminigen_data = dict(geminigen_row) if geminigen_row else {}
+            metadata_stats = await self.get_operation_stats("adobe:metadata")
 
             return {
                 "total_tokens": int(token_data.get("total_tokens") or 0),
@@ -2042,8 +2283,122 @@ class Database:
                 "total_errors": int(stats_data.get("total_errors") or 0) + int(geminigen_data.get("total_errors") or 0),
                 "today_images": int(stats_data.get("today_images") or 0) + int(geminigen_data.get("today_images") or 0),
                 "today_videos": int(stats_data.get("today_videos") or 0) + int(geminigen_data.get("today_videos") or 0),
-                "today_errors": int(stats_data.get("today_errors") or 0) + int(geminigen_data.get("today_errors") or 0)
+                "today_errors": int(stats_data.get("today_errors") or 0) + int(geminigen_data.get("today_errors") or 0),
+                "total_metadata": int(metadata_stats.get("success_count") or 0),
+                "today_metadata": int(metadata_stats.get("today_success_count") or 0),
+                "metadata_errors": int(metadata_stats.get("error_count") or 0),
+                "today_metadata_errors": int(metadata_stats.get("today_error_count") or 0),
             }
+
+    async def get_api_key_generation_stats(
+        self,
+        api_key_id: int,
+        *,
+        native_image_models: Optional[List[str]] = None,
+        native_video_models: Optional[List[str]] = None,
+    ) -> Dict[str, int]:
+        """Dashboard-style durable generation counters for one managed API key."""
+        today = self._current_stats_date()
+        stats = {
+            "total_images": 0,
+            "total_videos": 0,
+            "total_errors": 0,
+            "today_images": 0,
+            "today_videos": 0,
+            "today_errors": 0,
+        }
+
+        def add_row(row: Optional[aiosqlite.Row]) -> None:
+            data = dict(row) if row else {}
+            for key in stats:
+                stats[key] += int(data.get(key) or 0)
+
+        def model_in_condition(column_name: str, values: List[str]) -> tuple[str, List[str]]:
+            cleaned = [str(value).strip() for value in values if str(value).strip()]
+            if not cleaned:
+                return "0", []
+            placeholders = ",".join("?" for _ in cleaned)
+            return f"{column_name} IN ({placeholders})", cleaned
+
+        image_condition, image_params = model_in_condition("model", native_image_models or [])
+        video_condition, video_params = model_in_condition("model", native_video_models or [])
+
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+
+            native_params: List[Any] = (
+                image_params
+                + video_params
+                + image_params
+                + [today]
+                + video_params
+                + [today, today, api_key_id]
+            )
+            native_cursor = await db.execute(
+                f"""
+                SELECT
+                    COALESCE(SUM(CASE WHEN status = 'completed' AND {image_condition} THEN 1 ELSE 0 END), 0) AS total_images,
+                    COALESCE(SUM(CASE WHEN status = 'completed' AND {video_condition} THEN 1 ELSE 0 END), 0) AS total_videos,
+                    COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0) AS total_errors,
+                    COALESCE(SUM(CASE
+                        WHEN status = 'completed' AND {image_condition}
+                             AND DATE(completed_at, 'localtime') = ? THEN 1 ELSE 0 END), 0) AS today_images,
+                    COALESCE(SUM(CASE
+                        WHEN status = 'completed' AND {video_condition}
+                             AND DATE(completed_at, 'localtime') = ? THEN 1 ELSE 0 END), 0) AS today_videos,
+                    COALESCE(SUM(CASE
+                        WHEN status = 'failed' AND DATE(completed_at, 'localtime') = ? THEN 1 ELSE 0 END), 0) AS today_errors
+                FROM tasks
+                WHERE api_key_id = ?
+                """,
+                native_params,
+            )
+            add_row(await native_cursor.fetchone())
+
+            geminigen_cursor = await db.execute(
+                """
+                SELECT
+                    COALESCE(SUM(CASE WHEN status = 'completed' AND kind = 'image' THEN 1 ELSE 0 END), 0) AS total_images,
+                    COALESCE(SUM(CASE WHEN status = 'completed' AND kind = 'video' THEN 1 ELSE 0 END), 0) AS total_videos,
+                    COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0) AS total_errors,
+                    COALESCE(SUM(CASE
+                        WHEN status = 'completed' AND kind = 'image'
+                             AND DATE(completed_at, 'localtime') = ? THEN 1 ELSE 0 END), 0) AS today_images,
+                    COALESCE(SUM(CASE
+                        WHEN status = 'completed' AND kind = 'video'
+                             AND DATE(completed_at, 'localtime') = ? THEN 1 ELSE 0 END), 0) AS today_videos,
+                    COALESCE(SUM(CASE
+                        WHEN status = 'failed' AND DATE(completed_at, 'localtime') = ? THEN 1 ELSE 0 END), 0) AS today_errors
+                FROM geminigen_tasks
+                WHERE api_key_id = ?
+                """,
+                (today, today, today, api_key_id),
+            )
+            add_row(await geminigen_cursor.fetchone())
+
+            runway_cursor = await db.execute(
+                """
+                SELECT
+                    COALESCE(SUM(CASE WHEN rt.status = 'completed' AND rm.kind = 'image' THEN 1 ELSE 0 END), 0) AS total_images,
+                    COALESCE(SUM(CASE WHEN rt.status = 'completed' AND rm.kind = 'video' THEN 1 ELSE 0 END), 0) AS total_videos,
+                    COALESCE(SUM(CASE WHEN rt.status = 'failed' THEN 1 ELSE 0 END), 0) AS total_errors,
+                    COALESCE(SUM(CASE
+                        WHEN rt.status = 'completed' AND rm.kind = 'image'
+                             AND DATE(rt.completed_at, 'localtime') = ? THEN 1 ELSE 0 END), 0) AS today_images,
+                    COALESCE(SUM(CASE
+                        WHEN rt.status = 'completed' AND rm.kind = 'video'
+                             AND DATE(rt.completed_at, 'localtime') = ? THEN 1 ELSE 0 END), 0) AS today_videos,
+                    COALESCE(SUM(CASE
+                        WHEN rt.status = 'failed' AND DATE(rt.completed_at, 'localtime') = ? THEN 1 ELSE 0 END), 0) AS today_errors
+                FROM runway_tasks rt
+                LEFT JOIN runway_models rm ON rm.public_model_id = rt.public_model_id
+                WHERE rt.api_key_id = ?
+                """,
+                (today, today, today, api_key_id),
+            )
+            add_row(await runway_cursor.fetchone())
+
+        return stats
 
     async def get_system_info_stats(self) -> Dict[str, int]:
         """Get lightweight system counters used by admin dashboard"""
@@ -2816,6 +3171,7 @@ class Database:
         self,
         *,
         enabled: Optional[bool] = None,
+        video_enabled: Optional[bool] = None,
         base_url: Optional[str] = None,
         poll_interval_image_sec: Optional[float] = None,
         poll_interval_video_sec: Optional[float] = None,
@@ -2828,6 +3184,7 @@ class Database:
         current = await self.get_geminigen_config()
         values = {
             "enabled": int(current.enabled if enabled is None else bool(enabled)),
+            "video_enabled": int(current.video_enabled if video_enabled is None else bool(video_enabled)),
             "base_url": (base_url if base_url is not None else current.base_url).strip().rstrip("/") or "https://api.geminigen.ai",
             "poll_interval_image_sec": max(1.0, float(current.poll_interval_image_sec if poll_interval_image_sec is None else poll_interval_image_sec)),
             "poll_interval_video_sec": max(2.0, float(current.poll_interval_video_sec if poll_interval_video_sec is None else poll_interval_video_sec)),
@@ -2841,13 +3198,14 @@ class Database:
             await db.execute(
                 """
                 INSERT INTO geminigen_config (
-                    id, enabled, base_url, poll_interval_image_sec, poll_interval_video_sec,
+                    id, enabled, video_enabled, base_url, poll_interval_image_sec, poll_interval_video_sec,
                     timeout_image_sec, timeout_video_sec, global_image_concurrency,
                     global_video_concurrency, cache_outputs, updated_at
                 )
-                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                 ON CONFLICT(id) DO UPDATE SET
                     enabled = excluded.enabled,
+                    video_enabled = excluded.video_enabled,
                     base_url = excluded.base_url,
                     poll_interval_image_sec = excluded.poll_interval_image_sec,
                     poll_interval_video_sec = excluded.poll_interval_video_sec,
@@ -2860,6 +3218,7 @@ class Database:
                 """,
                 (
                     values["enabled"],
+                    values["video_enabled"],
                     values["base_url"],
                     values["poll_interval_image_sec"],
                     values["poll_interval_video_sec"],
@@ -2878,6 +3237,52 @@ class Database:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute("SELECT * FROM geminigen_accounts ORDER BY is_active DESC, id ASC")
             return [GeminiGenAccount(**dict(row)) for row in await cursor.fetchall()]
+
+    async def get_geminigen_account_generation_stats(
+        self,
+        account_ids: Optional[List[int]] = None,
+    ) -> Dict[int, Dict[str, int]]:
+        today = self._current_stats_date()
+        cleaned_ids = sorted({int(account_id) for account_id in (account_ids or []) if account_id})
+        account_filter = ""
+        params: List[Any] = [today, today]
+        if cleaned_ids:
+            placeholders = ",".join("?" for _ in cleaned_ids)
+            account_filter = f" AND account_id IN ({placeholders})"
+            params.extend(cleaned_ids)
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                f"""
+                SELECT
+                    account_id,
+                    COALESCE(SUM(CASE WHEN kind = 'image' THEN 1 ELSE 0 END), 0) AS image_generated_total,
+                    COALESCE(SUM(CASE
+                        WHEN kind = 'image'
+                             AND DATE(completed_at, 'localtime') = ? THEN 1 ELSE 0 END), 0) AS image_generated_today,
+                    COALESCE(SUM(CASE WHEN kind = 'video' THEN 1 ELSE 0 END), 0) AS video_generated_total,
+                    COALESCE(SUM(CASE
+                        WHEN kind = 'video'
+                             AND DATE(completed_at, 'localtime') = ? THEN 1 ELSE 0 END), 0) AS video_generated_today
+                FROM geminigen_tasks
+                WHERE status = 'completed'
+                  AND account_id IS NOT NULL
+                  {account_filter}
+                GROUP BY account_id
+                """,
+                params,
+            )
+            rows = await cursor.fetchall()
+            return {
+                int(row["account_id"]): {
+                    "image_generated_today": int(row["image_generated_today"] or 0),
+                    "image_generated_total": int(row["image_generated_total"] or 0),
+                    "video_generated_today": int(row["video_generated_today"] or 0),
+                    "video_generated_total": int(row["video_generated_total"] or 0),
+                }
+                for row in rows
+                if row["account_id"] is not None
+            }
 
     async def get_geminigen_account(self, account_id: int) -> Optional[GeminiGenAccount]:
         async with self._connect() as db:
@@ -2932,6 +3337,12 @@ class Database:
             "label", "raw_cookie", "bearer_token", "refresh_token", "guard_id", "turnstile_token",
             "is_active", "image_concurrency", "video_concurrency",
             "image_in_flight", "video_in_flight", "last_status", "last_error", "last_used_at",
+            "profile_user_id", "profile_uuid", "profile_email", "profile_full_name", "profile_is_active",
+            "available_credit", "plan_credit", "purchased_credit", "locked_credit", "subscription_credit",
+            "plan_name", "plan_expire_at", "active_benefits_json", "remaining_bulk_videos",
+            "remaining_daily_videos", "remaining_grok_max_daily_videos",
+            "remaining_grok_max_daily_720p_videos", "remaining_grok_max_daily_10s_videos",
+            "profile_synced_at", "profile_sync_status", "profile_sync_error",
         }
         updates = []
         params = []
@@ -2940,7 +3351,15 @@ class Database:
                 continue
             if key == "is_active":
                 value = int(bool(value))
-            if key in {"image_concurrency", "video_concurrency", "image_in_flight", "video_in_flight"} and value is not None:
+            if key == "profile_is_active" and value is not None:
+                value = int(bool(value))
+            if key in {
+                "image_concurrency", "video_concurrency", "image_in_flight", "video_in_flight",
+                "profile_user_id", "available_credit", "plan_credit", "purchased_credit", "locked_credit",
+                "subscription_credit", "remaining_bulk_videos", "remaining_daily_videos",
+                "remaining_grok_max_daily_videos", "remaining_grok_max_daily_720p_videos",
+                "remaining_grok_max_daily_10s_videos",
+            } and value is not None:
                 value = int(value)
             updates.append(f"{key} = ?")
             params.append(value)
@@ -2965,7 +3384,6 @@ class Database:
         is_video = str(kind or "").lower() == "video"
         limit_col = "video_concurrency" if is_video else "image_concurrency"
         inflight_col = "video_in_flight" if is_video else "image_in_flight"
-        global_limit_col = "global_video_concurrency" if is_video else "global_image_concurrency"
         excluded = [int(account_id) for account_id in (excluded_account_ids or []) if account_id]
         exclusion_clause = ""
         params: List[Any] = []
@@ -2975,15 +3393,6 @@ class Database:
             params.extend(excluded)
         async with self._connect(write=True) as db:
             db.row_factory = aiosqlite.Row
-            config_cursor = await db.execute(f"SELECT {global_limit_col} FROM geminigen_config WHERE id = 1")
-            config_row = await config_cursor.fetchone()
-            global_limit_raw = None if not config_row else config_row[global_limit_col]
-            global_limit = 5 if global_limit_raw is None else int(global_limit_raw)
-            if global_limit >= 0:
-                total_cursor = await db.execute(f"SELECT COALESCE(SUM({inflight_col}), 0) FROM geminigen_accounts")
-                total_in_flight = int((await total_cursor.fetchone())[0] or 0)
-                if total_in_flight >= global_limit:
-                    return None
             cursor = await db.execute(
                 f"""
                 SELECT * FROM geminigen_accounts
@@ -3304,6 +3713,85 @@ class Database:
             await self.increment_video_count(token_id)
         elif stat_type == "error":
             await self.increment_error_count(token_id)
+
+    async def increment_operation_stat(self, operation: str, *, success: bool) -> None:
+        """Increment durable counters for non-token operations such as Adobe metadata."""
+        op = str(operation or "").strip()
+        if not op:
+            return
+        today = self._current_stats_date()
+        total_col = "success_count" if success else "error_count"
+        today_col = "today_success_count" if success else "today_error_count"
+        async with self._connect(write=True) as db:
+            await db.execute(
+                """
+                INSERT OR IGNORE INTO operation_stats (operation, today_date)
+                VALUES (?, ?)
+                """,
+                (op, today),
+            )
+            await db.execute(
+                """
+                UPDATE operation_stats
+                SET today_success_count = 0,
+                    today_error_count = 0,
+                    today_date = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE operation = ?
+                  AND COALESCE(today_date, '') != ?
+                """,
+                (today, op, today),
+            )
+            await db.execute(
+                f"""
+                UPDATE operation_stats
+                SET {total_col} = {total_col} + 1,
+                    {today_col} = {today_col} + 1,
+                    today_date = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE operation = ?
+                """,
+                (today, op),
+            )
+            await db.commit()
+
+    async def get_operation_stats(self, operation: str) -> Dict[str, int]:
+        """Return durable operation counters with daily values scoped to today's date."""
+        op = str(operation or "").strip()
+        if not op:
+            return {
+                "success_count": 0,
+                "error_count": 0,
+                "today_success_count": 0,
+                "today_error_count": 0,
+            }
+        today = self._current_stats_date()
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT success_count, error_count, today_success_count, today_error_count, today_date
+                FROM operation_stats
+                WHERE operation = ?
+                """,
+                (op,),
+            )
+            row = await cursor.fetchone()
+        if not row:
+            return {
+                "success_count": 0,
+                "error_count": 0,
+                "today_success_count": 0,
+                "today_error_count": 0,
+            }
+        data = dict(row)
+        same_day = str(data.get("today_date") or "") == today
+        return {
+            "success_count": int(data.get("success_count") or 0),
+            "error_count": int(data.get("error_count") or 0),
+            "today_success_count": int(data.get("today_success_count") or 0) if same_day else 0,
+            "today_error_count": int(data.get("today_error_count") or 0) if same_day else 0,
+        }
 
     async def get_token_stats(self, token_id: int) -> Optional[TokenStats]:
         """Get token statistics"""
@@ -4217,28 +4705,72 @@ class Database:
         token_id: Optional[int] = None,
         api_key_id: Optional[int] = None,
         exclude_operations: Optional[List[str]] = None,
+        search: Optional[str] = None,
     ) -> int:
         """Count rows matching the same filters as get_logs."""
         exc_ops = [str(x).strip() for x in (exclude_operations or []) if str(x).strip()]
+        search_text = str(search or "").strip()
         exclude_sql = ""
         if exc_ops:
             ph = ",".join("?" * len(exc_ops))
             exclude_sql = f" AND rl.operation NOT IN ({ph})"
         async with self._connect() as db:
-            tail_params: List[Any] = list(exc_ops)
+            has_status_text = await self._column_exists(db, "request_logs", "status_text")
+            status_text_expr = "COALESCE(rl.status_text, '')" if has_status_text else "''"
+            search_sql = ""
+            search_params: List[Any] = []
+            if search_text:
+                search_sql = f"""
+                    AND (
+                        CAST(rl.id AS TEXT) LIKE ?
+                        OR COALESCE(gt.job_id, '') LIKE ?
+                        OR COALESCE(rl.operation, '') LIKE ?
+                        OR {status_text_expr} LIKE ?
+                        OR COALESCE(rl.request_body, '') LIKE ?
+                        OR COALESCE(rl.response_body, '') LIKE ?
+                        OR COALESCE(t.email, '') LIKE ?
+                        OR COALESCE(t.name, '') LIKE ?
+                        OR COALESCE(k.label, '') LIKE ?
+                        OR COALESCE(k.key_prefix, '') LIKE ?
+                    )
+                """
+                like = f"%{search_text}%"
+                search_params = [like] * 10
+            tail_params: List[Any] = [*exc_ops, *search_params]
             if token_id is not None:
                 cursor = await db.execute(
-                    f"SELECT COUNT(*) FROM request_logs rl WHERE rl.token_id = ?{exclude_sql}",
+                    f"""
+                    SELECT COUNT(*)
+                    FROM request_logs rl
+                    LEFT JOIN tokens t ON rl.token_id = t.id
+                    LEFT JOIN api_keys k ON rl.api_key_id = k.id
+                    LEFT JOIN geminigen_tasks gt ON gt.request_log_id = rl.id
+                    WHERE rl.token_id = ?{exclude_sql}{search_sql}
+                    """,
                     (token_id, *tail_params),
                 )
             elif api_key_id is not None:
                 cursor = await db.execute(
-                    f"SELECT COUNT(*) FROM request_logs rl WHERE rl.api_key_id = ?{exclude_sql}",
+                    f"""
+                    SELECT COUNT(*)
+                    FROM request_logs rl
+                    LEFT JOIN tokens t ON rl.token_id = t.id
+                    LEFT JOIN api_keys k ON rl.api_key_id = k.id
+                    LEFT JOIN geminigen_tasks gt ON gt.request_log_id = rl.id
+                    WHERE rl.api_key_id = ?{exclude_sql}{search_sql}
+                    """,
                     (api_key_id, *tail_params),
                 )
             else:
                 cursor = await db.execute(
-                    f"SELECT COUNT(*) FROM request_logs rl WHERE 1=1{exclude_sql}",
+                    f"""
+                    SELECT COUNT(*)
+                    FROM request_logs rl
+                    LEFT JOIN tokens t ON rl.token_id = t.id
+                    LEFT JOIN api_keys k ON rl.api_key_id = k.id
+                    LEFT JOIN geminigen_tasks gt ON gt.request_log_id = rl.id
+                    WHERE 1=1{exclude_sql}{search_sql}
+                    """,
                     tuple(tail_params),
                 )
             row = await cursor.fetchone()
@@ -4252,10 +4784,12 @@ class Database:
         include_payload: bool = False,
         api_key_id: Optional[int] = None,
         exclude_operations: Optional[List[str]] = None,
+        search: Optional[str] = None,
     ):
         """Get request logs with token info, optionally including payload fields"""
         safe_offset = max(0, int(offset or 0))
         exc_ops = [str(x).strip() for x in (exclude_operations or []) if str(x).strip()]
+        search_text = str(search or "").strip()
         exclude_sql = ""
         exclude_params: List[Any] = []
         if exc_ops:
@@ -4274,6 +4808,26 @@ class Database:
             progress_column = "rl.progress," if has_progress else "0 as progress,"
             updated_at_column = "rl.updated_at," if has_updated_at else "rl.created_at as updated_at,"
             key_cols = "k.label AS api_key_label, k.key_prefix AS api_key_prefix,"
+            status_text_expr = "COALESCE(rl.status_text, '')" if has_status_text else "''"
+            search_sql = ""
+            search_params: List[Any] = []
+            if search_text:
+                search_sql = f"""
+                    AND (
+                        CAST(rl.id AS TEXT) LIKE ?
+                        OR COALESCE(gt.job_id, '') LIKE ?
+                        OR COALESCE(rl.operation, '') LIKE ?
+                        OR {status_text_expr} LIKE ?
+                        OR COALESCE(rl.request_body, '') LIKE ?
+                        OR COALESCE(rl.response_body, '') LIKE ?
+                        OR COALESCE(t.email, '') LIKE ?
+                        OR COALESCE(t.name, '') LIKE ?
+                        OR COALESCE(k.label, '') LIKE ?
+                        OR COALESCE(k.key_prefix, '') LIKE ?
+                    )
+                """
+                like = f"%{search_text}%"
+                search_params = [like] * 10
 
             if token_id:
                 cursor = await db.execute(
@@ -4292,16 +4846,18 @@ class Database:
                         rl.created_at,
                         {updated_at_column}
                         {key_cols}
+                        gt.job_id as job_id,
                         t.email as token_email,
                         t.name as token_username
                     FROM request_logs rl
                     LEFT JOIN tokens t ON rl.token_id = t.id
                     LEFT JOIN api_keys k ON rl.api_key_id = k.id
-                    WHERE rl.token_id = ?{exclude_sql}
+                    LEFT JOIN geminigen_tasks gt ON gt.request_log_id = rl.id
+                    WHERE rl.token_id = ?{exclude_sql}{search_sql}
                     ORDER BY rl.created_at DESC
                     LIMIT ? OFFSET ?
                     """,
-                    (token_id, *exclude_params, limit, safe_offset),
+                    (token_id, *exclude_params, *search_params, limit, safe_offset),
                 )
             elif api_key_id is not None:
                 cursor = await db.execute(
@@ -4320,16 +4876,18 @@ class Database:
                         rl.created_at,
                         {updated_at_column}
                         {key_cols}
+                        gt.job_id as job_id,
                         t.email as token_email,
                         t.name as token_username
                     FROM request_logs rl
                     LEFT JOIN tokens t ON rl.token_id = t.id
                     LEFT JOIN api_keys k ON rl.api_key_id = k.id
-                    WHERE rl.api_key_id = ?{exclude_sql}
+                    LEFT JOIN geminigen_tasks gt ON gt.request_log_id = rl.id
+                    WHERE rl.api_key_id = ?{exclude_sql}{search_sql}
                     ORDER BY rl.created_at DESC
                     LIMIT ? OFFSET ?
                     """,
-                    (api_key_id, *exclude_params, limit, safe_offset),
+                    (api_key_id, *exclude_params, *search_params, limit, safe_offset),
                 )
             else:
                 cursor = await db.execute(
@@ -4348,16 +4906,18 @@ class Database:
                         rl.created_at,
                         {updated_at_column}
                         {key_cols}
+                        gt.job_id as job_id,
                         t.email as token_email,
                         t.name as token_username
                     FROM request_logs rl
                     LEFT JOIN tokens t ON rl.token_id = t.id
                     LEFT JOIN api_keys k ON rl.api_key_id = k.id
-                    WHERE 1=1{exclude_sql}
+                    LEFT JOIN geminigen_tasks gt ON gt.request_log_id = rl.id
+                    WHERE 1=1{exclude_sql}{search_sql}
                     ORDER BY rl.created_at DESC
                     LIMIT ? OFFSET ?
                     """,
-                    (*exclude_params, limit, safe_offset),
+                    (*exclude_params, *search_params, limit, safe_offset),
                 )
 
             rows = await cursor.fetchall()
@@ -4391,11 +4951,13 @@ class Database:
                         rl.created_at,
                         {updated_at_column}
                         {key_cols}
+                        gt.job_id as job_id,
                         t.email as token_email,
                         t.name as token_username
                     FROM request_logs rl
                     LEFT JOIN tokens t ON rl.token_id = t.id
                     LEFT JOIN api_keys k ON rl.api_key_id = k.id
+                    LEFT JOIN geminigen_tasks gt ON gt.request_log_id = rl.id
                     WHERE rl.id = ?
                     LIMIT 1
                     """,
@@ -4418,11 +4980,13 @@ class Database:
                         rl.created_at,
                         {updated_at_column}
                         {key_cols}
+                        gt.job_id as job_id,
                         t.email as token_email,
                         t.name as token_username
                     FROM request_logs rl
                     LEFT JOIN tokens t ON rl.token_id = t.id
                     LEFT JOIN api_keys k ON rl.api_key_id = k.id
+                    LEFT JOIN geminigen_tasks gt ON gt.request_log_id = rl.id
                     WHERE rl.id = ? AND rl.api_key_id = ?
                     LIMIT 1
                     """,
@@ -4437,6 +5001,17 @@ class Database:
             await db.execute("DELETE FROM request_logs")
             await db.commit()
 
+    async def delete_request_logs_older_than(self, days: int = 3) -> int:
+        """Delete request log rows older than the configured number of days."""
+        safe_days = max(1, int(days or 3))
+        async with self._connect(write=True) as db:
+            cursor = await db.execute(
+                "DELETE FROM request_logs WHERE datetime(created_at) < datetime('now', ?)",
+                (f"-{safe_days} days",),
+            )
+            await db.commit()
+            return int(cursor.rowcount or 0)
+
     async def upsert_cache_file(
         self,
         *,
@@ -4446,24 +5021,43 @@ class Database:
         media_type: str,
         source_url: Optional[str] = None,
         flow_project_id: Optional[str] = None,
+        storage_provider: str = "local",
+        object_key: Optional[str] = None,
+        delivery_mode: str = "proxy",
+        size_bytes: Optional[int] = None,
     ):
         """Upsert cache file ownership metadata."""
         async with self._connect(write=True) as db:
             await db.execute(
                 """
-                INSERT INTO cache_files (filename, api_key_id, token_id, flow_project_id, media_type, source_url, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                INSERT INTO cache_files (
+                    filename, api_key_id, token_id, flow_project_id, media_type, source_url,
+                    storage_provider, object_key, delivery_mode, size_bytes, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                 ON CONFLICT(filename) DO UPDATE SET
                     api_key_id = excluded.api_key_id,
                     token_id = excluded.token_id,
                     flow_project_id = excluded.flow_project_id,
                     media_type = excluded.media_type,
                     source_url = excluded.source_url,
+                    storage_provider = excluded.storage_provider,
+                    object_key = excluded.object_key,
+                    delivery_mode = excluded.delivery_mode,
+                    size_bytes = excluded.size_bytes,
                     updated_at = CURRENT_TIMESTAMP
                 """,
-                (filename, api_key_id, token_id, flow_project_id, media_type, source_url),
+                (
+                    filename, api_key_id, token_id, flow_project_id, media_type, source_url,
+                    storage_provider, object_key or filename, delivery_mode, size_bytes,
+                ),
             )
             await db.commit()
+
+    async def delete_all_cache_file_metadata(self) -> int:
+        async with self._connect(write=True) as db:
+            cursor = await db.execute("DELETE FROM cache_files")
+            await db.commit()
+            return int(cursor.rowcount or 0)
 
     async def get_cache_file(self, filename: str) -> Optional[Dict[str, Any]]:
         async with self._connect() as db:
@@ -4604,6 +5198,8 @@ class Database:
             config.set_cache_enabled(cache_config.cache_enabled)
             config.set_cache_timeout(cache_config.cache_timeout)
             config.set_cache_base_url(cache_config.cache_base_url or "")
+            config.set_cache_provider(cache_config.cache_provider)
+            config.set_cache_delivery_mode(cache_config.cache_delivery_mode)
 
         # Reload generation config
         generation_config = await self.get_generation_config()
@@ -4751,6 +5347,7 @@ class Database:
             config.set_yescaptcha_task_type(captcha_config.yescaptcha_task_type)
             config.set_capmonster_api_key(captcha_config.capmonster_api_key)
             config.set_capmonster_base_url(captcha_config.capmonster_base_url)
+            config.set_capmonster_min_score(captcha_config.capmonster_min_score)
             config.set_ezcaptcha_api_key(captcha_config.ezcaptcha_api_key)
             config.set_ezcaptcha_base_url(captcha_config.ezcaptcha_base_url)
             config.set_capsolver_api_key(captcha_config.capsolver_api_key)
@@ -4837,7 +5434,14 @@ class Database:
             # Return default if not found
             return CacheConfig(cache_enabled=False, cache_timeout=7200)
 
-    async def update_cache_config(self, enabled: bool = None, timeout: int = None, base_url: Optional[str] = None):
+    async def update_cache_config(
+        self,
+        enabled: bool = None,
+        timeout: int = None,
+        base_url: Optional[str] = None,
+        provider: Optional[str] = None,
+        delivery_mode: Optional[str] = None,
+    ):
         """Update cache configuration"""
         async with self._connect(write=True) as db:
             db.row_factory = aiosqlite.Row
@@ -4851,6 +5455,8 @@ class Database:
                 new_enabled = enabled if enabled is not None else current.get("cache_enabled", False)
                 new_timeout = timeout if timeout is not None else current.get("cache_timeout", 7200)
                 new_base_url = base_url if base_url is not None else current.get("cache_base_url")
+                new_provider = provider if provider is not None else current.get("cache_provider", "local")
+                new_delivery_mode = delivery_mode if delivery_mode is not None else current.get("cache_delivery_mode", "proxy")
 
                 # If base_url is explicitly set to empty string, treat as None
                 if base_url == "":
@@ -4858,19 +5464,24 @@ class Database:
 
                 await db.execute("""
                     UPDATE cache_config
-                    SET cache_enabled = ?, cache_timeout = ?, cache_base_url = ?, updated_at = CURRENT_TIMESTAMP
+                    SET cache_enabled = ?, cache_timeout = ?, cache_base_url = ?,
+                        cache_provider = ?, cache_delivery_mode = ?, updated_at = CURRENT_TIMESTAMP
                     WHERE id = 1
-                """, (new_enabled, new_timeout, new_base_url))
+                """, (new_enabled, new_timeout, new_base_url, new_provider, new_delivery_mode))
             else:
                 # Insert default row if not exists
                 new_enabled = enabled if enabled is not None else False
                 new_timeout = timeout if timeout is not None else 7200
                 new_base_url = base_url if base_url is not None else None
+                new_provider = provider if provider is not None else "local"
+                new_delivery_mode = delivery_mode if delivery_mode is not None else "proxy"
 
                 await db.execute("""
-                    INSERT INTO cache_config (id, cache_enabled, cache_timeout, cache_base_url)
-                    VALUES (1, ?, ?, ?)
-                """, (new_enabled, new_timeout, new_base_url))
+                    INSERT INTO cache_config (
+                        id, cache_enabled, cache_timeout, cache_base_url,
+                        cache_provider, cache_delivery_mode
+                    ) VALUES (1, ?, ?, ?, ?, ?)
+                """, (new_enabled, new_timeout, new_base_url, new_provider, new_delivery_mode))
 
             await db.commit()
 
@@ -4946,6 +5557,7 @@ class Database:
         yescaptcha_task_type: str = None,
         capmonster_api_key: str = None,
         capmonster_base_url: str = None,
+        capmonster_min_score: float = None,
         ezcaptcha_api_key: str = None,
         ezcaptcha_base_url: str = None,
         capsolver_api_key: str = None,
@@ -5001,6 +5613,11 @@ class Database:
                 )
                 new_cap_key = capmonster_api_key if capmonster_api_key is not None else current.get("capmonster_api_key", "")
                 new_cap_url = capmonster_base_url if capmonster_base_url is not None else current.get("capmonster_base_url", "https://api.capmonster.cloud")
+                new_cap_min_score = normalize_capmonster_min_score(
+                    capmonster_min_score
+                    if capmonster_min_score is not None
+                    else current.get("capmonster_min_score", DEFAULT_CAPMONSTER_MIN_SCORE)
+                )
                 new_ez_key = ezcaptcha_api_key if ezcaptcha_api_key is not None else current.get("ezcaptcha_api_key", "")
                 new_ez_url = ezcaptcha_base_url if ezcaptcha_base_url is not None else current.get("ezcaptcha_base_url", "https://api.ez-captcha.com")
                 new_cs_key = capsolver_api_key if capsolver_api_key is not None else current.get("capsolver_api_key", "")
@@ -5187,7 +5804,7 @@ class Database:
                     UPDATE captcha_config
                     SET captcha_method = ?, yescaptcha_api_key = ?, yescaptcha_base_url = ?,
                         yescaptcha_task_type = ?,
-                        capmonster_api_key = ?, capmonster_base_url = ?,
+                        capmonster_api_key = ?, capmonster_base_url = ?, capmonster_min_score = ?,
                         ezcaptcha_api_key = ?, ezcaptcha_base_url = ?,
                         capsolver_api_key = ?, capsolver_base_url = ?,
                         remote_browser_base_url = ?, remote_browser_api_key = ?, remote_browser_timeout = ?,
@@ -5216,7 +5833,7 @@ class Database:
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = 1
                 """, (new_method, new_yes_key, new_yes_url, new_yes_task_type,
-                      new_cap_key, new_cap_url,
+                      new_cap_key, new_cap_url, new_cap_min_score,
                       new_ez_key, new_ez_url, new_cs_key, new_cs_url,
                       (new_remote_base_url or "").strip(), (new_remote_api_key or "").strip(), new_remote_timeout,
                       bool(new_browser_fallback),
@@ -5247,6 +5864,11 @@ class Database:
                 new_yes_task_type = normalize_yescaptcha_task_type(yescaptcha_task_type)
                 new_cap_key = capmonster_api_key if capmonster_api_key is not None else ""
                 new_cap_url = capmonster_base_url if capmonster_base_url is not None else "https://api.capmonster.cloud"
+                new_cap_min_score = normalize_capmonster_min_score(
+                    capmonster_min_score
+                    if capmonster_min_score is not None
+                    else DEFAULT_CAPMONSTER_MIN_SCORE
+                )
                 new_ez_key = ezcaptcha_api_key if ezcaptcha_api_key is not None else ""
                 new_ez_url = ezcaptcha_base_url if ezcaptcha_base_url is not None else "https://api.ez-captcha.com"
                 new_cs_key = capsolver_api_key if capsolver_api_key is not None else ""
@@ -5400,7 +6022,8 @@ class Database:
                 await db.execute("""
                     INSERT INTO captcha_config (id, captcha_method, yescaptcha_api_key, yescaptcha_base_url,
                         yescaptcha_task_type,
-                        capmonster_api_key, capmonster_base_url, ezcaptcha_api_key, ezcaptcha_base_url,
+                        capmonster_api_key, capmonster_base_url, capmonster_min_score,
+                        ezcaptcha_api_key, ezcaptcha_base_url,
                         capsolver_api_key, capsolver_base_url,
                         remote_browser_base_url, remote_browser_api_key, remote_browser_timeout,
                         browser_fallback_to_remote_browser,
@@ -5424,8 +6047,9 @@ class Database:
                         dedicated_extension_enabled, dedicated_extension_captcha_timeout_seconds,
                         dedicated_extension_st_refresh_timeout_seconds,
                         extension_fallback_to_managed_on_dedicated_failure)
-                    VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (new_method, new_yes_key, new_yes_url, new_yes_task_type, new_cap_key, new_cap_url,
+                    VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (new_method, new_yes_key, new_yes_url, new_yes_task_type,
+                      new_cap_key, new_cap_url, new_cap_min_score,
                       new_ez_key, new_ez_url, new_cs_key, new_cs_url,
                       (new_remote_base_url or "").strip(), (new_remote_api_key or "").strip(), new_remote_timeout,
                       new_browser_fallback,
@@ -5634,6 +6258,14 @@ class Database:
             )
             await db.commit()
 
+    async def touch_api_key_presence(self, key_id: int):
+        async with self._connect(write=True) as db:
+            await db.execute(
+                "UPDATE api_keys SET last_presence_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (key_id,),
+            )
+            await db.commit()
+
     async def insert_api_key_audit_log(
         self,
         *,
@@ -5670,6 +6302,13 @@ class Database:
                     k.is_active,
                     k.expires_at,
                     k.last_used_at,
+                    k.last_presence_at,
+                    CASE
+                        WHEN k.is_active = 1
+                         AND k.last_presence_at IS NOT NULL
+                         AND datetime(k.last_presence_at) >= datetime('now', '-90 seconds')
+                        THEN 1 ELSE 0
+                    END AS is_online,
                     COALESCE(k.adobe_cloning_enabled, 1) AS adobe_cloning_enabled,
                     COALESCE(k.adobe_metadata_enabled, 1) AS adobe_metadata_enabled,
                     COALESCE(k.adobe_tracker_enabled, 1) AS adobe_tracker_enabled,
@@ -5682,6 +6321,7 @@ class Database:
             rows = [dict(row) for row in await cursor.fetchall()]
 
             for row in rows:
+                row["is_online"] = bool(row.get("is_online"))
                 row["account_ids"] = await self.get_api_key_account_ids(
                     int(row["id"]),
                     existing_only=True,
@@ -5791,6 +6431,13 @@ class Database:
                     k.is_active,
                     k.expires_at,
                     k.last_used_at,
+                    k.last_presence_at,
+                    CASE
+                        WHEN k.is_active = 1
+                         AND k.last_presence_at IS NOT NULL
+                         AND datetime(k.last_presence_at) >= datetime('now', '-90 seconds')
+                        THEN 1 ELSE 0
+                    END AS is_online,
                     COALESCE(k.adobe_cloning_enabled, 1) AS adobe_cloning_enabled,
                     COALESCE(k.adobe_metadata_enabled, 1) AS adobe_metadata_enabled,
                     COALESCE(k.adobe_tracker_enabled, 1) AS adobe_tracker_enabled,
@@ -5806,6 +6453,7 @@ class Database:
             if not row:
                 return None
             data = dict(row)
+            data["is_online"] = bool(data.get("is_online"))
             data["account_ids"] = await self.get_api_key_account_ids(
                 key_id,
                 existing_only=True,
@@ -5832,6 +6480,13 @@ class Database:
                 cursor = await db.execute("SELECT COUNT(*) FROM api_key_audit_logs")
             row = await cursor.fetchone()
             return int(row[0]) if row and row[0] is not None else 0
+
+    async def clear_api_key_audit_logs(self) -> int:
+        """Delete every managed API key audit log and return the number removed."""
+        async with self._connect(write=True) as db:
+            cursor = await db.execute("DELETE FROM api_key_audit_logs")
+            await db.commit()
+            return int(cursor.rowcount or 0)
 
     async def list_api_key_audit_logs(
         self,
@@ -6059,3 +6714,45 @@ class Database:
             )
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
+
+    async def get_token_refresh_config(self) -> TokenRefreshConfig:
+        """Return global protocol ST refresh settings."""
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("SELECT * FROM token_refresh_config WHERE id = 1")
+            row = await cursor.fetchone()
+            return TokenRefreshConfig(**dict(row)) if row else TokenRefreshConfig()
+
+    async def update_token_refresh_config(
+        self,
+        *,
+        enabled: Optional[bool] = None,
+        refresh_interval_minutes: Optional[int] = None,
+    ) -> TokenRefreshConfig:
+        """Update global protocol ST refresh settings with bounded values."""
+        current = await self.get_token_refresh_config()
+        new_enabled = current.enabled if enabled is None else bool(enabled)
+        raw_interval = (
+            current.refresh_interval_minutes
+            if refresh_interval_minutes is None
+            else refresh_interval_minutes
+        )
+        try:
+            interval = max(1, min(10080, int(raw_interval)))
+        except Exception:
+            interval = 120
+
+        async with self._connect(write=True) as db:
+            await db.execute(
+                """
+                INSERT INTO token_refresh_config (id, enabled, refresh_interval_minutes, updated_at)
+                VALUES (1, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(id) DO UPDATE SET
+                    enabled = excluded.enabled,
+                    refresh_interval_minutes = excluded.refresh_interval_minutes,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (1 if new_enabled else 0, interval),
+            )
+            await db.commit()
+        return await self.get_token_refresh_config()

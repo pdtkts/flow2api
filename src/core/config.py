@@ -4,7 +4,8 @@ import tomli
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 
-DEFAULT_YESCAPTCHA_TASK_TYPE = "RecaptchaV3TaskProxylessM1"
+DEFAULT_YESCAPTCHA_TASK_TYPE = "RecaptchaV3TaskProxylessM1S9"
+DEFAULT_CAPMONSTER_MIN_SCORE = 0.9
 YESCAPTCHA_TASK_TYPE_OPTIONS = {
     "RecaptchaV3TaskProxyless": None,
     "RecaptchaV3TaskProxylessM1": None,
@@ -22,6 +23,14 @@ def normalize_yescaptcha_task_type(task_type: Optional[str]) -> str:
 
 def get_yescaptcha_min_score(task_type: Optional[str]) -> Optional[float]:
     return YESCAPTCHA_TASK_TYPE_OPTIONS.get(normalize_yescaptcha_task_type(task_type))
+
+
+def normalize_capmonster_min_score(value: Any) -> float:
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return DEFAULT_CAPMONSTER_MIN_SCORE
+    return max(0.1, min(0.9, score))
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -144,10 +153,44 @@ class Config:
         """Load configuration from setting.toml, falling back to the example file."""
         config_dir = REPO_ROOT / "config"
         config_path = config_dir / "setting.toml"
-        if not config_path.exists():
-            config_path = config_dir / "setting_example.toml"
-        with open(config_path, "rb") as f:
-            return _apply_env_overrides(tomli.load(f))
+        fallback_path = config_dir / "setting_example.toml"
+
+        if config_path.exists() and not config_path.is_file():
+            print(
+                f"[Config] {config_path} is not a regular file; "
+                f"falling back to {fallback_path.name}. Check the Docker mount or local path."
+            )
+            config_path = fallback_path
+        elif not config_path.exists():
+            config_path = fallback_path
+
+        if not config_path.is_file():
+            raise FileNotFoundError(
+                f"Configuration file is missing or unreadable: {config_path}. "
+                "Provide config/setting.toml or config/setting_example.toml."
+            )
+
+        try:
+            with open(config_path, "rb") as f:
+                loaded = tomli.load(f)
+        except OSError as exc:
+            if config_path != fallback_path and fallback_path.is_file():
+                print(
+                    f"[Config] Unable to read {config_path}; "
+                    f"falling back to {fallback_path.name}."
+                )
+                try:
+                    with open(fallback_path, "rb") as f:
+                        loaded = tomli.load(f)
+                except OSError as fallback_exc:
+                    raise FileNotFoundError(
+                        f"Configuration files are unreadable: {config_path} and {fallback_path}."
+                    ) from fallback_exc
+            else:
+                raise FileNotFoundError(
+                    f"Configuration file is unreadable: {config_path}."
+                ) from exc
+        return _apply_env_overrides(loaded)
 
     def reload_config(self):
         """Reload configuration from file"""
@@ -199,7 +242,10 @@ class Config:
     def flow_max_retries(self) -> int:
         retries = self._config.get("flow", {}).get("max_retries", 3)
         try:
-            return max(1, int(retries))
+            normalized = max(1, min(20, int(retries)))
+            if str(self._config.get("captcha", {}).get("captcha_method", "")).strip().lower() == "browser":
+                normalized = max(normalized, self.browser_captcha_generation_retries)
+            return normalized
         except Exception:
             return 3
 
@@ -945,6 +991,28 @@ class Config:
             self._config["cache"] = {}
         self._config["cache"]["base_url"] = base_url
 
+    @property
+    def cache_provider(self) -> str:
+        value = str(self._config.get("cache", {}).get("provider", "local") or "local").lower()
+        return value if value in {"local", "digitalocean"} else "local"
+
+    def set_cache_provider(self, provider: str):
+        value = str(provider or "local").lower()
+        if value not in {"local", "digitalocean"}:
+            raise ValueError("cache provider must be local or digitalocean")
+        self._config.setdefault("cache", {})["provider"] = value
+
+    @property
+    def cache_delivery_mode(self) -> str:
+        value = str(self._config.get("cache", {}).get("delivery_mode", "proxy") or "proxy").lower()
+        return value if value in {"proxy", "cdn"} else "proxy"
+
+    def set_cache_delivery_mode(self, mode: str):
+        value = str(mode or "proxy").lower()
+        if value not in {"proxy", "cdn"}:
+            raise ValueError("cache delivery mode must be proxy or cdn")
+        self._config.setdefault("cache", {})["delivery_mode"] = value
+
     # Captcha configuration
     @property
     def captcha_method(self) -> str:
@@ -1052,12 +1120,30 @@ class Config:
 
     @property
     def personal_max_resident_tabs(self) -> int:
-        """内置浏览器打码的共享标签页上限"""
+        """内置浏览器打码单实例共享标签页上限"""
         value = self._config.get("captcha", {}).get("personal_max_resident_tabs", 5)
         try:
             return max(1, min(50, int(value)))  # 限制在1-50之间
         except Exception:
             return 5
+
+    @property
+    def browser_captcha_max_retries(self) -> int:
+        """Maximum attempts made by browser mode for one captcha solve."""
+        value = self._config.get("captcha", {}).get("browser_captcha_max_retries", 5)
+        try:
+            return max(1, min(20, int(value)))
+        except Exception:
+            return 5
+
+    @property
+    def browser_captcha_generation_retries(self) -> int:
+        """Generation attempts allowed after upstream reCAPTCHA rejection."""
+        value = self._config.get("captcha", {}).get("browser_captcha_generation_retries", 6)
+        try:
+            return max(1, min(20, int(value)))
+        except Exception:
+            return 6
 
     @property
     def personal_project_pool_size(self) -> int:
@@ -1077,8 +1163,16 @@ class Config:
         except Exception:
             return 600
 
+    @property
+    def personal_headless(self) -> bool:
+        """Whether the built-in Personal browser should run headless."""
+        env_value = os.getenv("PERSONAL_BROWSER_HEADLESS")
+        if env_value is not None:
+            return str(env_value).strip().lower() in {"1", "true", "yes", "on"}
+        return bool(self._config.get("captcha", {}).get("personal_headless", False))
+
     def set_personal_max_resident_tabs(self, value: int):
-        """设置内置浏览器打码的共享标签页上限"""
+        """设置内置浏览器打码单实例共享标签页上限"""
         if "captcha" not in self._config:
             self._config["captcha"] = {}
         self._config["captcha"]["personal_max_resident_tabs"] = max(1, min(50, int(value)))
@@ -1154,6 +1248,21 @@ class Config:
         if "captcha" not in self._config:
             self._config["captcha"] = {}
         self._config["captcha"]["capmonster_base_url"] = base_url
+
+    @property
+    def capmonster_min_score(self) -> float:
+        """Get the required CapMonster reCAPTCHA v3 Enterprise score."""
+        return normalize_capmonster_min_score(
+            self._config.get("captcha", {}).get(
+                "capmonster_min_score",
+                DEFAULT_CAPMONSTER_MIN_SCORE,
+            )
+        )
+
+    def set_capmonster_min_score(self, value: float):
+        if "captcha" not in self._config:
+            self._config["captcha"] = {}
+        self._config["captcha"]["capmonster_min_score"] = normalize_capmonster_min_score(value)
 
     @property
     def ezcaptcha_api_key(self) -> str:

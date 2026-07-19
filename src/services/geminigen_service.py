@@ -12,7 +12,7 @@ import re
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -49,6 +49,7 @@ GEMINIGEN_ACTIVE_STATUSES = {"queued", "processing", "submitted", "polling"}
 GEMINIGEN_TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
 GEMINIGEN_UPSTREAM_CANCEL_MARKERS = ("cancel", "canceled", "cancelled", "stop", "stopped")
 GEMINIGEN_UPSTREAM_FAILURE_MARKERS = ("fail", "error", "reject")
+GEMINIGEN_PROFILE_CACHE_TTL = timedelta(hours=1)
 
 
 @dataclass
@@ -76,19 +77,21 @@ class GeminiGenService:
         self._capacity_cooldowns: Dict[Tuple[int, str], float] = {}
         self._capacity_cooldown_attempts: Dict[Tuple[int, str], int] = {}
         self._finalize_locks: Dict[str, asyncio.Lock] = {}
+        self._profile_refreshing_account_ids: set[int] = set()
 
     @staticmethod
     def is_geminigen_model(model: str) -> bool:
         return bool(geminigen_manifest_entry(model or ""))
 
     @staticmethod
-    def model_catalog() -> List[Dict[str, str]]:
+    def model_catalog(*, video_enabled: bool = True) -> List[Dict[str, str]]:
         return [
             {
                 "id": item["id"],
                 "description": f"GeminiGen {item['kind']} generation - {item['endpoint_type']}",
             }
             for item in GEMINIGEN_MODEL_MANIFEST
+            if video_enabled or item.get("kind") != "video"
         ]
 
     @staticmethod
@@ -130,6 +133,83 @@ class GeminiGenService:
             if account.is_active:
                 return account
         return None
+
+    @staticmethod
+    def _optional_int(value: Any) -> Optional[int]:
+        if value is None or value == "":
+            return None
+        try:
+            return int(value)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _optional_datetime(value: Any) -> Optional[datetime]:
+        if not value:
+            return None
+        if isinstance(value, datetime):
+            return value
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            return datetime.fromisoformat(text.replace("Z", "+00:00")).replace(tzinfo=None)
+        except Exception:
+            return None
+
+    @classmethod
+    def parse_me_profile(cls, payload: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(payload, dict):
+            raise ValueError("GeminiGen /api/me payload must be an object")
+        credit = payload.get("user_credit") if isinstance(payload.get("user_credit"), dict) else {}
+        plan = payload.get("user_plan") if isinstance(payload.get("user_plan"), dict) else {}
+        product = plan.get("product") if isinstance(plan.get("product"), dict) else {}
+        active_benefits: List[Dict[str, Any]] = []
+        for benefit in payload.get("user_benefits") or []:
+            if not isinstance(benefit, dict) or not benefit.get("is_active"):
+                continue
+            benefit_product = benefit.get("product") if isinstance(benefit.get("product"), dict) else {}
+            active_benefits.append(
+                {
+                    "id": cls._optional_int(benefit.get("id")),
+                    "name": str(benefit_product.get("name") or "").strip(),
+                    "expire_at": benefit.get("expire_at"),
+                    "is_active": bool(benefit.get("is_active")),
+                    "estimated_remaining": cls._optional_int(benefit.get("estimated_remaining")),
+                }
+            )
+        return {
+            "profile_user_id": cls._optional_int(payload.get("id")),
+            "profile_uuid": str(payload.get("uuid") or "").strip() or None,
+            "profile_email": str(payload.get("email") or "").strip() or None,
+            "profile_full_name": str(payload.get("full_name") or "").strip() or None,
+            "profile_is_active": bool(payload.get("is_active")) if payload.get("is_active") is not None else None,
+            "available_credit": cls._optional_int(credit.get("available_credit")),
+            "plan_credit": cls._optional_int(credit.get("plan_credit")),
+            "purchased_credit": cls._optional_int(credit.get("purchased_credit")),
+            "locked_credit": cls._optional_int(credit.get("locked_credit")),
+            "subscription_credit": cls._optional_int(credit.get("subscription_credit")),
+            "plan_name": str(product.get("name") or "").strip() or None,
+            "plan_expire_at": cls._optional_datetime(plan.get("expire_at")),
+            "active_benefits_json": json.dumps(active_benefits, separators=(",", ":")),
+            "remaining_bulk_videos": cls._optional_int(payload.get("remaining_bulk_videos")),
+            "remaining_daily_videos": cls._optional_int(payload.get("remaining_daily_videos")),
+            "remaining_grok_max_daily_videos": cls._optional_int(payload.get("remaining_grok_max_daily_videos")),
+            "remaining_grok_max_daily_720p_videos": cls._optional_int(payload.get("remaining_grok_max_daily_720p_videos")),
+            "remaining_grok_max_daily_10s_videos": cls._optional_int(payload.get("remaining_grok_max_daily_10s_videos")),
+        }
+
+    @staticmethod
+    def is_account_profile_stale(account: GeminiGenAccount, *, now: Optional[datetime] = None) -> bool:
+        synced_at = account.profile_synced_at
+        if not synced_at:
+            return True
+        reference = now or datetime.now(timezone.utc).replace(tzinfo=None)
+        if synced_at.tzinfo is not None:
+            synced_at = synced_at.replace(tzinfo=None)
+        if reference.tzinfo is not None:
+            reference = reference.replace(tzinfo=None)
+        return synced_at <= reference - GEMINIGEN_PROFILE_CACHE_TTL
 
     async def get_model_status(self, window: str = "1h") -> Dict[str, Any]:
         cfg = await self.db.get_geminigen_config()
@@ -693,6 +773,11 @@ class GeminiGenService:
 
     def _cache_url(self, filename: str, base_url: Optional[str]) -> str:
         base = (base_url or "").strip().rstrip("/")
+        builder = getattr(self.file_cache, "build_url", None)
+        if callable(builder):
+            result = builder(filename, base)
+            if isinstance(result, str):
+                return result
         return f"{base}/api/cache/blob/{quote(filename, safe='')}" if base else f"/api/cache/blob/{quote(filename, safe='')}"
 
     @staticmethod
@@ -1134,6 +1219,8 @@ class GeminiGenService:
         if not cfg.enabled:
             raise RuntimeError("GeminiGen integration is disabled")
         kind = str(manifest["kind"])
+        if kind == "video" and not bool(getattr(cfg, "video_enabled", True)):
+            raise RuntimeError("GeminiGen video mode is disabled")
         job_id = f"geminigen-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
         request_log_id = await self._create_request_log(
             api_key_id=api_key_id,
@@ -1575,42 +1662,88 @@ class GeminiGenService:
             )
         return len(tasks)
 
-    async def test_account(self, account_id: int) -> Dict[str, Any]:
+    async def _fetch_me_profile_payload(self, account: GeminiGenAccount, base_url: str) -> Dict[str, Any]:
+        proxy = await self._request_proxy()
+        path = "/api/me"
+        account = await self._ensure_fresh_account_token(account, base_url)
+        for attempt in range(2):
+            async with AsyncSession() as session:
+                response = await session.get(
+                    f"{self._api_base_url(base_url)}{path}",
+                    headers=await self._headers(account, path, method="get"),
+                    timeout=30,
+                    proxy=proxy,
+                    impersonate="chrome120",
+                )
+            if response.status_code < 400 or attempt or not self._token_expired_response(response):
+                break
+            account = await self._refresh_account_token(account, base_url)
+        if response.status_code >= 400:
+            raise RuntimeError(f"HTTP {response.status_code}: {response.text[:300]}")
+        try:
+            payload = response.json()
+        except Exception as exc:
+            raise RuntimeError("GeminiGen /api/me did not return JSON") from exc
+        if not isinstance(payload, dict) or not payload.get("email"):
+            raise RuntimeError("GeminiGen /api/me did not return an authenticated user")
+        return payload
+
+    async def sync_account_profile(self, account_id: int) -> Dict[str, Any]:
         account = await self.db.get_geminigen_account(account_id)
         if not account:
             raise ValueError("GeminiGen account not found")
         cfg = await self.db.get_geminigen_config()
+        synced_at = datetime.now(timezone.utc).replace(tzinfo=None)
         try:
-            proxy = await self._request_proxy()
-            path = "/api/me"
-            account = await self._ensure_fresh_account_token(account, cfg.base_url)
-            for attempt in range(2):
-                async with AsyncSession() as session:
-                    response = await session.get(
-                        f"{self._api_base_url(cfg.base_url)}{path}",
-                        headers=await self._headers(account, path, method="get"),
-                        timeout=30,
-                        proxy=proxy,
-                        impersonate="chrome120",
-                    )
-                if response.status_code < 400 or attempt or not self._token_expired_response(response):
-                    break
-                account = await self._refresh_account_token(account, cfg.base_url)
-            if response.status_code >= 400:
-                raise RuntimeError(f"HTTP {response.status_code}: {response.text[:300]}")
-            try:
-                payload = response.json()
-            except Exception as exc:
-                raise RuntimeError("GeminiGen /api/me did not return JSON") from exc
-            if not isinstance(payload, dict) or not payload.get("email"):
-                raise RuntimeError("GeminiGen /api/me did not return an authenticated user")
+            payload = await self._fetch_me_profile_payload(account, cfg.base_url)
+            profile_updates = self.parse_me_profile(payload)
             status = "healthy"
             error = ""
+            await self.db.update_geminigen_account(
+                account_id,
+                **profile_updates,
+                last_status=status,
+                last_error=error,
+                profile_synced_at=synced_at,
+                profile_sync_status=status,
+                profile_sync_error=error,
+            )
         except Exception as exc:
             status = "failed"
             error = str(exc)
-        await self.db.update_geminigen_account(account_id, last_status=status, last_error=error)
+            await self.db.update_geminigen_account(
+                account_id,
+                last_status=status,
+                last_error=error,
+                profile_synced_at=synced_at,
+                profile_sync_status=status,
+                profile_sync_error=error,
+            )
         return {"success": status == "healthy", "status": status, "error": error}
+
+    async def _refresh_account_profile_background(self, account_id: int) -> None:
+        try:
+            await self.sync_account_profile(account_id)
+        except Exception as exc:
+            debug_logger.log_warning(f"GeminiGen profile refresh failed for account {account_id}: {exc}")
+        finally:
+            self._profile_refreshing_account_ids.discard(int(account_id))
+
+    def schedule_stale_account_profile_refresh(self, accounts: List[GeminiGenAccount]) -> int:
+        scheduled = 0
+        for account in accounts:
+            if not account.id or not account.is_active or not self.is_account_profile_stale(account):
+                continue
+            account_id = int(account.id)
+            if account_id in self._profile_refreshing_account_ids:
+                continue
+            self._profile_refreshing_account_ids.add(account_id)
+            asyncio.create_task(self._refresh_account_profile_background(account_id))
+            scheduled += 1
+        return scheduled
+
+    async def test_account(self, account_id: int) -> Dict[str, Any]:
+        return await self.sync_account_profile(account_id)
 
     @staticmethod
     def _result_urls_for_task(task: GeminiGenTask) -> List[str]:

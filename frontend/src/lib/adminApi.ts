@@ -1,7 +1,9 @@
 /**
  * Authenticated fetch for admin API routes.
- * Mirrors static/manage.html apiRequest: Bearer admin session token, 401 → login.
+ * Uses the HttpOnly admin cookie for new sessions and Bearer for legacy sessions.
  */
+export const COOKIE_SESSION_MARKER = "__cookie_session__"
+
 export async function adminFetch(
   path: string,
   token: string | null,
@@ -18,9 +20,11 @@ export async function adminFetch(
   if (body !== undefined && typeof body === "string" && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json")
   }
-  headers.set("Authorization", `Bearer ${token}`)
+  if (token !== COOKIE_SESSION_MARKER) {
+    headers.set("Authorization", `Bearer ${token}`)
+  }
 
-  const res = await fetch(path, { ...init, headers })
+  const res = await fetch(path, { ...init, credentials: "include", headers })
 
   if (res.status === 401) {
     localStorage.removeItem("adminToken")

@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 import sqlite3
@@ -5,14 +6,34 @@ import tempfile
 import time
 import types
 import unittest
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+from fastapi import HTTPException
+from PIL import Image
+
 import src.api.routes as routes
+from src.api.admin import _extract_log_job_id
 from src.api.routes import _extract_async_delivery_fields
+from src.core.account_tiers import (
+    PAYGATE_TIER_ONE,
+    PAYGATE_TIER_TWO,
+    is_native_4k_model,
+)
 from src.core.config import config
-from src.core.model_resolver import resolve_model_name
+from src.core.logger import debug_logger
+from src.core.model_resolver import get_base_model_aliases, resolve_model_name
+from src.core.models import (
+    ChatCompletionRequest,
+    ChatMessage,
+    GeminiContent,
+    GeminiFileData,
+    GeminiGenerateContentRequest,
+    GeminiInlineData,
+    GeminiPart,
+)
 from src.services.file_cache import FileCache
 from src.services.flow_client import FlowClient
 from src.services.generation_handler import MODEL_CONFIG, GenerationHandler, _needs_video_url_resolve
@@ -20,6 +41,20 @@ from src.services.generation_handler import MODEL_CONFIG, GenerationHandler, _ne
 
 def fake_mp4_bytes(size: int = 2048) -> bytes:
     return b"\x00\x00\x00\x18ftypmp42" + b"\x00" * max(0, size - 12)
+
+
+def make_image_bytes(
+    size: tuple[int, int],
+    *,
+    orientation: int | None = None,
+) -> bytes:
+    image = Image.new("RGB", size, color="white")
+    buffer = BytesIO()
+    exif = Image.Exif()
+    if orientation is not None:
+        exif[274] = orientation
+    image.save(buffer, format="JPEG", exif=exif)
+    return buffer.getvalue()
 
 
 class FlowClientTransportErrorTests(unittest.TestCase):
@@ -331,6 +366,132 @@ class VeoLiteModelResolverTests(unittest.TestCase):
 
         self.assertEqual(resolved, "veo_3_1_i2v_s_6s_1080p")
 
+    def test_resolve_quality_8s_alias_to_portrait_variant(self):
+        request = types.SimpleNamespace(
+            generationConfig=types.SimpleNamespace(aspectRatio="portrait")
+        )
+
+        resolved = resolve_model_name(
+            "veo_3_1_t2v_8s",
+            request=request,
+            model_config=MODEL_CONFIG,
+        )
+
+        self.assertEqual(resolved, "veo_3_1_t2v_portrait_8s")
+
+    def test_resolve_quality_8s_upsample_alias_to_portrait_variant(self):
+        request = types.SimpleNamespace(
+            generationConfig=types.SimpleNamespace(
+                aspectRatio="portrait",
+                imageSize="4k",
+            )
+        )
+
+        resolved = resolve_model_name(
+            "veo_3_1_i2v_s_8s",
+            request=request,
+            model_config=MODEL_CONFIG,
+        )
+
+        self.assertEqual(resolved, "veo_3_1_i2v_s_portrait_8s_4k")
+
+    def test_image_models_follow_nearest_reference_image_aspect(self):
+        cases = {
+            (1600, 900): "landscape",
+            (900, 1600): "portrait",
+            (1000, 1000): "square",
+            (1200, 900): "four-three",
+            (900, 1200): "three-four",
+        }
+
+        for size, expected in cases.items():
+            with self.subTest(size=size):
+                resolved = resolve_model_name(
+                    "gemini-3.0-pro-image",
+                    request=types.SimpleNamespace(generationConfig=None),
+                    model_config=MODEL_CONFIG,
+                    images=[make_image_bytes(size)],
+                )
+                self.assertEqual(resolved, f"gemini-3.0-pro-image-{expected}")
+
+    def test_video_inference_collapses_to_landscape_or_portrait(self):
+        cases = {
+            (1600, 900): "veo_3_1_i2v_s_8s",
+            (1000, 1000): "veo_3_1_i2v_s_8s",
+            (900, 1600): "veo_3_1_i2v_s_portrait_8s",
+        }
+
+        for size, expected in cases.items():
+            with self.subTest(size=size):
+                resolved = resolve_model_name(
+                    "veo_3_1_i2v_s_8s",
+                    request=types.SimpleNamespace(generationConfig=None),
+                    model_config=MODEL_CONFIG,
+                    images=[make_image_bytes(size)],
+                )
+                self.assertEqual(resolved, expected)
+
+    def test_explicit_aspect_ratio_overrides_reference_image(self):
+        resolved = resolve_model_name(
+            "gemini-3.0-pro-image",
+            request=types.SimpleNamespace(
+                generationConfig=types.SimpleNamespace(aspectRatio="landscape")
+            ),
+            model_config=MODEL_CONFIG,
+            images=[make_image_bytes((900, 1600))],
+        )
+
+        self.assertEqual(resolved, "gemini-3.0-pro-image-landscape")
+
+    def test_first_non_empty_image_controls_inferred_aspect(self):
+        resolved = resolve_model_name(
+            "gemini-3.0-pro-image",
+            request=types.SimpleNamespace(generationConfig=None),
+            model_config=MODEL_CONFIG,
+            images=[b"", make_image_bytes((900, 1600)), make_image_bytes((1600, 900))],
+        )
+
+        self.assertEqual(resolved, "gemini-3.0-pro-image-portrait")
+
+    def test_exif_orientation_is_applied_before_inference(self):
+        resolved = resolve_model_name(
+            "gemini-3.0-pro-image",
+            request=types.SimpleNamespace(generationConfig=None),
+            model_config=MODEL_CONFIG,
+            images=[make_image_bytes((1600, 900), orientation=6)],
+        )
+
+        self.assertEqual(resolved, "gemini-3.0-pro-image-portrait")
+
+    def test_unreadable_or_missing_images_preserve_default_aspect(self):
+        for images in (None, [], [b"not-an-image"]):
+            with self.subTest(images=images):
+                resolved = resolve_model_name(
+                    "gemini-3.0-pro-image",
+                    request=types.SimpleNamespace(generationConfig=None),
+                    model_config=MODEL_CONFIG,
+                    images=images,
+                )
+                self.assertEqual(resolved, "gemini-3.0-pro-image-landscape")
+
+    def test_missing_pillow_preserves_default_aspect(self):
+        real_import = __import__
+
+        def import_without_pillow(name, *args, **kwargs):
+            if name == "PIL":
+                raise ImportError("Pillow unavailable")
+            return real_import(name, *args, **kwargs)
+
+        with patch("builtins.__import__", side_effect=import_without_pillow):
+            resolved = resolve_model_name(
+                "gemini-3.0-pro-image",
+                request=types.SimpleNamespace(generationConfig=None),
+                model_config=MODEL_CONFIG,
+                images=[make_image_bytes((900, 1600))],
+            )
+
+        self.assertEqual(resolved, "gemini-3.0-pro-image-landscape")
+
 
 class VeoLiteGenerationHandlerTests(unittest.TestCase):
     def test_tier_two_does_not_upgrade_lite_model_to_fake_ultra(self):
@@ -392,6 +553,205 @@ class VeoLiteGenerationHandlerTests(unittest.TestCase):
     def test_direct_upsampler_keys_are_not_public_models(self):
         self.assertNotIn("veo_3_1_upsampler_4k", MODEL_CONFIG)
         self.assertNotIn("veo_3_1_upsampler_1080p", MODEL_CONFIG)
+
+    def test_explicit_8s_aliases_reuse_default_upstream_keys(self):
+        expected_model_keys = {
+            "veo_3_1_t2v_fast_8s": "veo_3_1_t2v_fast",
+            "veo_3_1_t2v_8s": "veo_3_1_t2v",
+            "veo_3_1_i2v_s_fast_8s_fl": "veo_3_1_i2v_s_fast_fl",
+            "veo_3_1_i2v_s_8s": "veo_3_1_i2v_s_fl",
+            "veo_3_1_r2v_fast_8s": "veo_3_1_r2v_fast_landscape",
+            "veo_3_1_r2v_fast_ultra_8s": "veo_3_1_r2v_fast_landscape_ultra",
+            "veo_3_1_r2v_fast_ultra_relaxed_8s": "veo_3_1_r2v_fast_landscape_ultra_relaxed",
+        }
+
+        for alias, model_key in expected_model_keys.items():
+            with self.subTest(alias=alias):
+                self.assertEqual(MODEL_CONFIG[alias]["model_key"], model_key)
+
+    def test_default_duration_models_include_complete_8s_aliases(self):
+        expected_aliases = {
+            "veo_3_1_t2v_fast_landscape_8s": "veo_3_1_t2v_fast_8s",
+            "veo_3_1_t2v_fast_portrait_8s": "veo_3_1_t2v_fast_portrait",
+            "veo_3_1_t2v_landscape_8s": "veo_3_1_t2v_8s",
+            "veo_3_1_t2v_landscape_8s_4k": "veo_3_1_t2v_8s_4k",
+            "veo_3_1_t2v_landscape_8s_1080p": "veo_3_1_t2v_8s_1080p",
+            "veo_3_1_t2v_lite_landscape_8s": "veo_3_1_t2v_lite_8s_landscape",
+            "veo_3_1_i2v_s_fast_landscape_8s_fl": "veo_3_1_i2v_s_fast_8s_fl",
+            "veo_3_1_i2v_s_landscape_8s": "veo_3_1_i2v_s_8s",
+            "veo_3_1_i2v_s_landscape_8s_4k": "veo_3_1_i2v_s_8s_4k",
+            "veo_3_1_i2v_s_landscape_8s_1080p": "veo_3_1_i2v_s_8s_1080p",
+            "veo_3_1_i2v_lite_landscape_8s": "veo_3_1_i2v_lite_8s_landscape",
+            "veo_3_1_interpolation_lite_landscape_8s": "veo_3_1_interpolation_lite_8s_landscape",
+            "veo_3_1_r2v_fast_landscape_8s": "veo_3_1_r2v_fast_8s",
+            "veo_3_1_r2v_fast_landscape_ultra_8s": "veo_3_1_r2v_fast_ultra_8s",
+            "veo_3_1_r2v_fast_landscape_ultra_relaxed_8s": "veo_3_1_r2v_fast_ultra_relaxed_8s",
+        }
+
+        for alias, target in expected_aliases.items():
+            with self.subTest(alias=alias):
+                self.assertIn(alias, MODEL_CONFIG)
+                self.assertEqual(MODEL_CONFIG[alias], MODEL_CONFIG[target])
+
+    def test_base_alias_catalog_exposes_8s_model_families(self):
+        aliases = get_base_model_aliases()
+        expected = {
+            "veo_3_1_t2v_fast_8s",
+            "veo_3_1_t2v_8s",
+            "veo_3_1_t2v_8s_4k",
+            "veo_3_1_t2v_8s_1080p",
+            "veo_3_1_t2v_lite_8s",
+            "veo_3_1_i2v_s_fast_8s_fl",
+            "veo_3_1_i2v_s_8s",
+            "veo_3_1_i2v_s_8s_4k",
+            "veo_3_1_i2v_s_8s_1080p",
+            "veo_3_1_i2v_lite_8s",
+            "veo_3_1_interpolation_lite_8s",
+            "veo_3_1_r2v_fast_8s",
+            "veo_3_1_r2v_fast_ultra_8s",
+            "veo_3_1_r2v_fast_ultra_relaxed_8s",
+        }
+
+        self.assertTrue(expected.issubset(aliases))
+
+
+class ReferenceImageRouteNormalizationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_openai_history_reference_drives_aspect_and_keeps_scope(self):
+        portrait_image = make_image_bytes((900, 1600))
+        request = ChatCompletionRequest(
+            model="gemini-3.0-pro-image",
+            messages=[
+                ChatMessage(role="user", content="Generate an image"),
+                ChatMessage(
+                    role="assistant",
+                    content="![result](https://example.com/history.png)",
+                ),
+                ChatMessage(role="user", content="Continue from the previous image"),
+            ],
+        )
+
+        with patch.object(
+            routes,
+            "retrieve_image_data",
+            new=AsyncMock(return_value=portrait_image),
+        ) as retrieve:
+            normalized = await routes._normalize_openai_request(
+                request,
+                api_key_id=17,
+                allowed_token_ids={3, 5},
+            )
+
+        self.assertEqual(normalized.model, "gemini-3.0-pro-image-portrait")
+        self.assertEqual(normalized.images, [portrait_image])
+        retrieve.assert_awaited_once_with(
+            "https://example.com/history.png",
+            api_key_id=17,
+            allowed_token_ids={3, 5},
+        )
+
+    async def test_historical_image_is_prepended_before_current_image(self):
+        landscape_image = make_image_bytes((1600, 900))
+        portrait_history = make_image_bytes((900, 1600))
+        request = ChatCompletionRequest(
+            model="gemini-3.0-pro-image",
+            messages=[
+                ChatMessage(role="user", content="Generate an image"),
+                ChatMessage(
+                    role="assistant",
+                    content="![history](https://example.com/history.png)",
+                ),
+                ChatMessage(
+                    role="user",
+                    content=[
+                        {"type": "text", "text": "Use both references"},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": "https://example.com/current.png"},
+                        },
+                    ],
+                ),
+            ],
+        )
+
+        async def retrieve_by_url(uri, **_kwargs):
+            if uri.endswith("current.png"):
+                return landscape_image
+            return portrait_history
+
+        with patch.object(
+            routes,
+            "retrieve_image_data",
+            new=AsyncMock(side_effect=retrieve_by_url),
+        ):
+            normalized = await routes._normalize_openai_request(request)
+
+        self.assertEqual(normalized.images, [portrait_history, landscape_image])
+        self.assertEqual(normalized.model, "gemini-3.0-pro-image-portrait")
+
+    async def test_gemini_inline_image_drives_aspect(self):
+        portrait_image = make_image_bytes((900, 1600))
+        request = GeminiGenerateContentRequest(
+            contents=[
+                GeminiContent(
+                    role="user",
+                    parts=[
+                        GeminiPart(text="Edit this image"),
+                        GeminiPart(
+                            inlineData=GeminiInlineData(
+                                mimeType="image/jpeg",
+                                data=base64.b64encode(portrait_image).decode("ascii"),
+                            )
+                        ),
+                    ],
+                )
+            ]
+        )
+
+        normalized = await routes._normalize_gemini_request(
+            "gemini-3.0-pro-image",
+            request,
+        )
+
+        self.assertEqual(normalized.model, "gemini-3.0-pro-image-portrait")
+        self.assertEqual(normalized.images, [portrait_image])
+
+    async def test_gemini_file_image_drives_aspect_and_keeps_scope(self):
+        portrait_image = make_image_bytes((900, 1600))
+        request = GeminiGenerateContentRequest(
+            contents=[
+                GeminiContent(
+                    role="user",
+                    parts=[
+                        GeminiPart(text="Edit this image"),
+                        GeminiPart(
+                            fileData=GeminiFileData(
+                                fileUri="https://example.com/reference.jpg",
+                                mimeType="image/jpeg",
+                            )
+                        ),
+                    ],
+                )
+            ]
+        )
+
+        with patch.object(
+            routes,
+            "retrieve_image_data",
+            new=AsyncMock(return_value=portrait_image),
+        ) as retrieve:
+            normalized = await routes._normalize_gemini_request(
+                "gemini-3.0-pro-image",
+                request,
+                api_key_id=19,
+                allowed_token_ids={7},
+            )
+
+        self.assertEqual(normalized.model, "gemini-3.0-pro-image-portrait")
+        retrieve.assert_awaited_once_with(
+            "https://example.com/reference.jpg",
+            api_key_id=19,
+            allowed_token_ids={7},
+        )
 
 
 class VideoCacheDeliveryTests(unittest.IsolatedAsyncioTestCase):
@@ -1426,6 +1786,132 @@ class VeoLiteFlowClientTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("Authorization", captured_headers)
 
+    async def test_media_redirect_request_logs_redact_credentials_and_signed_query(self):
+        st_token = "secret-session-token"
+        signed_url = (
+            "https://flow-content.google/video/media-1"
+            "?Expires=1781281902&KeyName=cdn-key&Signature=secret-signature&token=secret-token"
+        )
+        self.client._resolve_media_redirect_proxy = AsyncMock(
+            return_value="http://proxy-user:proxy-pass@proxy.example:8080"
+        )
+        self.client._fetch_media_redirect_location = AsyncMock(return_value=signed_url)
+
+        previous_debug = config.debug_enabled
+        try:
+            config.set_debug_enabled(True)
+            with (
+                patch.object(debug_logger, "log_request") as log_request,
+                patch.object(debug_logger, "log_info") as log_info,
+            ):
+                resolved = await self.client.resolve_media_download_url(
+                    media_id="media-1",
+                    st=st_token,
+                )
+        finally:
+            config.set_debug_enabled(previous_debug)
+
+        self.assertEqual(resolved, signed_url)
+        request_kwargs = log_request.call_args.kwargs
+        self.assertEqual(request_kwargs["headers"]["Cookie"], "<redacted>")
+        self.assertEqual(request_kwargs["proxy"], "http://proxy.example:8080")
+        self.assertEqual(
+            request_kwargs["url"],
+            f"{self.client.labs_base_url}/trpc/media.getMediaUrlRedirect",
+        )
+        logged_text = repr(log_request.call_args_list) + repr(log_info.call_args_list)
+        for secret in (st_token, "proxy-user", "proxy-pass", "secret-signature", "secret-token"):
+            self.assertNotIn(secret, logged_text)
+
+    async def test_media_redirect_response_logs_remove_signed_query(self):
+        signed_url = (
+            "https://flow-content.google/video/media-1"
+            "?Expires=1781281902&Signature=secret-signature"
+        )
+        self.client._fetch_media_redirect_location_curl = AsyncMock(
+            return_value=(307, signed_url)
+        )
+        self.client._fetch_media_redirect_location_httpx = AsyncMock()
+
+        previous_debug = config.debug_enabled
+        try:
+            config.set_debug_enabled(True)
+            with patch.object(debug_logger, "log_response") as log_response:
+                resolved = await self.client._fetch_media_redirect_location(
+                    redirect_url=f"{self.client.labs_base_url}/trpc/media.getMediaUrlRedirect?name=media-1",
+                    headers={"Cookie": "__Secure-next-auth.session-token=secret"},
+                    proxy_url=None,
+                )
+        finally:
+            config.set_debug_enabled(previous_debug)
+
+        self.assertEqual(resolved, signed_url)
+        response_kwargs = log_response.call_args.kwargs
+        self.assertEqual(
+            response_kwargs["headers"]["Location"],
+            "https://flow-content.google/video/media-1",
+        )
+        self.assertEqual(response_kwargs["body"]["transport"], "curl_cffi")
+        self.assertIsInstance(response_kwargs["duration_ms"], float)
+        self.assertNotIn("secret-signature", repr(log_response.call_args_list))
+        self.client._fetch_media_redirect_location_httpx.assert_not_awaited()
+
+    async def test_media_redirect_failure_logs_sanitize_signed_urls(self):
+        signed_url = "https://flow-content.google/video/media-1?Signature=secret-signature"
+        self.assertEqual(
+            self.client._sanitize_media_redirect_url_for_log(
+                "https://user:password@flow-content.google/video/media-1?Signature=secret"
+            ),
+            "https://flow-content.google/video/media-1",
+        )
+        self.client._fetch_media_redirect_location_curl = AsyncMock(
+            side_effect=RuntimeError(f"curl failed for {signed_url}")
+        )
+        self.client._fetch_media_redirect_location_httpx = AsyncMock(
+            side_effect=RuntimeError(f"httpx failed for {signed_url}")
+        )
+
+        with (
+            patch.object(debug_logger, "log_warning") as log_warning,
+            patch.object(debug_logger, "log_error") as log_error,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "httpx failed"):
+                await self.client._fetch_media_redirect_location(
+                    redirect_url=f"{self.client.labs_base_url}/trpc/media.getMediaUrlRedirect?name=media-1",
+                    headers={},
+                    proxy_url=None,
+                )
+
+        logged_text = repr(log_warning.call_args_list) + repr(log_error.call_args_list)
+        self.assertNotIn("secret-signature", logged_text)
+        self.assertNotIn("Signature=", logged_text)
+        self.assertIn("https://flow-content.google/video/media-1", logged_text)
+
+    async def test_get_media_url_redirect_delegates_to_current_resolver(self):
+        cdn_url = "https://flow-content.google/video/media-1?token=abc"
+        self.client.resolve_media_download_url = AsyncMock(return_value=cdn_url)
+
+        resolved = await self.client.get_media_url_redirect(
+            st=" st-token ",
+            media_name=" media-1 ",
+        )
+
+        self.assertEqual(resolved, cdn_url)
+        self.client.resolve_media_download_url.assert_awaited_once_with(
+            media_id="media-1",
+            st="st-token",
+        )
+
+    async def test_get_media_url_redirect_validates_required_inputs(self):
+        self.client.resolve_media_download_url = AsyncMock()
+
+        with self.assertRaisesRegex(ValueError, "media_name"):
+            await self.client.get_media_url_redirect(st="st-token", media_name=" ")
+        with self.assertRaisesRegex(ValueError, "ST token"):
+            await self.client.get_media_url_redirect(st=" ", media_name="media-1")
+
+        self.client.resolve_media_download_url.assert_not_awaited()
+
     async def test_needs_video_url_resolve_only_for_redirect_or_missing_cdn(self):
         redirect = "https://labs.google/fx/api/trpc/media.getMediaUrlRedirect?name=media-1"
         cdn = "https://flow-content.google/video/media-1?token=abc"
@@ -1505,7 +1991,7 @@ class FileCacheSpaceRecoveryTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(database.exists())
             self.assertTrue(unrelated.exists())
             self.assertTrue(nested.is_dir())
-            self.assertTrue((nested / "inside.mp4").exists())
+            self.assertFalse((nested / "inside.mp4").exists())
             if link is not None:
                 self.assertTrue(link.is_symlink())
 
@@ -1527,6 +2013,40 @@ class FileCacheSpaceRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
 
 class StartupStorageRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_emergency_prune_compacts_history_without_deleting_tokens(self):
+        if os.name == "nt":
+            self.skipTest("Windows keeps SQLite file handles longer than Railway/Linux")
+        from src.main import _emergency_prune_sqlite_history
+
+        with tempfile.TemporaryDirectory() as root:
+            db_path = Path(root) / "flow.db"
+            with sqlite3.connect(db_path) as conn:
+                conn.execute("CREATE TABLE tokens (id INTEGER PRIMARY KEY, st TEXT)")
+                conn.execute("CREATE TABLE request_logs (id INTEGER PRIMARY KEY, request_body TEXT)")
+                conn.execute("CREATE TABLE tasks (id INTEGER PRIMARY KEY, prompt TEXT)")
+                conn.execute("CREATE TABLE cache_files (id INTEGER PRIMARY KEY, filename TEXT)")
+                conn.execute("INSERT INTO tokens (id, st) VALUES (1, 'keep')")
+                for i in range(20):
+                    conn.execute(
+                        "INSERT INTO request_logs (request_body) VALUES (?)",
+                        ("x" * 1000,),
+                    )
+                    conn.execute("INSERT INTO tasks (prompt) VALUES (?)", (f"task-{i}",))
+                    conn.execute("INSERT INTO cache_files (filename) VALUES (?)", (f"{i}.mp4",))
+                conn.commit()
+
+            result = _emergency_prune_sqlite_history(SimpleNamespace(db_path=str(db_path)))
+
+            self.assertTrue(result["success"])
+            self.assertEqual(result["deleted_rows"]["request_logs"], 20)
+            self.assertEqual(result["deleted_rows"]["tasks"], 20)
+            self.assertEqual(result["deleted_rows"]["cache_files"], 20)
+            with sqlite3.connect(db_path) as conn:
+                self.assertEqual(conn.execute("SELECT st FROM tokens").fetchone()[0], "keep")
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM request_logs").fetchone()[0], 0)
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0], 0)
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM cache_files").fetchone()[0], 0)
+
     async def test_sqlite_full_reclaims_cache_and_retries_once(self):
         from src.main import _init_database_with_storage_recovery
 
@@ -1551,6 +2071,90 @@ class StartupStorageRecoveryTests(unittest.IsolatedAsyncioTestCase):
         cache._cleanup_expired_files.assert_awaited_once()
         cache.reclaim_cache_space.assert_awaited_once()
 
+    async def test_sqlite_disk_io_error_reclaims_cache_and_retries_once(self):
+        from src.main import _init_database_with_storage_recovery
+
+        database = SimpleNamespace(
+            init_db=AsyncMock(
+                side_effect=[sqlite3.OperationalError("disk I/O error"), None]
+            )
+        )
+        cache = SimpleNamespace(
+            _cleanup_expired_files=AsyncMock(return_value={}),
+            reclaim_cache_space=AsyncMock(
+                return_value={
+                    "free_after": 600,
+                    "target_free": 500,
+                    "reclaimed_bytes": 400,
+                }
+            ),
+        )
+
+        await _init_database_with_storage_recovery(database, cache)
+        self.assertEqual(database.init_db.await_count, 2)
+        cache._cleanup_expired_files.assert_awaited_once()
+        cache.reclaim_cache_space.assert_awaited_once()
+
+    async def test_config_seed_storage_error_retries_full_startup_branch(self):
+        from src.main import _init_database_with_storage_recovery
+
+        database = SimpleNamespace(
+            init_db=AsyncMock(return_value=None),
+            init_config_from_toml=AsyncMock(
+                side_effect=[sqlite3.OperationalError("disk I/O error"), None]
+            ),
+        )
+        cache = SimpleNamespace(
+            _cleanup_expired_files=AsyncMock(return_value={}),
+            reclaim_cache_space=AsyncMock(
+                return_value={
+                    "free_after": 600,
+                    "target_free": 500,
+                    "reclaimed_bytes": 400,
+                }
+            ),
+        )
+
+        await _init_database_with_storage_recovery(
+            database,
+            cache,
+            config_dict={"global": {}},
+            is_first_startup=True,
+        )
+        self.assertEqual(database.init_db.await_count, 2)
+        self.assertEqual(database.init_config_from_toml.await_count, 2)
+        cache.reclaim_cache_space.assert_awaited_once()
+
+    async def test_migration_storage_error_retries_full_startup_branch(self):
+        from src.main import _init_database_with_storage_recovery
+
+        database = SimpleNamespace(
+            init_db=AsyncMock(return_value=None),
+            check_and_migrate_db=AsyncMock(
+                side_effect=[sqlite3.OperationalError("disk I/O error"), None]
+            ),
+        )
+        cache = SimpleNamespace(
+            _cleanup_expired_files=AsyncMock(return_value={}),
+            reclaim_cache_space=AsyncMock(
+                return_value={
+                    "free_after": 600,
+                    "target_free": 500,
+                    "reclaimed_bytes": 400,
+                }
+            ),
+        )
+
+        await _init_database_with_storage_recovery(
+            database,
+            cache,
+            config_dict={"global": {}},
+            is_first_startup=False,
+        )
+        self.assertEqual(database.init_db.await_count, 2)
+        self.assertEqual(database.check_and_migrate_db.await_count, 2)
+        cache.reclaim_cache_space.assert_awaited_once()
+
     async def test_unrecoverable_full_volume_has_concise_diagnostic(self):
         from src.main import _init_database_with_storage_recovery
 
@@ -1569,10 +2173,438 @@ class StartupStorageRecoveryTests(unittest.IsolatedAsyncioTestCase):
         )
 
         with self.assertRaisesRegex(
-            RuntimeError, r"volume remains full.*free=10 bytes, reclaimed=25 bytes"
+            RuntimeError, r"storage I/O remains unavailable.*free=10 bytes, reclaimed=25 bytes"
         ):
             await _init_database_with_storage_recovery(database, cache)
         self.assertEqual(database.init_db.await_count, 1)
+
+    async def test_retry_recoverable_storage_failure_has_concise_diagnostic(self):
+        from src.main import _init_database_with_storage_recovery
+
+        database = SimpleNamespace(
+            init_db=AsyncMock(side_effect=sqlite3.OperationalError("disk I/O error"))
+        )
+        cache = SimpleNamespace(
+            _cleanup_expired_files=AsyncMock(return_value={}),
+            reclaim_cache_space=AsyncMock(
+                return_value={
+                    "free_after": 600,
+                    "target_free": 500,
+                    "reclaimed_bytes": 400,
+                }
+            ),
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError, r"storage I/O remains unavailable.*free=600 bytes, reclaimed=400 bytes"
+        ):
+            await _init_database_with_storage_recovery(database, cache)
+        self.assertEqual(database.init_db.await_count, 2)
+
+
+NATIVE_IMAGE_2K = "gemini-3.1-flash-image-landscape-2k"
+NATIVE_IMAGE_4K = "gemini-3.1-flash-image-landscape-4k"
+NATIVE_VIDEO_1080P = "veo_3_1_t2v_1080p"
+NATIVE_VIDEO_4K = "veo_3_1_t2v_4k"
+NATIVE_NON_4K_ULTRA = "veo_3_1_t2v_fast_ultra"
+GEMINIGEN_IMAGE_4K = "geminigen-nano-banana-pro-image-square-4k"
+
+
+def make_tier_token(
+    token_id: int,
+    tier: str,
+    *,
+    is_active: bool = True,
+    image_enabled: bool = True,
+    video_enabled: bool = True,
+):
+    return SimpleNamespace(
+        id=token_id,
+        user_paygate_tier=tier,
+        is_active=is_active,
+        image_enabled=image_enabled,
+        video_enabled=video_enabled,
+    )
+
+
+def make_tier_auth_context(*token_ids: int):
+    return SimpleNamespace(key_id=99, allowed_accounts=set(token_ids))
+
+
+class _TierNativeDb:
+    def __init__(self, tokens):
+        self.tokens = list(tokens)
+
+    async def get_active_tokens(self):
+        return list(self.tokens)
+
+
+class _TierTokenManager:
+    def __init__(self, tokens):
+        self.tokens = list(tokens)
+
+    async def get_active_tokens(self):
+        return list(self.tokens)
+
+
+class _TierLoadBalancer:
+    def __init__(self, tokens):
+        self.token_manager = _TierTokenManager(tokens)
+
+    async def _get_token_load(self, token_id, **kwargs):
+        return 0, None
+
+
+def make_tier_handler(tokens):
+    tokens = list(tokens)
+    return SimpleNamespace(
+        db=_TierNativeDb(tokens),
+        load_balancer=_TierLoadBalancer(tokens),
+    )
+
+
+class _TierGeminiGenDb:
+    async def get_geminigen_config(self):
+        return SimpleNamespace(enabled=True, video_enabled=True)
+
+    async def list_geminigen_accounts(self):
+        return [SimpleNamespace(is_active=True, bearer_token="test-token")]
+
+
+class Native4KCatalogUnitTests(unittest.TestCase):
+    def test_4k_identifier_and_alias_filtering(self):
+        self.assertTrue(is_native_4k_model(NATIVE_IMAGE_4K))
+        self.assertTrue(is_native_4k_model(NATIVE_VIDEO_4K))
+        self.assertFalse(is_native_4k_model(NATIVE_IMAGE_2K))
+        self.assertFalse(is_native_4k_model(NATIVE_NON_4K_ULTRA))
+
+        aliases = get_base_model_aliases(include_4k=False)
+        self.assertIn("sizes: 2k", aliases["gemini-3.1-flash-image"])
+        self.assertNotIn("4k", aliases["gemini-3.1-flash-image"])
+        self.assertIn(NATIVE_NON_4K_ULTRA, aliases)
+        self.assertFalse(any(is_native_4k_model(alias) for alias in aliases))
+
+
+class Native4KCatalogAsyncTests(unittest.IsolatedAsyncioTestCase):
+    async def test_pro_only_catalog_hides_4k_but_keeps_2k_1080p_and_ultra_names(self):
+        handler = make_tier_handler([make_tier_token(1, PAYGATE_TIER_ONE)])
+        with (
+            patch.object(routes, "generation_handler", handler),
+            patch.object(routes, "geminigen_service", None),
+        ):
+            openai_catalog = await routes._get_openai_model_catalog()
+            gemini_catalog = await routes._get_gemini_model_catalog()
+            alias_payload = await routes.list_model_aliases(make_tier_auth_context(1))
+            missing_model = await routes.get_gemini_model(
+                NATIVE_IMAGE_4K,
+                make_tier_auth_context(1),
+            )
+
+        openai_ids = {item["id"] for item in openai_catalog}
+        alias_ids = {item["id"] for item in alias_payload["data"]}
+        self.assertIn(NATIVE_IMAGE_2K, openai_ids)
+        self.assertIn(NATIVE_VIDEO_1080P, openai_ids)
+        self.assertIn(NATIVE_NON_4K_ULTRA, openai_ids)
+        self.assertNotIn(NATIVE_IMAGE_4K, openai_ids)
+        self.assertNotIn(NATIVE_VIDEO_4K, openai_ids)
+        self.assertNotIn(NATIVE_IMAGE_4K, gemini_catalog)
+        self.assertFalse(any(is_native_4k_model(alias) for alias in alias_ids))
+        self.assertNotIn("4k", gemini_catalog["gemini-3.1-flash-image"])
+        self.assertEqual(missing_model.status_code, 404)
+
+    async def test_active_ultra_globally_enables_4k_catalog_entries(self):
+        handler = make_tier_handler(
+            [
+                make_tier_token(1, PAYGATE_TIER_ONE),
+                make_tier_token(2, PAYGATE_TIER_TWO),
+            ]
+        )
+        with (
+            patch.object(routes, "generation_handler", handler),
+            patch.object(routes, "geminigen_service", None),
+        ):
+            openai_catalog = await routes._get_openai_model_catalog()
+            gemini_catalog = await routes._get_gemini_model_catalog()
+            alias_payload = await routes.list_model_aliases(make_tier_auth_context(1))
+            model_payload = await routes.get_gemini_model(
+                NATIVE_IMAGE_4K,
+                make_tier_auth_context(1),
+            )
+
+        openai_ids = {item["id"] for item in openai_catalog}
+        alias_ids = {item["id"] for item in alias_payload["data"]}
+        self.assertIn(NATIVE_IMAGE_4K, openai_ids)
+        self.assertIn(NATIVE_VIDEO_4K, openai_ids)
+        self.assertIn(NATIVE_IMAGE_4K, gemini_catalog)
+        self.assertIn(NATIVE_VIDEO_4K, alias_ids)
+        self.assertIn("4k", gemini_catalog["gemini-3.1-flash-image"])
+        self.assertEqual(model_payload["name"], f"models/{NATIVE_IMAGE_4K}")
+
+    async def test_inactive_ultra_does_not_enable_4k(self):
+        handler = make_tier_handler(
+            [
+                make_tier_token(1, PAYGATE_TIER_ONE),
+                make_tier_token(2, PAYGATE_TIER_TWO, is_active=False),
+            ]
+        )
+        with patch.object(routes, "generation_handler", handler):
+            catalog = await routes._get_openai_model_catalog()
+
+        self.assertFalse(any(is_native_4k_model(item["id"]) for item in catalog))
+
+    async def test_native_filter_does_not_hide_geminigen_4k(self):
+        handler = make_tier_handler([make_tier_token(1, PAYGATE_TIER_ONE)])
+        geminigen_service = SimpleNamespace(db=_TierGeminiGenDb())
+        with (
+            patch.object(routes, "generation_handler", handler),
+            patch.object(routes, "geminigen_service", geminigen_service),
+            patch.object(routes, "runway_service", None),
+        ):
+            payload = await routes.list_models(make_tier_auth_context(1))
+
+        ids = {item["id"] for item in payload["data"]}
+        self.assertNotIn(NATIVE_IMAGE_4K, ids)
+        self.assertIn(GEMINIGEN_IMAGE_4K, ids)
+
+
+class Native4KGenerationEligibilityTests(unittest.IsolatedAsyncioTestCase):
+    async def test_pro_only_assignment_rejects_explicit_and_alias_resolved_4k(self):
+        request = SimpleNamespace(
+            generationConfig=SimpleNamespace(
+                aspectRatio="landscape",
+                imageSize="4k",
+            )
+        )
+        alias_resolved = resolve_model_name(
+            "gemini-3.1-flash-image",
+            request=request,
+            model_config=MODEL_CONFIG,
+        )
+        self.assertEqual(alias_resolved, NATIVE_IMAGE_4K)
+
+        handler = make_tier_handler([make_tier_token(1, PAYGATE_TIER_ONE)])
+        with patch.object(routes, "generation_handler", handler):
+            for model in (NATIVE_IMAGE_4K, NATIVE_VIDEO_4K, alias_resolved):
+                with self.subTest(model=model):
+                    with self.assertRaises(HTTPException) as raised:
+                        await routes._select_random_active_project_for_api_key(
+                            make_tier_auth_context(1),
+                            model,
+                        )
+                    self.assertEqual(raised.exception.status_code, 403)
+                    self.assertIn("active Ultra account assigned", raised.exception.detail)
+
+    async def test_4k_selection_uses_only_assigned_ultra(self):
+        handler = make_tier_handler(
+            [
+                make_tier_token(1, PAYGATE_TIER_ONE),
+                make_tier_token(2, PAYGATE_TIER_TWO),
+            ]
+        )
+        with patch.object(routes, "generation_handler", handler):
+            selected, project_id = await routes._select_random_active_project_for_api_key(
+                make_tier_auth_context(1, 2),
+                NATIVE_IMAGE_4K,
+            )
+
+        self.assertEqual(selected, {2})
+        self.assertIsNone(project_id)
+
+    async def test_pro_assignment_can_generate_2k_and_1080p(self):
+        handler = make_tier_handler([make_tier_token(1, PAYGATE_TIER_ONE)])
+        with patch.object(routes, "generation_handler", handler):
+            for model in (NATIVE_IMAGE_2K, NATIVE_VIDEO_1080P):
+                with self.subTest(model=model):
+                    selected, _ = await routes._select_random_active_project_for_api_key(
+                        make_tier_auth_context(1),
+                        model,
+                    )
+                    self.assertEqual(selected, {1})
+
+
+class _NativeLogLoadBalancer:
+    def __init__(self, token=None, events=None):
+        self.token = token
+        self.events = events if events is not None else []
+        self.release_pending = AsyncMock()
+
+    async def select_token(self, **kwargs):
+        self.events.append("select_token")
+        return self.token
+
+
+def make_native_log_handler(token=None, events=None):
+    handler = GenerationHandler.__new__(GenerationHandler)
+    handler.flow_client = SimpleNamespace(
+        clear_request_fingerprint=lambda: None,
+        set_managed_api_key_id=lambda api_key_id: None,
+        clear_managed_api_key_id=lambda: None,
+    )
+    handler.load_balancer = _NativeLogLoadBalancer(token=token, events=events)
+    handler.token_manager = SimpleNamespace(ensure_valid_token=AsyncMock(return_value=None))
+    handler._update_request_log_progress = AsyncMock()
+    return handler
+
+
+class NativeLiveRequestLogTests(unittest.IsolatedAsyncioTestCase):
+    async def test_non_stream_creates_processing_row_before_selection_and_reuses_it(self):
+        events = []
+        handler = make_native_log_handler(events=events)
+
+        async def log_request(*args, **kwargs):
+            events.append(f"log:{kwargs.get('status_code')}")
+            return 41
+
+        handler._log_request = AsyncMock(side_effect=log_request)
+        chunks = [
+            chunk
+            async for chunk in handler.handle_generation(
+                model="gemini-3.1-flash-image-landscape",
+                prompt="test prompt",
+                stream=False,
+                api_key_id=7,
+                poll_task_id="gen-public-job",
+            )
+        ]
+
+        self.assertEqual(events, ["log:102", "select_token", "log:503"])
+        self.assertTrue(chunks)
+        initial = handler._log_request.await_args_list[0].kwargs
+        final = handler._log_request.await_args_list[-1].kwargs
+        self.assertEqual(initial["request_data"]["request_id"], "gen-public-job")
+        self.assertEqual(initial["response_data"]["request_id"], "gen-public-job")
+        self.assertEqual(final["log_id"], 41)
+        self.assertEqual(final["status_text"], "failed")
+
+    async def test_stream_creates_row_before_first_client_chunk(self):
+        events = []
+        handler = make_native_log_handler(events=events)
+
+        async def log_request(*args, **kwargs):
+            events.append(f"log:{kwargs.get('status_code')}")
+            return 51
+
+        handler._log_request = AsyncMock(side_effect=log_request)
+        generation = handler.handle_generation(
+            model="gemini-3.1-flash-image-landscape",
+            prompt="test prompt",
+            stream=True,
+            api_key_id=7,
+        )
+
+        first_chunk = await anext(generation)
+        self.assertIn("data:", first_chunk)
+        self.assertEqual(events, ["log:102"])
+        await generation.aclose()
+
+    async def test_invalid_token_finalizes_existing_processing_row(self):
+        token = SimpleNamespace(id=9, email="native@example.com")
+        handler = make_native_log_handler(token=token)
+        handler._log_request = AsyncMock(return_value=61)
+
+        chunks = [
+            chunk
+            async for chunk in handler.handle_generation(
+                model="gemini-3.1-flash-image-landscape",
+                prompt="test prompt",
+                stream=False,
+                api_key_id=7,
+            )
+        ]
+
+        self.assertTrue(chunks)
+        self.assertEqual(handler._log_request.await_count, 2)
+        final = handler._log_request.await_args_list[-1].kwargs
+        self.assertEqual(final["log_id"], 61)
+        self.assertEqual(final["status_code"], 503)
+        self.assertEqual(final["status_text"], "failed")
+        handler.load_balancer.release_pending.assert_awaited_once()
+
+    async def test_token_selection_exception_finalizes_processing_row(self):
+        handler = make_native_log_handler()
+        handler._log_request = AsyncMock(return_value=66)
+        handler.load_balancer.select_token = AsyncMock(
+            side_effect=RuntimeError("selection exploded")
+        )
+
+        chunks = [
+            chunk
+            async for chunk in handler.handle_generation(
+                model="gemini-3.1-flash-image-landscape",
+                prompt="test prompt",
+                stream=False,
+                api_key_id=7,
+            )
+        ]
+
+        self.assertTrue(chunks)
+        self.assertEqual(handler._log_request.await_count, 2)
+        final = handler._log_request.await_args_list[-1].kwargs
+        self.assertEqual(final["log_id"], 66)
+        self.assertEqual(final["status_code"], 500)
+        self.assertEqual(final["status_text"], "failed")
+        self.assertIn("selection exploded", final["response_data"]["error"])
+
+    async def test_progress_payload_keeps_native_request_id(self):
+        handler = GenerationHandler.__new__(GenerationHandler)
+        handler.db = SimpleNamespace(update_request_log=AsyncMock())
+
+        await handler._update_request_log_progress(
+            {"id": 71, "request_id": "gen-live", "api_key_id": 7},
+            token_id=9,
+            status_text="video_polling",
+            progress=55,
+        )
+
+        update = handler.db.update_request_log.await_args.kwargs
+        payload = json.loads(update["response_body"])
+        self.assertEqual(payload["request_id"], "gen-live")
+        self.assertEqual(update["status_code"], 102)
+        self.assertEqual(update["progress"], 55)
+
+    async def test_non_stream_video_poll_persists_progress(self):
+        handler = GenerationHandler.__new__(GenerationHandler)
+        handler.flow_client = SimpleNamespace(
+            check_video_status=AsyncMock(return_value={"operations": []})
+        )
+        handler._update_request_log_progress = AsyncMock()
+        handler._fail_video_task = AsyncMock()
+        token = SimpleNamespace(id=9, at="at-token")
+        generation_result = handler._create_generation_result()
+
+        with patch(
+            "src.services.generation_handler.config",
+            SimpleNamespace(max_poll_attempts=1, poll_interval=0),
+        ):
+            chunks = [
+                chunk
+                async for chunk in handler._poll_video_result(
+                    token,
+                    "project-1",
+                    [{"operation": {"name": "operation-1"}}],
+                    False,
+                    generation_result=generation_result,
+                    request_log_state={"id": 81, "request_id": "gen-video"},
+                )
+            ]
+
+        self.assertTrue(chunks)
+        handler._update_request_log_progress.assert_awaited_once()
+        progress = handler._update_request_log_progress.await_args.kwargs
+        self.assertEqual(progress["status_text"], "video_polling")
+        self.assertEqual(progress["progress"], 45)
+
+    def test_admin_job_id_extraction_recognizes_native_request_id(self):
+        self.assertEqual(
+            _extract_log_job_id('{"status":"processing","request_id":"gen-native"}'),
+            "gen-native",
+        )
+        self.assertEqual(
+            _extract_log_job_id(
+                {"performance": {"request_id": "gen-native-completed"}}
+            ),
+            "gen-native-completed",
+        )
 
 
 if __name__ == "__main__":

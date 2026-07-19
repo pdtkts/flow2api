@@ -31,6 +31,8 @@ type ManagedApiKey = {
   is_active: boolean
   expires_at?: string | null
   last_used_at?: string | null
+  last_presence_at?: string | null
+  is_online: boolean
   created_at?: string | null
   account_ids: number[]
   can_reveal_plaintext?: number
@@ -61,6 +63,14 @@ type ScopeOption = { id: string; label: string; description: string }
 
 type AdobeUsageMonthRow = { year_month: string; success_count: number }
 type AdobeUsageOpRow = { year_month: string; operation: string; success_count: number }
+type GenerationStats = {
+  total_images: number
+  total_videos: number
+  total_errors: number
+  today_images: number
+  today_videos: number
+  today_errors: number
+}
 
 const AUDIT_PAGE_SIZE = 25
 const KEY_PROJECT_PAGE_SIZE = 10
@@ -69,16 +79,6 @@ const AVAILABLE_SCOPES: ScopeOption[] = [
   { id: "models:read", label: "Read models", description: "Allows `/v1/models`, `/v1/models/aliases`, and Gemini model listing endpoints." },
   { id: "generate:chat", label: "Generate chat", description: "Allows `/v1/chat/completions` (stream and non-stream)." },
   { id: "generate:gemini", label: "Generate gemini", description: "Allows Gemini `generateContent` and `streamGenerateContent` endpoints." },
-  {
-    id: "projects:read",
-    label: "List Flow projects",
-    description: "Allows `GET /v1/projects` to list VideoFX projects for assigned accounts.",
-  },
-  {
-    id: "projects:write",
-    label: "Create Flow projects",
-    description: "Allows `POST /v1/projects` to create VideoFX projects for assigned accounts.",
-  },
   {
     id: "adobe:cloning",
     label: "Adobe cloning",
@@ -139,6 +139,7 @@ export function ApiKeyManagement() {
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([])
   const [auditPage, setAuditPage] = useState(0)
   const [auditTotal, setAuditTotal] = useState(0)
+  const [auditClearing, setAuditClearing] = useState(false)
 
   const [createOpen, setCreateOpen] = useState(false)
   const [editOpen, setEditOpen] = useState(false)
@@ -156,6 +157,8 @@ export function ApiKeyManagement() {
   const [adobeUsageRows, setAdobeUsageRows] = useState<AdobeUsageMonthRow[]>([])
   const [adobeUsageOpRows, setAdobeUsageOpRows] = useState<AdobeUsageOpRow[]>([])
   const [adobeUsageLoading, setAdobeUsageLoading] = useState(false)
+  const [generationStats, setGenerationStats] = useState<GenerationStats | null>(null)
+  const [generationStatsLoading, setGenerationStatsLoading] = useState(false)
   const [createdKey, setCreatedKey] = useState("")
   const [captchaWorkerKeys, setCaptchaWorkerKeys] = useState<CaptchaWorkerKeyRow[]>([])
   const [captchaWorkerSessions, setCaptchaWorkerSessions] = useState<NonNullable<ListCaptchaWorkerKeysResponse["sessions"]>>([])
@@ -173,16 +176,25 @@ export function ApiKeyManagement() {
   const [newProjTokenId, setNewProjTokenId] = useState("")
   const [newProjTitle, setNewProjTitle] = useState("")
   const [newProjSetCurrent, setNewProjSetCurrent] = useState(true)
-  const [creatingProj, setCreatingProj] = useState(false)
+  const [creatingProj] = useState(false)
   const [legacyScopesNotice, setLegacyScopesNotice] = useState(false)
+
+  const loadManagedKeys = useCallback(async () => {
+    if (!token) return
+    const response = await adminJson<{ success?: boolean; keys?: ManagedApiKey[] }>(
+      "/api/admin/managed-apikeys",
+      token
+    )
+    if (response.ok && response.data?.keys) setKeys(response.data.keys)
+  }, [token])
 
   const loadAll = useCallback(async () => {
     if (!token) return
     setLoading(true)
     try {
       const auditOffset = auditPage * AUDIT_PAGE_SIZE
-      const [k, t, a, cw] = await Promise.all([
-        adminJson<{ success?: boolean; keys?: ManagedApiKey[] }>("/api/admin/managed-apikeys", token),
+      const [, t, a, cw] = await Promise.all([
+        loadManagedKeys(),
         adminJson<TokenRow[]>("/api/tokens", token),
         adminJson<{ success?: boolean; logs?: AuditLog[]; total?: number }>(
           `/api/admin/managed-apikeys/audit?limit=${AUDIT_PAGE_SIZE}&offset=${auditOffset}`,
@@ -190,7 +202,6 @@ export function ApiKeyManagement() {
         ),
         adminJson<ListCaptchaWorkerKeysResponse>("/api/admin/captcha-worker-keys", token),
       ])
-      if (k.ok && k.data?.keys) setKeys(k.data.keys)
       if (t.ok && Array.isArray(t.data)) setTokens(t.data)
       if (a.ok && a.data?.logs) setAuditLogs(a.data.logs)
       if (a.ok && typeof a.data?.total === "number") setAuditTotal(a.data.total)
@@ -205,7 +216,7 @@ export function ApiKeyManagement() {
     } finally {
       setLoading(false)
     }
-  }, [token, auditPage])
+  }, [token, auditPage, loadManagedKeys])
 
   useEffect(() => {
     const timeoutId = window.setTimeout(() => {
@@ -214,26 +225,25 @@ export function ApiKeyManagement() {
     return () => window.clearTimeout(timeoutId)
   }, [loadAll])
 
+  useEffect(() => {
+    if (!token) return
+    const intervalId = window.setInterval(() => {
+      void loadManagedKeys()
+    }, 15_000)
+    return () => window.clearInterval(intervalId)
+  }, [token, loadManagedKeys])
+
   const loadKeyProjects = useCallback(async () => {
     if (!token || editingKeyId == null || !editOpen) return
     setKeyProjectsLoading(true)
     try {
-      const offset = keyProjectsPage * KEY_PROJECT_PAGE_SIZE
-      const r = await adminJson<ManagedApiKeyProjectsResponse>(
-        `/api/admin/managed-apikeys/${editingKeyId}/projects?limit=${KEY_PROJECT_PAGE_SIZE}&offset=${offset}`,
-        token
-      )
-      if (r.ok && r.data?.success) {
-        setKeyProjectRows(Array.isArray(r.data.projects) ? r.data.projects : [])
-        setKeyProjectsTotal(typeof r.data.total === "number" ? r.data.total : 0)
-        setKeyProjectAccounts(Array.isArray(r.data.accounts) ? r.data.accounts : [])
-      } else {
-        toast.error("Failed to load key projects")
-      }
+      setKeyProjectRows([])
+      setKeyProjectsTotal(0)
+      setKeyProjectAccounts([])
     } finally {
       setKeyProjectsLoading(false)
     }
-  }, [token, editingKeyId, editOpen, keyProjectsPage])
+  }, [token, editingKeyId, editOpen])
 
   useEffect(() => {
     void loadKeyProjects()
@@ -264,6 +274,59 @@ export function ApiKeyManagement() {
       setAdobeUsageLoading(false)
     }
   }, [token])
+
+  const loadGenerationStats = useCallback(async (keyId: number) => {
+    if (!token) return
+    setGenerationStatsLoading(true)
+    try {
+      const r = await adminJson<{ success?: boolean } & GenerationStats>(
+        `/api/admin/managed-apikeys/${keyId}/generation-stats`,
+        token
+      )
+      if (r.ok && r.data?.success) {
+        setGenerationStats({
+          total_images: Number(r.data.total_images || 0),
+          total_videos: Number(r.data.total_videos || 0),
+          total_errors: Number(r.data.total_errors || 0),
+          today_images: Number(r.data.today_images || 0),
+          today_videos: Number(r.data.today_videos || 0),
+          today_errors: Number(r.data.today_errors || 0),
+        })
+      } else {
+        setGenerationStats(null)
+      }
+    } catch {
+      setGenerationStats(null)
+    } finally {
+      setGenerationStatsLoading(false)
+    }
+  }, [token])
+
+  const clearAuditLogs = async () => {
+    if (!token || auditTotal === 0) return
+    if (!confirm("Clear all managed API key audit logs? This cannot be undone.")) return
+
+    setAuditClearing(true)
+    try {
+      const r = await adminJson<{ success?: boolean; detail?: string; deleted?: number }>(
+        "/api/admin/managed-apikeys/audit",
+        token,
+        { method: "DELETE" }
+      )
+      if (r.ok && r.data?.success) {
+        setAuditLogs([])
+        setAuditTotal(0)
+        setAuditPage(0)
+        toast.success("Key audit logs cleared")
+      } else {
+        toast.error(r.data?.detail || "Failed to clear key audit logs")
+      }
+    } catch {
+      toast.error("Failed to clear key audit logs")
+    } finally {
+      setAuditClearing(false)
+    }
+  }
 
   const toggleAccount = (id: number) => {
     setSelectedAccountIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))
@@ -473,6 +536,7 @@ export function ApiKeyManagement() {
     setNewProjSetCurrent(true)
     setEditOpen(true)
     void loadAdobeUsage(key.id)
+    void loadGenerationStats(key.id)
   }
 
   const handleEditOpenChange = (open: boolean) => {
@@ -485,6 +549,8 @@ export function ApiKeyManagement() {
       setKeyProjectsTotal(0)
       setAdobeUsageRows([])
       setAdobeUsageOpRows([])
+      setGenerationStats(null)
+      setGenerationStatsLoading(false)
       setLegacyScopesNotice(false)
       setNewProjTokenId("")
       setNewProjTitle("")
@@ -493,37 +559,7 @@ export function ApiKeyManagement() {
   }
 
   const createKeyProject = async () => {
-    if (!token || editingKeyId == null) return
-    const tid = parseInt(newProjTokenId, 10)
-    if (!Number.isFinite(tid)) {
-      toast.error("Select an account")
-      return
-    }
-    if (!selectedAccountIds.includes(tid)) {
-      toast.error("Selected account must be assigned to this key")
-      return
-    }
-    setCreatingProj(true)
-    try {
-      const res = await adminFetch(`/api/admin/managed-apikeys/${editingKeyId}/projects`, token, {
-        method: "POST",
-        body: JSON.stringify({
-          token_id: tid,
-          title: newProjTitle.trim() || null,
-          set_as_current: newProjSetCurrent,
-        }),
-      })
-      if (!res) return
-      const data = await res.json().catch(() => ({}))
-      if (data.success) {
-        toast.success("Project created")
-        await loadKeyProjects()
-      } else {
-        toast.error(data.detail || data.message || "Create failed")
-      }
-    } finally {
-      setCreatingProj(false)
-    }
+    toast.error("Project management has been removed")
   }
 
   const tokenEmail = (tid: number) => tokens.find((x) => x.id === tid)?.email || "—"
@@ -663,7 +699,21 @@ export function ApiKeyManagement() {
                 keys.map((k) => (
                   <TableRow key={k.id}>
                     <TableCell>{k.client_name}</TableCell>
-                    <TableCell>{k.label}</TableCell>
+                    <TableCell>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span>{k.label}</span>
+                        <Badge
+                          variant={k.is_online ? "default" : "secondary"}
+                          className={k.is_online ? "bg-emerald-600 text-white hover:bg-emerald-600" : undefined}
+                        >
+                          <span
+                            className={`mr-1.5 h-1.5 w-1.5 rounded-full ${k.is_online ? "bg-emerald-100" : "bg-muted-foreground/60"}`}
+                            aria-hidden="true"
+                          />
+                          {k.is_online ? "Online" : "Offline"}
+                        </Badge>
+                      </div>
+                    </TableCell>
                     <TableCell className="font-mono text-xs">{k.key_prefix}</TableCell>
                     <TableCell>{k.account_ids.length}</TableCell>
                     <TableCell className="text-xs">{k.last_used_at || "-"}</TableCell>
@@ -806,8 +856,18 @@ export function ApiKeyManagement() {
       </Card>
 
       <Card>
-        <CardHeader>
+        <CardHeader className="flex flex-row items-center justify-between gap-3">
           <CardTitle>Recent key audit logs</CardTitle>
+          <Button
+            type="button"
+            variant="destructive"
+            size="sm"
+            disabled={loading || auditClearing || auditTotal === 0}
+            onClick={() => void clearAuditLogs()}
+          >
+            {auditClearing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+            Clear all
+          </Button>
         </CardHeader>
         <CardContent className="p-0">
           <Table>
@@ -1060,6 +1120,51 @@ export function ApiKeyManagement() {
             <div className="space-y-3 rounded-md border p-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div>
+                  <Label>Generation stats</Label>
+                  <p className="mt-0.5 text-xs text-muted-foreground">
+                    Durable image/video generation counters for this key.
+                  </p>
+                </div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-8"
+                  disabled={generationStatsLoading || editingKeyId == null}
+                  onClick={() => editingKeyId != null && void loadGenerationStats(editingKeyId)}
+                >
+                  <RefreshCw className={`h-3.5 w-3.5 mr-1 ${generationStatsLoading ? "animate-spin" : ""}`} />
+                  Refresh
+                </Button>
+              </div>
+              {generationStatsLoading && !generationStats ? (
+                <div className="flex justify-center py-6 text-muted-foreground">
+                  <Loader2 className="h-6 w-6 animate-spin" />
+                </div>
+              ) : (
+                <div className="grid gap-3 sm:grid-cols-3">
+                  <div className="rounded-md border bg-muted/20 px-3 py-2">
+                    <div className="text-xs text-muted-foreground">Images</div>
+                    <div className="text-lg font-semibold tabular-nums">{generationStats?.total_images ?? 0}</div>
+                    <div className="text-[11px] text-muted-foreground">Today {generationStats?.today_images ?? 0}</div>
+                  </div>
+                  <div className="rounded-md border bg-muted/20 px-3 py-2">
+                    <div className="text-xs text-muted-foreground">Videos</div>
+                    <div className="text-lg font-semibold tabular-nums">{generationStats?.total_videos ?? 0}</div>
+                    <div className="text-[11px] text-muted-foreground">Today {generationStats?.today_videos ?? 0}</div>
+                  </div>
+                  <div className="rounded-md border bg-muted/20 px-3 py-2">
+                    <div className="text-xs text-muted-foreground">Errors</div>
+                    <div className="text-lg font-semibold tabular-nums">{generationStats?.total_errors ?? 0}</div>
+                    <div className="text-[11px] text-muted-foreground">Today {generationStats?.today_errors ?? 0}</div>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="space-y-3 rounded-md border p-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
                   <Label>Adobe success (HTTP 200)</Label>
                   <p className="mt-0.5 text-xs text-muted-foreground">
                     Every logged Adobe endpoint (<code className="rounded bg-muted px-1">adobe:*</code> in request logs) in the last 12 months.
@@ -1181,7 +1286,7 @@ export function ApiKeyManagement() {
               ))}
             </div>
 
-            {editingKeyId != null ? (
+            {false ? (
               <div className="space-y-4 rounded-lg border bg-muted/20 p-4">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div className="flex items-center gap-2">

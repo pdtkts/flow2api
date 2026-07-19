@@ -5,9 +5,13 @@ export interface DashboardStats {
   total_images: number
   total_videos: number
   total_errors: number
+  total_metadata: number
   today_images: number
   today_videos: number
   today_errors: number
+  today_metadata: number
+  metadata_errors?: number
+  today_metadata_errors?: number
 }
 
 /** Row from GET /api/tokens */
@@ -24,6 +28,20 @@ export interface TokenRow {
   user_paygate_tier?: string | null
   current_project_id?: string | null
   current_project_name?: string | null
+  auth_mode?: "session_token" | "browser_profile" | string | null
+  browser_profile_path?: string | null
+  browser_profile_status?: string | null
+  browser_profile_email?: string | null
+  browser_profile_name?: string | null
+  browser_profile_login_state?: string | null
+  browser_profile_cookie_status?: string | null
+  browser_profile_st_status?: string | null
+  browser_profile_at_status?: string | null
+  browser_profile_last_opened_at?: string | null
+  browser_profile_last_sync_at?: string | null
+  browser_profile_last_refresh_at?: string | null
+  browser_profile_last_error?: string | null
+  runtime_open?: boolean
   captcha_proxy_url?: string
   image_enabled: boolean
   video_enabled: boolean
@@ -35,6 +53,17 @@ export interface TokenRow {
   extension_route_key?: string | null
   /** When false, Flow generation uses server HTTP; extension still used for captcha if method is extension. */
   use_extension_for_generation?: boolean | number | null
+  protocol_mode?: "session" | "protocol" | string
+  google_cookies?: string
+  has_google_cookies?: boolean
+  login_account?: string
+  login_password?: string
+  proxy_url?: string
+  protocol_proxy_configured?: boolean
+  auto_refresh_enabled?: boolean
+  refresh_interval_minutes?: number
+  last_st_refresh_at?: string | null
+  last_st_refresh_result?: string
 }
 
 export interface CaptchaWorkerKeyRow {
@@ -96,6 +125,7 @@ export interface LogsListResponse {
 /** List item from GET /api/logs */
 export interface LogListItem {
   id: number
+  job_id?: string | null
   token_id?: number | null
   token_email?: string | null
   token_username?: string | null
@@ -110,6 +140,8 @@ export interface LogListItem {
   created_at?: string | null
   updated_at?: string | null
   error_summary?: string
+  captcha_user_agent_set?: boolean
+  captcha_provider?: string | null
 }
 
 /** Detail from GET /api/logs/:id */
@@ -130,6 +162,19 @@ export interface ImportTokenItem {
   video_concurrency?: number
 }
 
+export interface DigitalOceanCacheStatus {
+  configured?: boolean
+  healthy?: boolean
+  missing?: string[]
+  region?: string
+  bucket?: string
+  prefix?: string
+  cdn_base_url?: string
+  access_key_configured?: boolean
+  api_token_configured?: boolean
+  cdn_endpoint_configured?: boolean
+}
+
 export interface CacheConfigResponse {
   success?: boolean
   config?: {
@@ -140,6 +185,9 @@ export interface CacheConfigResponse {
     timeout_days?: number
     base_url?: string
     effective_base_url?: string
+    provider?: "local" | "digitalocean"
+    delivery_mode?: "proxy" | "cdn"
+    digitalocean?: DigitalOceanCacheStatus
   }
 }
 
@@ -148,6 +196,11 @@ export interface CacheStatsResponse {
   cache_dir?: string
   file_count?: number
   total_bytes?: number
+  provider?: string
+  delivery_mode?: string
+  region?: string
+  bucket?: string
+  prefix?: string
 }
 
 export interface CacheFileItem {
@@ -155,6 +208,8 @@ export interface CacheFileItem {
   size_bytes: number
   kind: "image" | "video" | "other"
   modified_at?: string | null
+  provider?: string
+  delivery_mode?: string
 }
 
 export interface CacheFilesResponse {

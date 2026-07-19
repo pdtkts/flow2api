@@ -14,6 +14,9 @@ import time
 import re
 import random
 import uuid
+import hashlib
+import json
+from copy import deepcopy
 from typing import Optional, Dict, Any, List, Union
 from datetime import datetime
 from urllib.parse import urlparse, unquote, parse_qs
@@ -451,6 +454,8 @@ class TokenBrowser:
         self._pid_file = os.path.join(self._pid_dir, f"slot_{self.token_id}.pid")
         os.makedirs(self._pid_dir, exist_ok=True)
         self._shared_proxy_url: Optional[str] = None
+        self._shared_bound_token_id: Optional[int] = None
+        self._shared_bound_cookie_signature: Optional[str] = None
         self._shared_launch_count = 0
         self._shared_reuse_count = 0
         self._consecutive_browser_failures = 0
@@ -466,6 +471,111 @@ class TokenBrowser:
             "width": base_w,
             "height": base_h - random.randint(0, 80),
         }
+        self._profile_env_seed = hashlib.sha256(
+            f"{self.token_id}:{time.time_ns()}:{uuid.uuid4().hex}".encode("utf-8")
+        ).hexdigest()
+        self._profile_hardware_concurrency = random.choice([4, 6, 8, 8, 12, 16])
+        self._profile_device_memory = random.choice([4, 8, 8, 16])
+        self._profile_gpu = random.choice([
+            ("Intel Inc.", "Intel(R) UHD Graphics 620"),
+            ("NVIDIA Corporation", "NVIDIA GeForce GTX 1650"),
+            ("ATI Technologies Inc.", "AMD Radeon(TM) Graphics"),
+        ])
+
+    def _build_browser_environment_patch_config(self) -> Dict[str, Any]:
+        digest = hashlib.sha256(self._profile_env_seed.encode("utf-8")).digest()
+        width = int(self._profile_viewport["width"])
+        height = int(self._profile_viewport["height"])
+        return {
+            "seed": self._profile_env_seed[:16],
+            "width": width,
+            "height": height,
+            "hardwareConcurrency": self._profile_hardware_concurrency,
+            "deviceMemory": self._profile_device_memory,
+            "gpuVendor": self._profile_gpu[0],
+            "gpuRenderer": self._profile_gpu[1],
+            "quota": 120_000_000_000 + int(digest[0] % 20) * 1_000_000_000,
+            "usage": 8_000_000 + int(digest[1] % 20) * 250_000,
+        }
+
+    def _build_browser_environment_patch_source(self) -> str:
+        profile = json.dumps(
+            self._build_browser_environment_patch_config(),
+            ensure_ascii=True,
+            separators=(",", ":"),
+        )
+        return f"""
+(() => {{
+  const marker = '__flow2apiBrowserEnvironmentV2';
+  if (window[marker]) return;
+  const p = {profile};
+  Object.defineProperty(window, marker, {{value: p.seed, configurable: false}});
+  const getter = (target, key, value) => {{
+    try {{ Object.defineProperty(target, key, {{configurable: true, get: () => value}}); }} catch (_) {{}}
+  }};
+  getter(Navigator.prototype, 'webdriver', undefined);
+  getter(Navigator.prototype, 'language', 'en-US');
+  getter(Navigator.prototype, 'languages', ['en-US', 'en']);
+  getter(Navigator.prototype, 'hardwareConcurrency', p.hardwareConcurrency);
+  getter(Navigator.prototype, 'deviceMemory', p.deviceMemory);
+  getter(Navigator.prototype, 'maxTouchPoints', 0);
+  getter(Navigator.prototype, 'pdfViewerEnabled', true);
+  getter(Screen.prototype, 'width', p.width);
+  getter(Screen.prototype, 'height', p.height);
+  getter(Screen.prototype, 'availWidth', p.width);
+  getter(Screen.prototype, 'availHeight', Math.max(640, p.height - 40));
+  getter(window, 'innerWidth', p.width);
+  getter(window, 'innerHeight', p.height);
+  getter(window, 'outerWidth', p.width);
+  getter(window, 'outerHeight', p.height + 88);
+  getter(Document.prototype, 'hidden', false);
+  getter(Document.prototype, 'visibilityState', 'visible');
+  try {{ document.hasFocus = () => true; }} catch (_) {{}}
+
+  const mimeTypes = [{{type:'application/pdf', suffixes:'pdf', description:'Portable Document Format'}}];
+  const plugins = [{{name:'PDF Viewer', filename:'internal-pdf-viewer', description:'Portable Document Format', length:1}}];
+  plugins.item = i => plugins[Number(i)] || null;
+  plugins.namedItem = n => plugins.find(x => x.name === n) || null;
+  mimeTypes.item = i => mimeTypes[Number(i)] || null;
+  mimeTypes.namedItem = n => mimeTypes.find(x => x.type === n) || null;
+  getter(Navigator.prototype, 'plugins', plugins);
+  getter(Navigator.prototype, 'mimeTypes', mimeTypes);
+
+  const patchWebGL = proto => {{
+    if (!proto || typeof proto.getParameter !== 'function') return;
+    const original = proto.getParameter;
+    proto.getParameter = function(key) {{
+      if (key === 37445 || key === 7936) return p.gpuVendor;
+      if (key === 37446 || key === 7937) return p.gpuRenderer;
+      return original.apply(this, arguments);
+    }};
+  }};
+  patchWebGL(window.WebGLRenderingContext && WebGLRenderingContext.prototype);
+  patchWebGL(window.WebGL2RenderingContext && WebGL2RenderingContext.prototype);
+
+  if (!navigator.gpu) {{
+    const adapter = {{
+      features: new Set(['texture-compression-bc']),
+      limits: {{maxTextureDimension2D: 8192, maxBindGroups: 4}},
+      requestDevice: async () => ({{features: new Set(), limits: {{}}}}),
+      requestAdapterInfo: async () => ({{vendor:p.gpuVendor, architecture:'', device:p.gpuRenderer, description:''}}),
+    }};
+    getter(Navigator.prototype, 'gpu', {{requestAdapter: async () => adapter, getPreferredCanvasFormat: () => 'bgra8unorm'}});
+  }}
+  if (navigator.storage) {{
+    try {{ navigator.storage.estimate = async () => ({{quota:p.quota, usage:p.usage}}); }} catch (_) {{}}
+    try {{ navigator.storage.persisted = async () => false; }} catch (_) {{}}
+  }}
+  if (navigator.mediaDevices && !navigator.mediaDevices.enumerateDevices) {{
+    navigator.mediaDevices.enumerateDevices = async () => [];
+  }}
+  window.chrome = window.chrome || {{}};
+  window.chrome.runtime = window.chrome.runtime || {{}};
+  window.chrome.app = window.chrome.app || {{isInstalled:false}};
+  if (!performance.memory) getter(performance, 'memory', {{jsHeapSizeLimit:4294705152,totalJSHeapSize:32000000,usedJSHeapSize:18000000}});
+  if (document.fonts && typeof document.fonts.check !== 'function') document.fonts.check = () => true;
+}})();
+"""
 
     def _get_slot_marker(self) -> str:
         return f"--flow2api-browser-slot={self.token_id}"
@@ -717,6 +827,7 @@ class TokenBrowser:
                 viewport=viewport,
                 locale="en-US",
             )
+            await context.add_init_script(self._build_browser_environment_patch_source())
             browser_pid = self._extract_browser_pid(browser)
             if manage_slot_pid:
                 self._write_pid_file(browser_pid)
@@ -750,6 +861,8 @@ class TokenBrowser:
         self._shared_keepalive_page = None
         self._shared_browser_pid = None
         self._shared_proxy_url = None
+        self._shared_bound_token_id = None
+        self._shared_bound_cookie_signature = None
         self._consecutive_browser_failures = 0
         self._shared_reuse_count = 0
 
@@ -767,7 +880,38 @@ class TokenBrowser:
         async with self._shared_browser_lock:
             await self._recycle_browser_locked(reason=reason, rotate_profile=rotate_profile)
 
-    async def _get_or_create_shared_browser(self, token_proxy_url: Optional[str] = None) -> tuple:
+    async def _ensure_shared_token_binding(self, context, token_id: Optional[int]) -> bool:
+        try:
+            normalized_id = int(token_id) if token_id else None
+        except (TypeError, ValueError):
+            normalized_id = None
+        if normalized_id is None:
+            return True
+        token = await self.db.get_token(normalized_id) if self.db else None
+        session_token = str(getattr(token, "st", "") or "").strip() if token else ""
+        if not session_token:
+            return False
+        signature = hashlib.sha256(session_token.encode("utf-8")).hexdigest()
+        if self._shared_bound_token_id == normalized_id and self._shared_bound_cookie_signature == signature:
+            return True
+        await context.clear_cookies()
+        await context.add_cookies([{
+            "name": "__Secure-next-auth.session-token",
+            "value": session_token,
+            "url": "https://labs.google/",
+            "secure": True,
+            "httpOnly": True,
+            "sameSite": "None",
+        }])
+        self._shared_bound_token_id = normalized_id
+        self._shared_bound_cookie_signature = signature
+        return True
+
+    async def _get_or_create_shared_browser(
+        self,
+        token_proxy_url: Optional[str] = None,
+        token_id: Optional[int] = None,
+    ) -> tuple:
         """Get or create the shared browser for this slot."""
         _, expected_proxy_url, _ = await self._resolve_proxy_runtime_config(token_proxy_url=token_proxy_url)
 
@@ -800,6 +944,11 @@ class TokenBrowser:
                     has_shared_browser = False
 
             if has_shared_browser:
+                if not await self._ensure_shared_token_binding(self._shared_context, token_id):
+                    await self._recycle_browser_locked(reason="token_binding_failed", rotate_profile=False)
+                    has_shared_browser = False
+
+            if has_shared_browser:
                 self._shared_reuse_count += 1
                 debug_logger.log_info(
                     f"[BrowserCaptcha] Token-{self.token_id} reusing shared browser (reuse={self._shared_reuse_count})"
@@ -807,6 +956,9 @@ class TokenBrowser:
                 return self._shared_playwright, self._shared_browser, self._shared_context
 
             playwright, browser, context = await self._create_browser(token_proxy_url=token_proxy_url)
+            if not await self._ensure_shared_token_binding(context, token_id):
+                await self._close_browser(playwright, browser, context, browser_pid=self._extract_browser_pid(browser))
+                raise RuntimeError("failed to bind token session context")
             self._shared_playwright = playwright
             self._shared_browser = browser
             self._shared_context = context
@@ -1012,6 +1164,8 @@ class TokenBrowser:
             self._shared_keepalive_page = None
             self._shared_browser_pid = None
             self._shared_proxy_url = None
+            self._shared_bound_token_id = None
+            self._shared_bound_cookie_signature = None
         try:
             if context:
                 await asyncio.wait_for(context.close(), timeout=10)
@@ -1524,24 +1678,129 @@ class TokenBrowser:
         if not self._last_fingerprint:
             return None
         return dict(self._last_fingerprint)
+
+    @staticmethod
+    def _inject_recaptcha_token(payload: Any, token: str) -> None:
+        if isinstance(payload, dict):
+            context = payload.get("recaptchaContext")
+            if isinstance(context, dict):
+                context["token"] = token
+                context.setdefault("applicationType", "RECAPTCHA_APPLICATION_TYPE_WEB")
+            for value in payload.values():
+                TokenBrowser._inject_recaptcha_token(value, token)
+        elif isinstance(payload, list):
+            for value in payload:
+                TokenBrowser._inject_recaptcha_token(value, token)
+
+    async def submit_flow_request(
+        self,
+        project_id: str,
+        website_key: str,
+        action: str,
+        url: str,
+        at_token: str,
+        json_data: Dict[str, Any],
+        timeout: int,
+        token_proxy_url: Optional[str] = None,
+        token_id: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Solve and submit a Flow request inside the bound browser context."""
+        async with self._semaphore:
+            self._solve_inflight += 1
+            try:
+                last_error: Optional[Exception] = None
+                for attempt in range(config.browser_captcha_max_retries):
+                    page = None
+                    try:
+                        _, _, context = await self._get_or_create_shared_browser(
+                            token_proxy_url=token_proxy_url,
+                            token_id=token_id,
+                        )
+                        captcha_token = await self._execute_captcha(context, project_id, website_key, action)
+                        if not captcha_token:
+                            raise RuntimeError("failed to obtain reCAPTCHA token")
+                        payload = deepcopy(json_data)
+                        self._inject_recaptcha_token(payload, captcha_token)
+
+                        page = await context.new_page()
+                        await page.goto(
+                            f"https://labs.google/fx/tools/flow/project/{project_id}",
+                            wait_until="domcontentloaded",
+                            timeout=45000,
+                        )
+                        await self._capture_page_fingerprint(page)
+                        result = await asyncio.wait_for(
+                            page.evaluate(
+                                """
+                                async ({targetUrl, bearerToken, payload, timeoutMs}) => {
+                                  const controller = new AbortController();
+                                  const timer = setTimeout(() => controller.abort(), timeoutMs);
+                                  try {
+                                    const response = await fetch(targetUrl, {
+                                      method: 'POST',
+                                      credentials: 'include',
+                                      headers: {
+                                        'Accept': 'text/event-stream, text/event-stream, */*',
+                                        'Content-Type': 'application/json',
+                                        'Authorization': `Bearer ${bearerToken}`,
+                                      },
+                                      body: JSON.stringify(payload),
+                                      signal: controller.signal,
+                                    });
+                                    return {status: response.status, text: await response.text()};
+                                  } finally { clearTimeout(timer); }
+                                }
+                                """,
+                                {
+                                    "targetUrl": url,
+                                    "bearerToken": at_token,
+                                    "payload": payload,
+                                    "timeoutMs": max(5000, int(timeout) * 1000),
+                                },
+                            ),
+                            timeout=max(10, int(timeout) + 5),
+                        )
+                        if not isinstance(result, dict):
+                            raise RuntimeError("browser submission returned an invalid response")
+                        self._solve_count += 1
+                        return result
+                    except Exception as exc:
+                        last_error = exc
+                        self._error_count += 1
+                        if attempt < config.browser_captcha_max_retries - 1:
+                            await asyncio.sleep(1)
+                    finally:
+                        if page:
+                            try:
+                                await page.close()
+                            except Exception:
+                                pass
+                raise last_error or RuntimeError("browser Flow submission failed")
+            finally:
+                self._solve_inflight = max(0, self._solve_inflight - 1)
+                self.note_idle()
     
     async def get_token(
         self,
         project_id: str,
         website_key: str,
         action: str = "IMAGE_GENERATION",
-        token_proxy_url: Optional[str] = None
+        token_proxy_url: Optional[str] = None,
+        token_id: Optional[int] = None,
     ) -> tuple[Optional[str], Optional[str]]:
         """Get a token from the shared browser unless a fatal browser error occurs."""
         async with self._semaphore:
             self._solve_inflight += 1
-            max_retries = 3
+            max_retries = config.browser_captcha_max_retries
 
             try:
                 for attempt in range(max_retries):
                     try:
                         start_ts = time.time()
-                        _, _, context = await self._get_or_create_shared_browser(token_proxy_url=token_proxy_url)
+                        _, _, context = await self._get_or_create_shared_browser(
+                            token_proxy_url=token_proxy_url,
+                            token_id=token_id,
+                        )
 
                         token = await self._execute_captcha(context, project_id, website_key, action)
                         if token:
@@ -1601,7 +1860,7 @@ class TokenBrowser:
         """Get a custom reCAPTCHA token using a temporary browser."""
         async with self._semaphore:
             self._solve_inflight += 1
-            max_retries = 3
+            max_retries = config.browser_captcha_max_retries
 
             try:
                 for attempt in range(max_retries):
@@ -1663,7 +1922,7 @@ class TokenBrowser:
         """Get a custom token and verify its score using a temporary browser."""
         async with self._semaphore:
             self._solve_inflight += 1
-            max_retries = 3
+            max_retries = config.browser_captcha_max_retries
 
             try:
                 for attempt in range(max_retries):
@@ -2024,7 +2283,8 @@ class BrowserCaptchaService:
                         project_id,
                         self.website_key,
                         action,
-                        token_proxy_url=token_proxy_url
+                        token_proxy_url=token_proxy_url,
+                        token_id=token_id,
                     )
                 finally:
                     await self._release_slot_reservation(browser_id)
@@ -2044,7 +2304,8 @@ class BrowserCaptchaService:
                 project_id,
                 self.website_key,
                 action,
-                token_proxy_url=token_proxy_url
+                token_proxy_url=token_proxy_url,
+                token_id=token_id,
             )
         finally:
             await self._release_slot_reservation(browser_id)
@@ -2282,6 +2543,36 @@ class BrowserCaptchaService:
                 return None
             return browser.get_last_fingerprint()
 
+    async def submit_flow_request(
+        self,
+        project_id: str,
+        action: str,
+        token_id: Optional[int],
+        url: str,
+        at_token: str,
+        json_data: Dict[str, Any],
+        timeout: int,
+    ) -> tuple[Dict[str, Any], Union[int, str], Optional[Dict[str, Any]]]:
+        self._check_available()
+        token_proxy_url = await self._resolve_token_proxy_url(token_id)
+        browser_id = await self._select_browser_id(project_id)
+        try:
+            browser = await self._get_or_create_browser(browser_id)
+            response = await browser.submit_flow_request(
+                project_id=project_id,
+                website_key=self.website_key,
+                action=action,
+                url=url,
+                at_token=at_token,
+                json_data=json_data,
+                timeout=timeout,
+                token_proxy_url=token_proxy_url,
+                token_id=token_id,
+            )
+            return response, self._compose_browser_ref(browser_id, None), browser.get_last_fingerprint()
+        finally:
+            await self._release_slot_reservation(browser_id)
+
     async def report_error(
         self,
         browser_ref: Optional[Union[int, str]] = None,
@@ -2377,4 +2668,3 @@ class BrowserCaptchaService:
             "browsers": []
         }
         return base_stats
-

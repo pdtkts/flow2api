@@ -28,18 +28,19 @@ export default function Login() {
     try {
       const r = await fetch("/api/login", {
         method: "POST",
+        credentials: "include",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ username, password, remember_me: rememberMe }),
       })
       const d = await r.json().catch(() => ({}))
       if (r.ok && d.success) {
-        login(d.token)
+        login()
         toast.success("Login successful")
         navigate("/manage", { replace: true })
       } else {
         toast.error(d.detail || d.message || "Login failed")
       }
-    } catch (err) {
+    } catch {
       toast.error("Network error, please try again later")
     } finally {
       setLoading(false)

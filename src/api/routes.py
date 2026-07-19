@@ -22,13 +22,18 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from pydantic import BaseModel, Field
 
 from ..core import auth as auth_core
-from ..core.auth import verify_api_key_flexible
+from ..core.auth import verify_api_key_flexible, verify_managed_presence_key
 from ..core.api_key_manager import AuthContext
 from ..core.logger import debug_logger
 from ..core.route_log_sanitize import dumps_for_request_log
-from ..core.account_tiers import normalize_user_paygate_tier, supports_model_for_tier
+from ..core.account_tiers import (
+    PAYGATE_TIER_TWO,
+    is_native_4k_model,
+    normalize_user_paygate_tier,
+    supports_model_for_tier,
+)
 from ..core.model_resolver import get_base_model_aliases, resolve_model_name
-from ..core.geminigen_manifest import GEMINIGEN_MODEL_MANIFEST
+from ..core.geminigen_manifest import GEMINIGEN_MODEL_MANIFEST, geminigen_manifest_entry
 from ..core.studio_model_catalog import (
     geminigen_studio_metadata,
     native_studio_metadata,
@@ -179,6 +184,17 @@ def set_runway_service(service: RunwayService):
     runway_service = service
 
 
+@router.post("/api/client/presence", status_code=204)
+async def report_client_presence(
+    auth_ctx: AuthContext = Depends(verify_managed_presence_key),
+):
+    """Record a lightweight heartbeat for a managed desktop client."""
+    if auth_core.api_key_manager is None or auth_ctx.key_id is None:
+        raise HTTPException(status_code=503, detail="API key manager not initialized")
+    await auth_core.api_key_manager.db.touch_api_key_presence(auth_ctx.key_id)
+    return Response(status_code=204)
+
+
 def set_geminigen_service(service: GeminiGenService):
     """Set GeminiGen service instance."""
     global geminigen_service
@@ -264,6 +280,11 @@ async def _logged_managed_adobe_call(
     finally:
         duration = max(0.0, time.perf_counter() - started)
         if auth_ctx.key_id is not None:
+            if operation == LOG_OP_ADOBE_METADATA:
+                try:
+                    await ldb.increment_operation_stat(operation, success=status_code == 200)
+                except Exception as stat_exc:
+                    debug_logger.log_error(f"Managed Adobe metadata stats update failed: {stat_exc}")
             try:
                 status_text = "completed" if status_code == 200 else "failed"
                 await ldb.insert_managed_route_request_log(
@@ -289,13 +310,22 @@ def _build_model_description(model_config: Dict[str, Any]) -> str:
     return description
 
 
-async def _has_native_flow_accounts() -> bool:
+async def _get_active_native_tokens() -> List[Any]:
     if generation_handler is None:
-        return False
+        return []
     db = getattr(generation_handler, "db", None)
     if db is None:
-        return False
-    return bool(await db.get_active_tokens())
+        return []
+    return list(await db.get_active_tokens())
+
+
+def _has_active_native_ultra_account(tokens: List[Any]) -> bool:
+    return any(
+        bool(getattr(token, "is_active", True))
+        and normalize_user_paygate_tier(getattr(token, "user_paygate_tier", None))
+        == PAYGATE_TIER_TWO
+        for token in tokens
+    )
 
 
 async def _has_runway_accounts() -> bool:
@@ -320,8 +350,10 @@ async def _has_geminigen_accounts() -> bool:
 
 async def _get_openai_model_catalog() -> List[Dict[str, str]]:
     """Collect OpenAI-compatible model list entries."""
-    if not await _has_native_flow_accounts():
+    active_tokens = await _get_active_native_tokens()
+    if not active_tokens:
         return []
+    include_4k = _has_active_native_ultra_account(active_tokens)
     return [
         {
             "id": model_id,
@@ -329,6 +361,7 @@ async def _get_openai_model_catalog() -> List[Dict[str, str]]:
             "studio": native_studio_metadata(model_id, model_config),
         }
         for model_id, model_config in MODEL_CONFIG.items()
+        if include_4k or not is_native_4k_model(model_id)
     ]
 
 
@@ -367,6 +400,7 @@ async def _get_geminigen_openai_model_catalog() -> List[Dict[str, str]]:
             "studio": geminigen_studio_metadata(item),
         }
         for item in GEMINIGEN_MODEL_MANIFEST
+        if bool(getattr(cfg, "video_enabled", True)) or item.get("kind") != "video"
     ]
 
 
@@ -374,11 +408,16 @@ async def _get_gemini_model_catalog() -> Dict[str, str]:
     """Collect Gemini-compatible model metadata for /models endpoints."""
     catalog: Dict[str, str] = {}
 
-    if await _has_native_flow_accounts():
-        for alias_id, description in get_base_model_aliases().items():
+    active_tokens = await _get_active_native_tokens()
+    if active_tokens:
+        include_4k = _has_active_native_ultra_account(active_tokens)
+        aliases = get_base_model_aliases(include_4k=include_4k)
+        for alias_id, description in aliases.items():
             catalog[alias_id] = description
 
         for model_id, model_config in MODEL_CONFIG.items():
+            if not include_4k and is_native_4k_model(model_id):
+                continue
             catalog.setdefault(model_id, _build_model_description(model_config))
 
     for model in await _get_geminigen_openai_model_catalog():
@@ -447,6 +486,11 @@ def _cache_file_row_to_list_item(row: Dict[str, Any]) -> Dict[str, Any]:
     download_path = f"/api/cache/blob/{fn_safe}"
     if flow:
         download_path = f"{download_path}?project_id={quote(flow, safe='')}"
+    if row.get("delivery_mode") == "cdn" and generation_handler is not None:
+        file_cache = getattr(generation_handler, "file_cache", None)
+        direct = file_cache.backend.public_url(fn_safe) if file_cache and getattr(file_cache, "backend", None) else None
+        if direct:
+            download_path = direct
     created = row.get("created_at")
     updated = row.get("updated_at")
     return {
@@ -455,6 +499,9 @@ def _cache_file_row_to_list_item(row: Dict[str, Any]) -> Dict[str, Any]:
         "media_type": row.get("media_type"),
         "source_url": row.get("source_url"),
         "token_id": row.get("token_id"),
+        "storage_provider": row.get("storage_provider") or "local",
+        "delivery_mode": row.get("delivery_mode") or "proxy",
+        "size_bytes": row.get("size_bytes"),
         "created_at": created.isoformat() if hasattr(created, "isoformat") else (str(created) if created is not None else None),
         "updated_at": updated.isoformat() if hasattr(updated, "isoformat") else (str(updated) if updated is not None else None),
         "download_path": download_path,
@@ -490,12 +537,9 @@ async def retrieve_image_data(
                 if allowed_token_ids is not None and int(proj.token_id) not in allowed_token_ids:
                     return None
             filename = Path(cache_filename).name
-            local_file_path = file_cache.cache_dir / filename
-
-            if local_file_path.exists() and local_file_path.is_file():
-                data = local_file_path.read_bytes()
-                if data:
-                    return data
+            data = await file_cache.read_bytes(filename)
+            if data:
+                return data
     except Exception as exc:
         debug_logger.log_warning(f"[CONTEXT] 本地缓存读取失败: {str(exc)}")
 
@@ -745,10 +789,19 @@ async def _extract_prompt_and_images_from_gemini_contents(
     return prompt, images
 
 
-def _resolve_request_model(model: str, request: Any) -> str:
+def _resolve_request_model(
+    model: str,
+    request: Any,
+    images: Optional[List[bytes]] = None,
+) -> str:
     if RunwayService.is_runway_model(model) or GeminiGenService.is_geminigen_model(model):
         return model
-    resolved_model = resolve_model_name(model=model, request=request, model_config=MODEL_CONFIG)
+    resolved_model = resolve_model_name(
+        model=model,
+        request=request,
+        model_config=MODEL_CONFIG,
+        images=images,
+    )
     if resolved_model != model:
         debug_logger.log_info(f"[ROUTE] 模型名已转换: {model} → {resolved_model}")
     return resolved_model
@@ -786,7 +839,8 @@ async def _normalize_openai_request(
                     allowed_token_ids=allowed_token_ids,
                 )
             )
-        model = _resolve_request_model(request.model, request)
+        model = _resolve_request_model(request.model, request, images=images)
+        initial_image_count = len(images)
         images = await _append_openai_reference_images(
             model,
             request.messages,
@@ -794,6 +848,8 @@ async def _normalize_openai_request(
             api_key_id=api_key_id,
             allowed_token_ids=allowed_token_ids,
         )
+        if len(images) != initial_image_count:
+            model = _resolve_request_model(request.model, request, images=images)
         return NormalizedGenerationRequest(
             model=model,
             prompt=prompt,
@@ -829,12 +885,12 @@ async def _normalize_gemini_request(
     api_key_id: Optional[int] = None,
     allowed_token_ids: Optional[Set[int]] = None,
 ) -> NormalizedGenerationRequest:
-    resolved_model = _resolve_request_model(model, request)
     prompt, images = await _extract_prompt_and_images_from_gemini_contents(
         request.contents,
         api_key_id=api_key_id,
         allowed_token_ids=allowed_token_ids,
     )
+    resolved_model = _resolve_request_model(model, request, images=images)
     system_instruction = _extract_text_from_gemini_content(request.systemInstruction)
     model_config = MODEL_CONFIG.get(resolved_model)
     media_model = bool(model_config and model_config.get("type") in {"image", "video"})
@@ -897,6 +953,16 @@ def _is_runway_model(model: str) -> bool:
 
 def _is_geminigen_model(model: str) -> bool:
     return GeminiGenService.is_geminigen_model(model)
+
+
+async def _require_geminigen_model_enabled(model: str) -> None:
+    manifest = geminigen_manifest_entry(model or "")
+    if not manifest or manifest.get("kind") != "video":
+        return
+    service = _ensure_geminigen_service()
+    cfg = await service.db.get_geminigen_config()
+    if not bool(getattr(cfg, "video_enabled", True)):
+        raise HTTPException(status_code=404, detail="GeminiGen video mode is disabled")
 
 
 def _request_extra_dict(request: Any) -> Dict[str, Any]:
@@ -1306,8 +1372,6 @@ def _enrich_payload_with_direct_url(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _with_projectid(payload: Dict[str, Any], project_id: Optional[str]) -> Dict[str, Any]:
-    if project_id and not payload.get("projectid"):
-        payload["projectid"] = project_id
     return payload
 
 
@@ -1589,16 +1653,7 @@ def _inject_projectid_into_openai_sse_chunk(
     chunk: str,
     project_id: Optional[str],
 ) -> str:
-    if not project_id or not chunk.startswith("data: "):
-        return chunk
-    payload_text = chunk[6:].strip()
-    if payload_text == "[DONE]":
-        return chunk
-    payload = _parse_handler_result(payload_text)
-    if not isinstance(payload, dict):
-        return chunk
-    payload = _with_projectid(payload, project_id)
-    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+    return chunk
 
 
 async def _build_image_parts_from_uri(
@@ -1936,19 +1991,6 @@ async def _select_random_active_project_for_api_key(
         raise HTTPException(status_code=400, detail="No accounts assigned to this API key")
 
     handler = _ensure_generation_handler()
-    projects = await handler.db.list_projects_by_api_key(auth_ctx.key_id, limit=1000, offset=0)
-    projects_by_token: Dict[int, List[Project]] = {}
-    for project in projects:
-        token_id = int(project.token_id)
-        if not bool(project.is_active) or token_id not in auth_ctx.allowed_accounts:
-            continue
-        projects_by_token.setdefault(token_id, []).append(project)
-
-    if not projects_by_token:
-        raise HTTPException(
-            status_code=400,
-            detail="No active project found for this API key's allowed accounts",
-        )
 
     model_config = MODEL_CONFIG.get(model) or {}
     generation_type = model_config.get("type")
@@ -1956,10 +1998,29 @@ async def _select_random_active_project_for_api_key(
     for_video_generation = generation_type == "video"
 
     active_tokens = await handler.load_balancer.token_manager.get_active_tokens()
+    assigned_active_tokens = [
+        token for token in active_tokens if int(token.id) in auth_ctx.allowed_accounts
+    ]
+    if (
+        model in MODEL_CONFIG
+        and is_native_4k_model(model)
+        and not any(
+            supports_model_for_tier(model, token.user_paygate_tier)
+            for token in assigned_active_tokens
+        )
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Native 4K generation requires an active Ultra account assigned "
+                f"to this API key: {model}"
+            ),
+        )
+
     token_candidates: List[Dict[str, Any]] = []
     for token in active_tokens:
         token_id = int(token.id)
-        if token_id not in projects_by_token:
+        if token_id not in auth_ctx.allowed_accounts:
             continue
         if for_image_generation and not token.image_enabled:
             continue
@@ -1985,7 +2046,7 @@ async def _select_random_active_project_for_api_key(
     if not token_candidates:
         raise HTTPException(
             status_code=400,
-            detail="No eligible token with active project is available for this model",
+            detail="No eligible assigned account is available for this model",
         )
 
     token_candidates.sort(
@@ -1997,8 +2058,7 @@ async def _select_random_active_project_for_api_key(
         )
     )
     selected_token_id = int(token_candidates[0]["token_id"])
-    selected_project = random.choice(projects_by_token[selected_token_id])
-    return ({selected_token_id}, selected_project.project_id)
+    return ({selected_token_id}, None)
 
 
 def _require_managed_projects_read(auth_ctx: AuthContext) -> None:
@@ -2048,6 +2108,7 @@ async def list_flow_projects(
     auth_ctx: AuthContext = Depends(verify_api_key_flexible),
 ):
     """List VideoFX projects visible to this managed API key (optional filter by account / token id)."""
+    raise HTTPException(status_code=410, detail="Project management APIs have been removed")
     if auth_ctx.key_id is None:
         raise HTTPException(status_code=403, detail="Managed API key required")
     _require_managed_projects_read(auth_ctx)
@@ -2084,6 +2145,7 @@ async def get_flow_project(
     auth_ctx: AuthContext = Depends(verify_api_key_flexible),
 ):
     """Return one VideoFX project row if it belongs to this managed API key."""
+    raise HTTPException(status_code=410, detail="Project management APIs have been removed")
     if auth_ctx.key_id is None:
         raise HTTPException(status_code=403, detail="Managed API key required")
     _require_managed_projects_read(auth_ctx)
@@ -2103,6 +2165,7 @@ async def create_flow_project(
     auth_ctx: AuthContext = Depends(verify_api_key_flexible),
 ):
     """Create VideoFX project(s) for managed key assigned account(s)."""
+    raise HTTPException(status_code=410, detail="Project management APIs have been removed")
     if auth_ctx.key_id is None:
         raise HTTPException(status_code=403, detail="Managed API key required")
     _require_managed_projects_write(auth_ctx)
@@ -2319,6 +2382,7 @@ async def list_cache_files_for_key_project(
 @router.get("/api/cache/blob/{filename}")
 async def get_cached_blob(
     filename: str,
+    request: Request,
     project_id: Optional[str] = Query(None),
     auth_ctx: AuthContext = Depends(verify_api_key_flexible),
 ):
@@ -2344,11 +2408,36 @@ async def get_cached_blob(
         tid = int(proj.token_id)
         if tid not in auth_ctx.allowed_accounts:
             raise HTTPException(status_code=400, detail="project_id is not assigned to this API key")
-    file_path = handler.file_cache.cache_dir / safe_name
-    if not file_path.exists() or not file_path.is_file():
+    try:
+        cached = await handler.file_cache.open_cached(
+            safe_name,
+            request.headers.get("range") if request else None,
+        )
+    except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Cache file not found")
-    media_type = metadata.get("media_type") or mimetypes.guess_type(safe_name)[0] or "application/octet-stream"
-    return FileResponse(path=file_path, media_type=media_type, filename=safe_name)
+    except ValueError as exc:
+        raise HTTPException(status_code=416, detail=str(exc))
+    except Exception as exc:
+        if "404" in str(exc) or "Not Found" in str(exc):
+            raise HTTPException(status_code=404, detail="Cache file not found")
+        raise
+    headers = {
+        "Accept-Ranges": "bytes",
+        "Content-Length": str(cached.content_length),
+        "Content-Disposition": f'inline; filename="{safe_name}"',
+    }
+    if cached.content_range:
+        headers["Content-Range"] = cached.content_range
+    if cached.etag:
+        headers["ETag"] = cached.etag
+    if cached.last_modified:
+        headers["Last-Modified"] = cached.last_modified.strftime("%a, %d %b %Y %H:%M:%S GMT")
+    return StreamingResponse(
+        cached.body,
+        status_code=cached.status_code,
+        media_type=cached.content_type,
+        headers=headers,
+    )
 
 
 @router.post("/api/generate-cloning-prompts")
@@ -2490,7 +2579,14 @@ async def list_models(auth_ctx: AuthContext = Depends(verify_api_key_flexible)):
 @router.get("/v1/models/aliases")
 async def list_model_aliases(auth_ctx: AuthContext = Depends(verify_api_key_flexible)):
     """List simplified model aliases for generationConfig-based resolution."""
-    aliases = get_base_model_aliases() if await _has_native_flow_accounts() else {}
+    active_tokens = await _get_active_native_tokens()
+    aliases = (
+        get_base_model_aliases(
+            include_4k=_has_active_native_ultra_account(active_tokens)
+        )
+        if active_tokens
+        else {}
+    )
     alias_models = []
     for alias_id, description in aliases.items():
         alias_models.append(
@@ -2765,6 +2861,7 @@ async def create_chat_completion(
 
         if _is_geminigen_model(normalized.model):
             _require_geminigen_scope(auth_ctx)
+            await _require_geminigen_model_enabled(normalized.model)
             if request.stream:
                 return StreamingResponse(
                     _iterate_geminigen_openai_stream(
@@ -2875,6 +2972,7 @@ async def create_chat_completion_async(
 
         if _is_geminigen_model(normalized.model):
             _require_geminigen_scope(auth_ctx)
+            await _require_geminigen_model_enabled(normalized.model)
             task = await _enqueue_geminigen_from_request(
                 request,
                 normalized,
@@ -3029,6 +3127,7 @@ async def generate_content(
         request_base_url = _get_request_base_url(raw_request)
         if _is_geminigen_model(normalized.model):
             _require_geminigen_scope(auth_ctx)
+            await _require_geminigen_model_enabled(normalized.model)
             payload = await _geminigen_openai_non_stream(
                 request,
                 normalized,
@@ -3117,6 +3216,7 @@ async def stream_generate_content(
         request_base_url = _get_request_base_url(raw_request)
         if _is_geminigen_model(normalized.model):
             _require_geminigen_scope(auth_ctx)
+            await _require_geminigen_model_enabled(normalized.model)
             return StreamingResponse(
                 _iterate_geminigen_openai_stream(
                     request,

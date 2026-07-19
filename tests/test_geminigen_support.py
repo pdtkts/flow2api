@@ -28,8 +28,9 @@ from src.services.llm_provider_chain import LlmProviderChain, extract_non_empty_
 from src.services.runway_service import RunwayService
 from src.api import routes
 from src.core.geminigen_manifest import GEMINIGEN_MODEL_BY_ID, GEMINIGEN_MODEL_MANIFEST
-from src.core.models import GeminiGenAccount, GeminiGenTask, RunwayAccount, RunwayModel, RunwayTask, Token
+from src.core.models import GeminiGenAccount, GeminiGenTask, RequestLog, RunwayAccount, RunwayModel, RunwayTask, Token
 from src.core.storage_errors import (
+    is_sqlite_recoverable_storage_error,
     is_sqlite_storage_full_error,
     sqlite_operational_error_handler,
 )
@@ -274,6 +275,412 @@ def test_dashboard_stats_exclude_non_terminal_and_cancelled_geminigen_tasks():
     assert stats["today_images"] == 0
     assert stats["today_videos"] == 0
     assert stats["today_errors"] == 0
+    assert stats["total_metadata"] == 0
+    assert stats["today_metadata"] == 0
+
+
+def test_geminigen_account_generation_stats_count_completed_per_account():
+    async def run():
+        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        tmp.close()
+        db = Database(tmp.name)
+        try:
+            await db.init_db()
+            first_id = await db.create_geminigen_account(label="primary", raw_cookie="", bearer_token="token-1")
+            second_id = await db.create_geminigen_account(label="secondary", raw_cookie="", bearer_token="token-2")
+            today = datetime.now().astimezone().date()
+            today_completed_at = _local_date_as_utc_naive(today)
+            old_completed_at = _local_date_as_utc_naive(today - timedelta(days=2))
+            tasks = [
+                ("first-image-today", first_id, "image", "completed", today_completed_at),
+                ("first-image-old", first_id, "image", "completed", old_completed_at),
+                ("first-video-today", first_id, "video", "completed", today_completed_at),
+                ("first-failed", first_id, "image", "failed", today_completed_at),
+                ("first-cancelled", first_id, "video", "cancelled", today_completed_at),
+                ("first-queued", first_id, "image", "queued", None),
+                ("second-video-old", second_id, "video", "completed", old_completed_at),
+            ]
+            for job_id, account_id, kind, status, completed_at in tasks:
+                await db.create_geminigen_task(
+                    GeminiGenTask(
+                        job_id=job_id,
+                        account_id=account_id,
+                        public_model_id=f"test-{kind}-model",
+                        kind=kind,
+                        endpoint_type="veo-video" if kind == "video" else "imagen",
+                        status=status,
+                        completed_at=completed_at,
+                    )
+                )
+            return await db.get_geminigen_account_generation_stats([first_id, second_id])
+        finally:
+            os.unlink(tmp.name)
+
+    stats = asyncio.run(run())
+
+    assert stats[1] == {
+        "image_generated_today": 1,
+        "image_generated_total": 2,
+        "video_generated_today": 1,
+        "video_generated_total": 1,
+    }
+    assert stats[2] == {
+        "image_generated_today": 0,
+        "image_generated_total": 0,
+        "video_generated_today": 0,
+        "video_generated_total": 1,
+    }
+
+
+def test_dashboard_stats_include_durable_metadata_counts():
+    async def run():
+        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        tmp.close()
+        db = Database(tmp.name)
+        try:
+            await db.init_db()
+            await db.increment_operation_stat("adobe:metadata", success=True)
+            await db.increment_operation_stat("adobe:metadata", success=True)
+            await db.increment_operation_stat("adobe:metadata", success=False)
+            return await db.get_dashboard_stats()
+        finally:
+            os.unlink(tmp.name)
+
+    stats = asyncio.run(run())
+
+    assert stats["total_metadata"] == 2
+    assert stats["today_metadata"] == 2
+    assert stats["metadata_errors"] == 1
+    assert stats["today_metadata_errors"] == 1
+
+
+def test_metadata_stats_survive_request_log_retention_cleanup():
+    async def run():
+        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        tmp.close()
+        db = Database(tmp.name)
+        try:
+            await db.init_db()
+            await db.increment_operation_stat("adobe:metadata", success=True)
+            old_created = (datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=4)).strftime("%Y-%m-%d %H:%M:%S")
+            async with db._connect(write=True) as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO request_logs (operation, status_code, duration, created_at, updated_at)
+                    VALUES ('adobe:metadata', 200, 0.1, ?, ?)
+                    """,
+                    (old_created, old_created),
+                )
+                await conn.commit()
+
+            deleted = await db.delete_request_logs_older_than(days=3)
+            stats = await db.get_dashboard_stats()
+            return deleted, stats
+        finally:
+            os.unlink(tmp.name)
+
+    deleted, stats = asyncio.run(run())
+
+    assert deleted == 1
+    assert stats["total_metadata"] == 1
+    assert stats["today_metadata"] == 1
+
+
+def _sample_geminigen_me_payload():
+    return {
+        "id": 301913,
+        "uuid": "56fd932a-d887-11f0-b3aa-6673a75f95e0",
+        "email": "huzaifaphantompak@gmail.com",
+        "full_name": "Muhammad Huzaifa",
+        "is_active": True,
+        "user_credit": {
+            "plan_credit": 1,
+            "purchased_credit": 0,
+            "locked_credit": 0,
+            "available_credit": 1,
+            "subscription_credit": 0,
+        },
+        "user_plan": {
+            "product": {"name": "Premium"},
+            "expire_at": "2025-12-13T23:59:59",
+        },
+        "user_benefits": [
+            {
+                "id": 22869,
+                "product": {"name": "Image Generation 30 days"},
+                "expire_at": "2026-07-27T10:15:08",
+                "is_active": True,
+                "estimated_remaining": 0,
+            },
+            {
+                "id": 27961,
+                "product": {"name": "Grok 30 days"},
+                "expire_at": "2026-07-05T00:07:03",
+                "is_active": False,
+                "estimated_remaining": 0,
+            },
+        ],
+        "remaining_bulk_videos": 100,
+        "remaining_daily_videos": None,
+        "remaining_grok_max_daily_videos": None,
+        "remaining_grok_max_daily_720p_videos": None,
+        "remaining_grok_max_daily_10s_videos": None,
+    }
+
+
+def test_geminigen_me_profile_parser_normalizes_user_credit_plan_and_benefits():
+    parsed = GeminiGenService.parse_me_profile(_sample_geminigen_me_payload())
+    benefits = json.loads(parsed["active_benefits_json"])
+
+    assert parsed["profile_user_id"] == 301913
+    assert parsed["profile_uuid"] == "56fd932a-d887-11f0-b3aa-6673a75f95e0"
+    assert parsed["profile_email"] == "huzaifaphantompak@gmail.com"
+    assert parsed["profile_full_name"] == "Muhammad Huzaifa"
+    assert parsed["profile_is_active"] is True
+    assert parsed["available_credit"] == 1
+    assert parsed["plan_credit"] == 1
+    assert parsed["plan_name"] == "Premium"
+    assert parsed["plan_expire_at"] == datetime(2025, 12, 13, 23, 59, 59)
+    assert parsed["remaining_bulk_videos"] == 100
+    assert parsed["remaining_daily_videos"] is None
+    assert benefits == [
+        {
+            "id": 22869,
+            "name": "Image Generation 30 days",
+            "expire_at": "2026-07-27T10:15:08",
+            "is_active": True,
+            "estimated_remaining": 0,
+        }
+    ]
+
+
+def test_geminigen_account_profile_sync_stores_me_payload():
+    async def run():
+        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        tmp.close()
+        db = Database(tmp.name)
+        try:
+            await db.init_db()
+            account_id = await db.create_geminigen_account(label="primary", raw_cookie="", bearer_token="token")
+            service = GeminiGenService(db, None)
+
+            async def fetch(_account, _base_url):
+                return _sample_geminigen_me_payload()
+
+            service._fetch_me_profile_payload = fetch
+            result = await service.sync_account_profile(account_id)
+            account = await db.get_geminigen_account(account_id)
+            return result, account
+        finally:
+            os.unlink(tmp.name)
+
+    result, account = asyncio.run(run())
+
+    assert result["success"] is True
+    assert account.profile_email == "huzaifaphantompak@gmail.com"
+    assert account.profile_full_name == "Muhammad Huzaifa"
+    assert account.available_credit == 1
+    assert account.plan_name == "Premium"
+    assert account.remaining_bulk_videos == 100
+    assert account.profile_sync_status == "healthy"
+    assert account.profile_sync_error == ""
+    assert account.profile_synced_at is not None
+
+
+def test_geminigen_account_profile_sync_failure_preserves_saved_profile():
+    async def run():
+        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        tmp.close()
+        db = Database(tmp.name)
+        try:
+            await db.init_db()
+            account_id = await db.create_geminigen_account(label="primary", raw_cookie="", bearer_token="token")
+            await db.update_geminigen_account(
+                account_id,
+                profile_email="saved@example.com",
+                available_credit=7,
+                profile_sync_status="healthy",
+            )
+            service = GeminiGenService(db, None)
+
+            async def fetch(_account, _base_url):
+                raise RuntimeError("upstream unavailable")
+
+            service._fetch_me_profile_payload = fetch
+            result = await service.sync_account_profile(account_id)
+            account = await db.get_geminigen_account(account_id)
+            return result, account
+        finally:
+            os.unlink(tmp.name)
+
+    result, account = asyncio.run(run())
+
+    assert result["success"] is False
+    assert account.profile_email == "saved@example.com"
+    assert account.available_credit == 7
+    assert account.profile_sync_status == "failed"
+    assert account.profile_sync_error == "upstream unavailable"
+    assert account.profile_synced_at is not None
+
+
+def test_geminigen_account_profile_stale_uses_one_hour_ttl():
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    fresh = GeminiGenAccount(profile_synced_at=now - timedelta(minutes=30))
+    stale = GeminiGenAccount(profile_synced_at=now - timedelta(hours=2))
+    missing = GeminiGenAccount()
+
+    assert GeminiGenService.is_account_profile_stale(fresh) is False
+    assert GeminiGenService.is_account_profile_stale(stale) is True
+    assert GeminiGenService.is_account_profile_stale(missing) is True
+
+
+def test_geminigen_image_capacity_uses_sum_of_account_slots_not_default_global_cap():
+    async def run():
+        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        tmp.close()
+        db = Database(tmp.name)
+        try:
+            await db.init_db()
+            account_ids = [
+                await db.create_geminigen_account(label="primary", raw_cookie="", bearer_token="token-1", image_concurrency=5),
+                await db.create_geminigen_account(label="secondary", raw_cookie="", bearer_token="token-2", image_concurrency=5),
+            ]
+
+            acquired = [await db.acquire_geminigen_account("image") for _ in range(10)]
+            blocked = await db.acquire_geminigen_account("image")
+            accounts = [await db.get_geminigen_account(account_id) for account_id in account_ids]
+            return acquired, blocked, accounts
+        finally:
+            os.unlink(tmp.name)
+
+    acquired, blocked, accounts = asyncio.run(run())
+
+    assert len([account for account in acquired if account is not None]) == 10
+    assert blocked is None
+    assert sorted(account.image_in_flight for account in accounts) == [5, 5]
+    assert all(account.image_in_flight <= account.image_concurrency for account in accounts)
+
+
+def test_geminigen_video_capacity_is_independent_from_image_slots():
+    async def run():
+        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        tmp.close()
+        db = Database(tmp.name)
+        try:
+            await db.init_db()
+            account_ids = [
+                await db.create_geminigen_account(
+                    label="primary",
+                    raw_cookie="",
+                    bearer_token="token-1",
+                    image_concurrency=1,
+                    video_concurrency=5,
+                ),
+                await db.create_geminigen_account(
+                    label="secondary",
+                    raw_cookie="",
+                    bearer_token="token-2",
+                    image_concurrency=1,
+                    video_concurrency=5,
+                ),
+            ]
+
+            videos = [await db.acquire_geminigen_account("video") for _ in range(10)]
+            video_blocked = await db.acquire_geminigen_account("video")
+            images = [await db.acquire_geminigen_account("image") for _ in range(2)]
+            image_blocked = await db.acquire_geminigen_account("image")
+            accounts = [await db.get_geminigen_account(account_id) for account_id in account_ids]
+            return videos, video_blocked, images, image_blocked, accounts
+        finally:
+            os.unlink(tmp.name)
+
+    videos, video_blocked, images, image_blocked, accounts = asyncio.run(run())
+
+    assert len([account for account in videos if account is not None]) == 10
+    assert video_blocked is None
+    assert len([account for account in images if account is not None]) == 2
+    assert image_blocked is None
+    assert sorted(account.video_in_flight for account in accounts) == [5, 5]
+    assert sorted(account.image_in_flight for account in accounts) == [1, 1]
+
+
+def test_geminigen_acquire_respects_excluded_account_cooldown():
+    async def run():
+        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        tmp.close()
+        db = Database(tmp.name)
+        try:
+            await db.init_db()
+            first_id = await db.create_geminigen_account(label="primary", raw_cookie="", bearer_token="token-1", image_concurrency=5)
+            second_id = await db.create_geminigen_account(label="secondary", raw_cookie="", bearer_token="token-2", image_concurrency=5)
+
+            acquired = await db.acquire_geminigen_account("image", excluded_account_ids=[first_id])
+            first = await db.get_geminigen_account(first_id)
+            second = await db.get_geminigen_account(second_id)
+            return acquired, first, second
+        finally:
+            os.unlink(tmp.name)
+
+    acquired, first, second = asyncio.run(run())
+
+    assert acquired.id == second.id
+    assert first.image_in_flight == 0
+    assert second.image_in_flight == 1
+
+
+def test_geminigen_admin_account_payload_includes_profile_fields():
+    from src.api.admin import _geminigen_account_payload
+
+    account = GeminiGenAccount(
+        id=1,
+        label="primary",
+        bearer_token="secret-token",
+        profile_email="huzaifaphantompak@gmail.com",
+        profile_full_name="Muhammad Huzaifa",
+        available_credit=1,
+        plan_name="Premium",
+        plan_expire_at=datetime(2025, 12, 13, 23, 59, 59),
+        active_benefits_json=json.dumps([{"name": "Image Generation 30 days"}]),
+        remaining_bulk_videos=100,
+        profile_synced_at=datetime(2026, 7, 7, 12, 0, 0),
+        profile_sync_status="healthy",
+    )
+
+    payload = _geminigen_account_payload(account)
+
+    assert payload["profile_email"] == "huzaifaphantompak@gmail.com"
+    assert payload["profile_full_name"] == "Muhammad Huzaifa"
+    assert payload["available_credit"] == 1
+    assert payload["plan_name"] == "Premium"
+    assert payload["plan_expire_at"] == "2025-12-13T23:59:59"
+    assert payload["active_benefits"] == [{"name": "Image Generation 30 days"}]
+    assert payload["remaining_bulk_videos"] == 100
+    assert payload["profile_synced_at"] == "2026-07-07T12:00:00"
+    assert payload["profile_sync_status"] == "healthy"
+    assert payload["image_generated_today"] == 0
+    assert payload["image_generated_total"] == 0
+    assert payload["video_generated_today"] == 0
+    assert payload["video_generated_total"] == 0
+
+
+def test_geminigen_admin_account_payload_includes_generation_stats():
+    from src.api.admin import _geminigen_account_payload
+
+    account = GeminiGenAccount(id=1, label="primary", bearer_token="secret-token")
+    payload = _geminigen_account_payload(
+        account,
+        {
+            "image_generated_today": 2,
+            "image_generated_total": 10,
+            "video_generated_today": 1,
+            "video_generated_total": 4,
+        },
+    )
+
+    assert payload["image_generated_today"] == 2
+    assert payload["image_generated_total"] == 10
+    assert payload["video_generated_today"] == 1
+    assert payload["video_generated_total"] == 4
 
 
 class _AdminSessionCursor:
@@ -308,6 +715,18 @@ def _database_with_connection(connection):
     return db
 
 
+class _PragmaConnection:
+    def __init__(self, wal_error=None):
+        self.wal_error = wal_error
+        self.statements = []
+
+    async def execute(self, query, _params=None):
+        self.statements.append(query)
+        if query == "PRAGMA journal_mode = WAL" and self.wal_error is not None:
+            raise self.wal_error
+        return _AdminSessionCursor(None)
+
+
 def test_sqlite_storage_full_classifier_uses_code_and_message_fallback():
     coded = sqlite3.OperationalError("write failed")
     coded.sqlite_errorcode = sqlite3.SQLITE_FULL
@@ -318,6 +737,49 @@ def test_sqlite_storage_full_classifier_uses_code_and_message_fallback():
     ) is True
     assert is_sqlite_storage_full_error(sqlite3.OperationalError("database is locked")) is False
     assert is_sqlite_storage_full_error(RuntimeError("disk is full")) is False
+
+
+def test_sqlite_startup_recoverable_classifier_includes_io_errors():
+    coded = sqlite3.OperationalError("write failed")
+    coded.sqlite_errorcode = sqlite3.SQLITE_IOERR
+
+    assert is_sqlite_recoverable_storage_error(coded) is True
+    assert is_sqlite_recoverable_storage_error(
+        sqlite3.OperationalError("disk I/O error")
+    ) is True
+    assert is_sqlite_recoverable_storage_error(
+        sqlite3.OperationalError("database or disk is full")
+    ) is True
+    assert is_sqlite_recoverable_storage_error(
+        sqlite3.OperationalError("database is locked")
+    ) is False
+    assert is_sqlite_recoverable_storage_error(RuntimeError("disk I/O error")) is False
+
+
+def test_database_write_pragmas_fallback_to_delete_when_wal_io_fails():
+    conn = _PragmaConnection(sqlite3.OperationalError("disk I/O error"))
+    db = Database(":memory:")
+
+    asyncio.run(db._configure_write_pragmas(conn))
+
+    assert conn.statements == [
+        "PRAGMA journal_mode = WAL",
+        "PRAGMA journal_mode = DELETE",
+        "PRAGMA synchronous = FULL",
+    ]
+
+
+def test_database_write_pragmas_preserve_non_storage_sqlite_errors():
+    error = sqlite3.OperationalError("database is locked")
+    conn = _PragmaConnection(error)
+    db = Database(":memory:")
+
+    try:
+        asyncio.run(db._configure_write_pragmas(conn))
+    except sqlite3.OperationalError as exc:
+        assert exc is error
+    else:
+        raise AssertionError("Expected non-storage SQLite error to be re-raised")
 
 
 def test_valid_admin_session_survives_storage_full_activity_touch():
@@ -359,6 +821,17 @@ def test_non_storage_sqlite_error_is_not_converted_to_507():
         assert exc is error
     else:
         raise AssertionError("Expected non-storage SQLite error to be re-raised")
+
+
+def test_runtime_sqlite_io_error_is_not_converted_to_507():
+    error = sqlite3.OperationalError("disk I/O error")
+
+    try:
+        asyncio.run(sqlite_operational_error_handler(None, error))
+    except sqlite3.OperationalError as exc:
+        assert exc is error
+    else:
+        raise AssertionError("Expected runtime SQLite I/O error to be re-raised")
 
 
 def test_extract_artifact_urls_falls_back_to_preview_without_download_url():
@@ -516,7 +989,7 @@ def test_geminigen_non_capacity_400_is_not_retryable():
     assert "Prompt is invalid" in str(error)
 
 
-def test_geminigen_global_image_concurrency_queues_after_five_slots():
+def test_geminigen_global_image_concurrency_does_not_reduce_account_pool_capacity():
     async def run():
         tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
         tmp.close()
@@ -533,20 +1006,247 @@ def test_geminigen_global_image_concurrency_queues_after_five_slots():
                     video_concurrency=5,
                 )
 
-            acquired = [await db.acquire_geminigen_account("image") for _ in range(5)]
+            acquired = [await db.acquire_geminigen_account("image") for _ in range(15)]
             blocked = await db.acquire_geminigen_account("image")
             await db.release_geminigen_account(acquired[0].id, "image")
             acquired_after_release = await db.acquire_geminigen_account("image")
+            accounts = await db.list_geminigen_accounts()
 
-            return acquired, blocked, acquired_after_release
+            return acquired, blocked, acquired_after_release, accounts
         finally:
             os.unlink(tmp.name)
 
-    acquired, blocked, acquired_after_release = asyncio.run(run())
+    acquired, blocked, acquired_after_release, accounts = asyncio.run(run())
 
     assert all(account is not None for account in acquired)
     assert blocked is None
     assert acquired_after_release is not None
+    assert sorted(account.image_in_flight for account in accounts) == [5, 5, 5]
+
+
+def test_request_logs_include_and_search_geminigen_job_id():
+    async def run():
+        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        tmp.close()
+        db = Database(tmp.name)
+        try:
+            await db.init_db()
+            log_id = await db.add_request_log(
+                RequestLog(
+                    operation="geminigen_image",
+                    request_body="{}",
+                    response_body=json.dumps({"status": "queued"}),
+                    status_code=102,
+                    duration=0.1,
+                    status_text="geminigen_queued",
+                    progress=0,
+                )
+            )
+            await db.create_geminigen_task(
+                GeminiGenTask(
+                    job_id="geminigen-search-me",
+                    request_log_id=log_id,
+                    public_model_id="geminigen-nano-banana-pro-image-landscape-1k",
+                    kind="image",
+                    endpoint_type="imagen",
+                    status="queued",
+                )
+            )
+            await db.add_request_log(
+                RequestLog(
+                    operation="geminigen_image",
+                    request_body="{}",
+                    response_body=json.dumps({"status": "queued"}),
+                    status_code=102,
+                    duration=0.1,
+                    status_text="geminigen_queued",
+                    progress=0,
+                )
+            )
+
+            total = await db.count_request_logs(search="search-me")
+            logs = await db.get_logs(search="search-me")
+            detail = await db.get_log_detail(log_id)
+            return total, logs, detail
+        finally:
+            os.unlink(tmp.name)
+
+    total, logs, detail = asyncio.run(run())
+
+    assert total == 1
+    assert len(logs) == 1
+    assert logs[0]["job_id"] == "geminigen-search-me"
+    assert detail["job_id"] == "geminigen-search-me"
+
+
+def test_request_log_job_id_extractor_reads_nested_payloads():
+    from src.api.admin import _extract_log_job_id
+
+    assert _extract_log_job_id(json.dumps({"content": {"job_id": "job-native-123"}})) == "job-native-123"
+    assert _extract_log_job_id({"response": {"task_id": "task-456"}}) == "task-456"
+
+
+def test_request_log_retention_deletes_only_old_request_logs():
+    async def run():
+        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        tmp.close()
+        db = Database(tmp.name)
+        try:
+            await db.init_db()
+            now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+            old_created = (now_utc - timedelta(days=4)).strftime("%Y-%m-%d %H:%M:%S")
+            recent_created = (now_utc - timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S")
+            async with db._connect(write=True) as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO request_logs (operation, status_code, duration, created_at, updated_at)
+                    VALUES ('old', 200, 0.1, ?, ?)
+                    """,
+                    (old_created, old_created),
+                )
+                await conn.execute(
+                    """
+                    INSERT INTO request_logs (operation, status_code, duration, created_at, updated_at)
+                    VALUES ('recent', 200, 0.1, ?, ?)
+                    """,
+                    (recent_created, recent_created),
+                )
+                await conn.execute(
+                    """
+                    INSERT INTO geminigen_tasks (job_id, public_model_id, kind, status, completed_at, created_at)
+                    VALUES ('old-task', 'geminigen-test', 'image', 'completed', ?, ?)
+                    """,
+                    (old_created, old_created),
+                )
+                await conn.commit()
+
+            deleted = await db.delete_request_logs_older_than(days=3)
+            async with db._connect() as conn:
+                request_count = (await (await conn.execute("SELECT COUNT(*) FROM request_logs")).fetchone())[0]
+                task_count = (await (await conn.execute("SELECT COUNT(*) FROM geminigen_tasks")).fetchone())[0]
+            return deleted, request_count, task_count
+        finally:
+            os.unlink(tmp.name)
+
+    deleted, request_count, task_count = asyncio.run(run())
+
+    assert deleted == 1
+    assert request_count == 1
+    assert task_count == 1
+
+
+def test_api_key_generation_stats_aggregate_durable_generation_tables():
+    async def run():
+        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        tmp.close()
+        db = Database(tmp.name)
+        try:
+            await db.init_db()
+            today = f"{db._current_stats_date()} 12:00:00"
+            async with db._connect(write=True) as conn:
+                await conn.execute("INSERT INTO api_clients (id, name) VALUES (1, 'client')")
+                await conn.execute(
+                    """
+                    INSERT INTO api_keys (id, client_id, label, key_prefix, key_hash)
+                    VALUES (7, 1, 'key', 'fk_test', 'hash')
+                    """
+                )
+                await conn.execute(
+                    "INSERT INTO tokens (id, st, email) VALUES (1, 'st', 'user@example.com')"
+                )
+                await conn.executemany(
+                    """
+                    INSERT INTO tasks (task_id, token_id, api_key_id, model, prompt, status, completed_at)
+                    VALUES (?, 1, 7, ?, 'prompt', ?, ?)
+                    """,
+                    [
+                        ("native-image", "native-image-model", "completed", today),
+                        ("native-video", "native-video-model", "completed", today),
+                        ("native-error", "native-image-model", "failed", today),
+                    ],
+                )
+                await conn.executemany(
+                    """
+                    INSERT INTO geminigen_tasks (job_id, api_key_id, public_model_id, kind, endpoint_type, status, completed_at)
+                    VALUES (?, 7, ?, ?, 'imagen', ?, ?)
+                    """,
+                    [
+                        ("geminigen-image", "geminigen-image-model", "image", "completed", today),
+                        ("geminigen-error", "geminigen-video-model", "video", "failed", today),
+                    ],
+                )
+                await conn.executemany(
+                    """
+                    INSERT INTO runway_models (public_model_id, display_name, kind, task_type)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    [
+                        ("runway-video-model", "Runway Video", "video", "video_task"),
+                        ("runway-error-model", "Runway Image", "image", "image_task"),
+                    ],
+                )
+                await conn.executemany(
+                    """
+                    INSERT INTO runway_tasks (job_id, api_key_id, public_model_id, prompt, status, completed_at)
+                    VALUES (?, 7, ?, 'prompt', ?, ?)
+                    """,
+                    [
+                        ("runway-video", "runway-video-model", "completed", today),
+                        ("runway-error", "runway-error-model", "failed", today),
+                    ],
+                )
+                await conn.commit()
+
+            return await db.get_api_key_generation_stats(
+                7,
+                native_image_models=["native-image-model"],
+                native_video_models=["native-video-model"],
+            )
+        finally:
+            os.unlink(tmp.name)
+
+    stats = asyncio.run(run())
+
+    assert stats == {
+        "total_images": 2,
+        "total_videos": 2,
+        "total_errors": 3,
+        "today_images": 2,
+        "today_videos": 2,
+        "today_errors": 3,
+    }
+
+
+def test_geminigen_video_disabled_filters_catalog_and_rejects_video_model():
+    async def run():
+        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        tmp.close()
+        db = Database(tmp.name)
+        old_service = routes.geminigen_service
+        try:
+            await db.init_db()
+            await db.update_geminigen_config(enabled=True, video_enabled=False)
+            await db.create_geminigen_account(label="account", raw_cookie="", bearer_token="token")
+            routes.geminigen_service = SimpleNamespace(db=db)
+
+            catalog = await routes._get_geminigen_openai_model_catalog()
+            video_id = next(item["id"] for item in GEMINIGEN_MODEL_MANIFEST if item["kind"] == "video")
+            error_status = None
+            try:
+                await routes._require_geminigen_model_enabled(video_id)
+            except HTTPException as exc:
+                error_status = exc.status_code
+            return catalog, error_status
+        finally:
+            routes.geminigen_service = old_service
+            os.unlink(tmp.name)
+
+    catalog, error_status = asyncio.run(run())
+
+    assert catalog
+    assert all(model["id"] in GEMINIGEN_MODEL_BY_ID for model in catalog)
+    assert all(GEMINIGEN_MODEL_BY_ID[model["id"]]["kind"] != "video" for model in catalog)
+    assert error_status == 404
 
 
 class FakeGeminiGenDatabase:

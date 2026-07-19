@@ -86,6 +86,8 @@ class ApiKeyManager:
         *,
         endpoint: str,
         require_assignment: bool = False,
+        enforce_rate_limits: bool = True,
+        touch_usage: bool = True,
     ) -> AuthContext:
         if not provided_api_key:
             raise PermissionError("Missing API key")
@@ -112,8 +114,10 @@ class ApiKeyManager:
             if require_assignment and not allowed_accounts:
                 raise PermissionError("No accounts assigned to this API key")
 
-            await self._enforce_rate_limits(key_id=key_id, endpoint=endpoint)
-            await self.db.touch_api_key_usage(key_id)
+            if enforce_rate_limits:
+                await self._enforce_rate_limits(key_id=key_id, endpoint=endpoint)
+            if touch_usage:
+                await self.db.touch_api_key_usage(key_id)
 
             acl, ame, atr = adobe_flags_from_scopes(scopes)
 

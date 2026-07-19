@@ -122,3 +122,28 @@ async def verify_api_key_flexible(
             user_agent=request.headers.get("user-agent", ""),
         )
         raise HTTPException(status_code=429, detail=str(exc))
+
+
+async def verify_managed_presence_key(
+    request: Request,
+    credentials: Optional[HTTPAuthorizationCredentials] = Security(optional_security),
+    x_goog_api_key: Optional[str] = Header(None, alias="x-goog-api-key"),
+) -> AuthContext:
+    """Validate a managed presence heartbeat without usage, limits, or audit side effects."""
+    api_key = credentials.credentials if credentials is not None else x_goog_api_key
+    if not api_key or api_key_manager is None:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+    try:
+        context = await api_key_manager.authenticate(
+            api_key,
+            endpoint=request.url.path,
+            enforce_rate_limits=False,
+            touch_usage=False,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+
+    if context.is_legacy or context.key_id is None:
+        raise HTTPException(status_code=403, detail="Managed API key required")
+    return context

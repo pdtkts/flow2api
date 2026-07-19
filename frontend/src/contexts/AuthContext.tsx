@@ -1,11 +1,12 @@
 import { createContext, useContext, useState, useEffect } from "react";
 import type { ReactNode } from "react";
 import { toast } from "sonner";
+import { COOKIE_SESSION_MARKER } from "../lib/adminApi";
 
 interface AuthContextType {
   token: string | null;
-  login: (token: string) => void;
-  logout: () => void;
+  login: () => void;
+  logout: () => Promise<void>;
   isAuthenticated: boolean;
   isLoading: boolean;
 }
@@ -18,17 +19,29 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     const checkToken = async () => {
-      if (!token) {
-        setIsLoading(false);
-        return;
-      }
+      const legacyToken = localStorage.getItem("adminToken");
       try {
-        const res = await fetch("/api/stats", {
-          headers: { Authorization: `Bearer ${token}` }
+        const cookieResponse = await fetch("/api/stats", {
+          credentials: "include",
         });
-        if (!res.ok) {
-          throw new Error("Invalid token");
+        if (cookieResponse.ok) {
+          localStorage.removeItem("adminToken");
+          setToken(COOKIE_SESSION_MARKER);
+          return;
         }
+
+        if (legacyToken) {
+          const bearerResponse = await fetch("/api/stats", {
+            credentials: "include",
+            headers: { Authorization: `Bearer ${legacyToken}` },
+          });
+          if (bearerResponse.ok) {
+            localStorage.removeItem("adminToken");
+            setToken(COOKIE_SESSION_MARKER);
+            return;
+          }
+        }
+        throw new Error("Invalid session");
       } catch (err) {
         console.error("Token verification failed:", err);
         setToken(null);
@@ -39,17 +52,32 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
     };
     checkToken();
-  }, [token]);
+  }, []);
 
-  const login = (newToken: string) => {
-    setToken(newToken);
-    localStorage.setItem("adminToken", newToken);
+  const login = () => {
+    localStorage.removeItem("adminToken");
+    setToken(COOKIE_SESSION_MARKER);
   };
 
-  const logout = () => {
-    setToken(null);
-    localStorage.removeItem("adminToken");
-    toast.success("Logged out successfully");
+  const logout = async () => {
+    const currentToken = token;
+    const headers = new Headers();
+    if (currentToken && currentToken !== COOKIE_SESSION_MARKER) {
+      headers.set("Authorization", `Bearer ${currentToken}`);
+    }
+    try {
+      await fetch("/api/admin/logout", {
+        method: "POST",
+        credentials: "include",
+        headers,
+      });
+    } catch (err) {
+      console.error("Server logout failed:", err);
+    } finally {
+      setToken(null);
+      localStorage.removeItem("adminToken");
+      toast.success("Logged out successfully");
+    }
   };
 
   return (

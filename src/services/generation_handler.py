@@ -10,7 +10,7 @@ from typing import Optional, AsyncGenerator, List, Dict, Any
 from ..core.logger import debug_logger
 from ..core.config import config, get_runtime_tmp_dir
 from ..core.monitoring import record_generation_result
-from ..core.models import Task, RequestLog
+from ..core.models import RequestLog, Task, Token
 from ..core.account_tiers import (
     PAYGATE_TIER_NOT_PAID,
     get_paygate_tier_label,
@@ -684,7 +684,35 @@ MODEL_CONFIG = {
         "min_images": 0,
         "max_images": 3,
         "upsample": {"resolution": "VIDEO_RESOLUTION_1080P", "model_key": "veo_3_1_upsampler_1080p"}
-    }
+    },
+    "omni": {
+        "type": "video",
+        "video_type": "omni",
+        "model_key": "abra_t2v_8s",
+        "reference_model_key": "abra_r2v_8s",
+        "aspect_ratio": "VIDEO_ASPECT_RATIO_LANDSCAPE",
+        "supports_images": True,
+        "min_images": 0,
+        "max_images": 3,
+        "use_v2_model_config": True,
+        "allow_tier_upgrade": False,
+        "reference_duration": 8,
+        "reference_model_display_name": "Omni Flash",
+    },
+    "omni_portrait": {
+        "type": "video",
+        "video_type": "omni",
+        "model_key": "abra_t2v_8s",
+        "reference_model_key": "abra_r2v_8s",
+        "aspect_ratio": "VIDEO_ASPECT_RATIO_PORTRAIT",
+        "supports_images": True,
+        "min_images": 0,
+        "max_images": 3,
+        "use_v2_model_config": True,
+        "allow_tier_upgrade": False,
+        "reference_duration": 8,
+        "reference_model_display_name": "Omni Flash",
+    },
 }
 
 
@@ -747,6 +775,33 @@ def _apply_veo_3_1_model_updates():
     
     def add_alias(alias: str, target: str):
         MODEL_CONFIG[alias] = dict(MODEL_CONFIG[target])
+
+    def add_default_duration_aliases(
+        base_alias: str,
+        landscape_target: str,
+        portrait_target: str,
+        *,
+        fl_suffix: bool = False,
+    ):
+        if fl_suffix:
+            add_alias(f"{base_alias}_8s_fl", landscape_target)
+            add_alias(f"{base_alias}_portrait_8s_fl", portrait_target)
+            add_alias(f"{base_alias}_landscape_8s_fl", landscape_target)
+            return
+
+        add_alias(f"{base_alias}_8s", landscape_target)
+        add_alias(f"{base_alias}_portrait_8s", portrait_target)
+        add_alias(f"{base_alias}_landscape_8s", landscape_target)
+
+    def add_default_duration_upsample_aliases(
+        base_alias: str,
+        resolution_name: str,
+        landscape_target: str,
+        portrait_target: str,
+    ):
+        add_alias(f"{base_alias}_8s_{resolution_name}", landscape_target)
+        add_alias(f"{base_alias}_portrait_8s_{resolution_name}", portrait_target)
+        add_alias(f"{base_alias}_landscape_8s_{resolution_name}", landscape_target)
 
     # Non-fast/non-lite Veo 3.1 aliases must call Quality upstream keys.
     MODEL_CONFIG["veo_3_1_t2v_landscape"].update({"model_key": "veo_3_1_t2v"})
@@ -909,6 +964,87 @@ def _apply_veo_3_1_model_updates():
     add_alias("veo_3_1_r2v_fast_landscape_ultra_4k", "veo_3_1_r2v_fast_ultra_4k")
     add_alias("veo_3_1_r2v_fast_landscape_ultra_1080p", "veo_3_1_r2v_fast_ultra_1080p")
 
+    add_default_duration_aliases(
+        "veo_3_1_t2v_fast",
+        "veo_3_1_t2v_fast_landscape",
+        "veo_3_1_t2v_fast_portrait",
+    )
+    add_default_duration_aliases(
+        "veo_3_1_t2v",
+        "veo_3_1_t2v_landscape",
+        "veo_3_1_t2v_portrait",
+    )
+    add_default_duration_aliases(
+        "veo_3_1_i2v_s_fast",
+        "veo_3_1_i2v_s_fast_fl",
+        "veo_3_1_i2v_s_fast_portrait_fl",
+        fl_suffix=True,
+    )
+    add_default_duration_aliases(
+        "veo_3_1_i2v_s",
+        "veo_3_1_i2v_s_landscape",
+        "veo_3_1_i2v_s_portrait",
+    )
+    add_default_duration_aliases(
+        "veo_3_1_r2v_fast",
+        "veo_3_1_r2v_fast",
+        "veo_3_1_r2v_fast_portrait",
+    )
+    add_alias("veo_3_1_r2v_fast_ultra_8s", "veo_3_1_r2v_fast_ultra")
+    add_alias("veo_3_1_r2v_fast_portrait_ultra_8s", "veo_3_1_r2v_fast_portrait_ultra")
+    add_alias("veo_3_1_r2v_fast_landscape_ultra_8s", "veo_3_1_r2v_fast_ultra")
+    add_alias(
+        "veo_3_1_r2v_fast_ultra_relaxed_8s",
+        "veo_3_1_r2v_fast_ultra_relaxed",
+    )
+    add_alias(
+        "veo_3_1_r2v_fast_portrait_ultra_relaxed_8s",
+        "veo_3_1_r2v_fast_portrait_ultra_relaxed",
+    )
+    add_alias(
+        "veo_3_1_r2v_fast_landscape_ultra_relaxed_8s",
+        "veo_3_1_r2v_fast_ultra_relaxed",
+    )
+
+    add_alias("veo_3_1_t2v_lite_8s_landscape", "veo_3_1_t2v_lite_landscape")
+    add_alias("veo_3_1_t2v_lite_8s_portrait", "veo_3_1_t2v_lite_portrait")
+    add_alias("veo_3_1_t2v_lite_landscape_8s", "veo_3_1_t2v_lite_landscape")
+    add_alias("veo_3_1_t2v_lite_portrait_8s", "veo_3_1_t2v_lite_portrait")
+    add_alias("veo_3_1_i2v_lite_8s_landscape", "veo_3_1_i2v_lite_landscape")
+    add_alias("veo_3_1_i2v_lite_8s_portrait", "veo_3_1_i2v_lite_portrait")
+    add_alias("veo_3_1_i2v_lite_landscape_8s", "veo_3_1_i2v_lite_landscape")
+    add_alias("veo_3_1_i2v_lite_portrait_8s", "veo_3_1_i2v_lite_portrait")
+    add_alias(
+        "veo_3_1_interpolation_lite_8s_landscape",
+        "veo_3_1_interpolation_lite_landscape",
+    )
+    add_alias(
+        "veo_3_1_interpolation_lite_8s_portrait",
+        "veo_3_1_interpolation_lite_portrait",
+    )
+    add_alias(
+        "veo_3_1_interpolation_lite_landscape_8s",
+        "veo_3_1_interpolation_lite_landscape",
+    )
+    add_alias(
+        "veo_3_1_interpolation_lite_portrait_8s",
+        "veo_3_1_interpolation_lite_portrait",
+    )
+
+    for resolution_name in ("4k", "1080p"):
+        add_default_duration_upsample_aliases(
+            "veo_3_1_t2v",
+            resolution_name,
+            f"veo_3_1_t2v_{resolution_name}",
+            f"veo_3_1_t2v_portrait_{resolution_name}",
+        )
+        add_default_duration_upsample_aliases(
+            "veo_3_1_i2v_s",
+            resolution_name,
+            f"veo_3_1_i2v_s_{resolution_name}",
+            f"veo_3_1_i2v_s_portrait_{resolution_name}",
+        )
+
 
 _apply_veo_3_1_model_updates()
 
@@ -1005,6 +1141,84 @@ class GenerationHandler:
             generation_result["error_emitted"] = False
             generation_result["error_status_code"] = 200
             generation_result["error_extra"] = {}
+
+    async def _resolve_video_asset(
+        self,
+        token: Token,
+        operation: Dict[str, Any],
+        *,
+        api_key_id: Optional[int] = None,
+        project_id: Optional[str] = None,
+        response_state: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        operation_body = operation.get("operation") if isinstance(operation.get("operation"), dict) else {}
+        metadata = operation_body.get("metadata") if isinstance(operation_body.get("metadata"), dict) else {}
+        video_info = metadata.get("video") if isinstance(metadata.get("video"), dict) else {}
+        media_name = (
+            operation.get("mediaName")
+            or video_info.get("mediaName")
+            or video_info.get("mediaGenerationId")
+            or operation.get("name")
+            or operation_body.get("name")
+        )
+        video_url = str(
+            video_info.get("fifeUrl")
+            or video_info.get("servingBaseUri")
+            or operation.get("videoUrl")
+            or ""
+        )
+        media_fetch_error = None
+        video_is_cached = False
+        if media_name and getattr(token, "st", None):
+            try:
+                video_url = await self.flow_client.get_media_url_redirect(token.st, str(media_name)) or video_url
+            except Exception as exc:
+                debug_logger.log_warning(f"[VIDEO] media redirect resolution failed: {type(exc).__name__}")
+        if not video_url and media_name and getattr(token, "at", None):
+            try:
+                media_result = await self.flow_client.get_media(token.at, str(media_name))
+                media_video = media_result.get("video") if isinstance(media_result, dict) else None
+                encoded_video = (
+                    media_video.get("encodedVideo")
+                    if isinstance(media_video, dict)
+                    else None
+                ) or (media_result.get("encodedVideo") if isinstance(media_result, dict) else None)
+                if encoded_video:
+                    cached_filename = await self.file_cache.cache_base64_video(
+                        str(encoded_video),
+                        api_key_id=api_key_id,
+                        token_id=getattr(token, "id", None),
+                        flow_project_id=project_id,
+                        source_media_name=str(media_name),
+                    )
+                    video_url = self._build_cache_url(
+                        cached_filename,
+                        response_state,
+                        flow_project_id=project_id,
+                    )
+                    video_info["fifeUrl"] = video_url
+                    video_is_cached = True
+                    debug_logger.log_info(
+                        f"[VIDEO] fetched encoded video through get_media and cached: {cached_filename}"
+                    )
+                else:
+                    media_fetch_error = "get_media returned empty encodedVideo"
+                    debug_logger.log_warning(f"[VIDEO] {media_fetch_error}")
+            except Exception as exc:
+                media_fetch_error = self._normalize_error_message(exc, max_length=240)
+                debug_logger.log_warning(f"[VIDEO] get_media fallback failed: {media_fetch_error}")
+        uuid_match = re.search(r"/video/([0-9a-f-]{36})", video_url or "")
+        return {
+            "media_name": media_name,
+            "video_url": video_url,
+            "video_media_id": uuid_match.group(1) if uuid_match else str(media_name or video_info.get("mediaGenerationId") or ""),
+            "aspect_ratio": video_info.get("aspectRatio", "VIDEO_ASPECT_RATIO_LANDSCAPE"),
+            "model": video_info.get("model"),
+            "video_info": video_info,
+            "metadata": metadata,
+            "video_is_cached": video_is_cached,
+            "media_fetch_error": media_fetch_error,
+        }
 
     def _normalize_error_message(self, error_message: Any, max_length: int = 1000) -> str:
         """归一化错误文本，避免写入超长内容。"""
@@ -1118,12 +1332,34 @@ class GenerationHandler:
         except Exception as exc:
             debug_logger.log_warning(f"[poll_task] update_task failed: {exc}")
 
-    def _build_poll_task_progress_hook(self, poll_task_id: Optional[str]):
-        if not poll_task_id:
+    def _build_poll_task_progress_hook(
+        self,
+        poll_task_id: Optional[str],
+        request_log_state: Optional[Dict[str, Any]] = None,
+        token_id: Optional[int] = None,
+    ):
+        if not poll_task_id and not isinstance(request_log_state, dict):
             return None
 
         async def _hook(updates: Dict[str, Any]) -> None:
-            await self._maybe_update_poll_task(poll_task_id, **updates)
+            if updates.get("captcha_user_agent_set") and isinstance(request_log_state, dict):
+                provider = str(updates.get("captcha_provider") or "").strip() or None
+                request_log_state["captcha_user_agent_set"] = True
+                request_log_state["captcha_provider"] = provider
+                await self._update_request_log_progress(
+                    request_log_state,
+                    token_id=token_id,
+                    status_text="captcha_user_agent_set",
+                    progress=int(request_log_state.get("progress") or 0),
+                )
+
+            if poll_task_id:
+                task_updates = {
+                    key: value
+                    for key, value in updates.items()
+                    if key not in {"captcha_user_agent_set", "captcha_provider"}
+                }
+                await self._maybe_update_poll_task(poll_task_id, **task_updates)
 
         return _hook
 
@@ -1209,7 +1445,9 @@ class GenerationHandler:
         token = None
         generation_type = None
         pending_token_state = {"active": False}
-        request_id = f"gen-{int(start_time * 1000)}-{id(asyncio.current_task())}"
+        request_id = (poll_task_id or "").strip() or (
+            f"gen-{int(start_time * 1000)}-{id(asyncio.current_task())}"
+        )
         perf_trace: Dict[str, Any] = {
             "request_id": request_id,
             "model": model,
@@ -1218,7 +1456,14 @@ class GenerationHandler:
         generation_result = self._create_generation_result()
         response_state = self._create_response_state()
         response_state["base_url"] = (base_url_override or "").strip().rstrip("/") or None
-        request_log_state: Dict[str, Any] = {"id": None, "progress": 0, "api_key_id": api_key_id}
+        request_log_state: Dict[str, Any] = {
+            "id": None,
+            "progress": 0,
+            "api_key_id": api_key_id,
+            "request_id": request_id,
+            "captcha_user_agent_set": False,
+            "captcha_provider": None,
+        }
 
         # 防止并发链路复用到上一次请求的指纹上下文
         if hasattr(self.flow_client, "clear_request_fingerprint"):
@@ -1239,6 +1484,7 @@ class GenerationHandler:
         request_operation = f"generate_{generation_type}"
         prompt_for_log = prompt if len(prompt) <= 2000 else f"{prompt[:2000]}...(truncated)"
         request_payload = {
+            "request_id": request_id,
             "model": model,
             "prompt": prompt_for_log,
             "has_images": images is not None and len(images) > 0,
@@ -1247,22 +1493,55 @@ class GenerationHandler:
             request_payload["project_id"] = requested_project_id
         debug_logger.log_info(f"[GENERATION] 开始生成 - 模型: {model}, 类型: {generation_type}, Prompt: {prompt[:50]}...")
 
+        request_log_state["id"] = await self._log_request(
+            token_id=None,
+            api_key_id=api_key_id,
+            operation=request_operation,
+            request_data=request_payload,
+            response_data={
+                "status": "processing",
+                "status_text": "started",
+                "progress": 0,
+                "request_id": request_id,
+            },
+            status_code=102,
+            duration=0,
+            status_text="started",
+            progress=0,
+            request_log_state=request_log_state,
+        )
+
+        async def _finalize_early_failure(error_message: str, status_code: int) -> None:
+            duration = time.time() - start_time
+            perf_trace["status"] = "failed"
+            perf_trace["total_ms"] = int(duration * 1000)
+            perf_trace["error"] = error_message
+            selected_token_id = (
+                token.id if token else request_log_state.get("token_id")
+            )
+            await self._log_request(
+                token_id=selected_token_id,
+                api_key_id=api_key_id,
+                operation=request_operation,
+                request_data=request_payload,
+                response_data={
+                    "error": error_message,
+                    "request_id": request_id,
+                    "performance": perf_trace,
+                },
+                status_code=status_code,
+                duration=duration,
+                log_id=request_log_state.get("id"),
+                status_text="failed",
+                progress=request_log_state.get("progress", 0),
+                request_log_state=request_log_state,
+            )
+
         # 向用户展示开始信息
         if stream:
             yield self._create_stream_chunk(
                 f"✨ {'视频' if generation_type == 'video' else '图片'}生成任务已启动\n",
                 role="assistant"
-            )
-            request_log_state["id"] = await self._log_request(
-                token_id=None,
-                api_key_id=api_key_id,
-                operation=request_operation,
-                request_data=request_payload,
-                response_data={"status": "processing", "status_text": "started", "progress": 0, "request_id": request_id},
-                status_code=102,
-                duration=0,
-                status_text="started",
-                progress=0,
             )
 
         # 2. 选择Token
@@ -1273,30 +1552,49 @@ class GenerationHandler:
         if isinstance(selection_context, dict):
             allowlist_filter_reason_type = selection_context.get("allowlist_filter_reason_type")
 
-        if generation_type == "image":
-            token = await self.load_balancer.select_token(
-                for_image_generation=True,
-                model=model,
-                reserve=False,
-                enforce_concurrency_filter=False,
-                track_pending=True,
-                allowed_token_ids=allowed_token_ids,
-                managed_api_key_id=api_key_id,
-                allowlist_filter_reason_type=allowlist_filter_reason_type,
-                diagnostics_sink=token_selection_diagnostics,
-            )
-        else:
-            token = await self.load_balancer.select_token(
-                for_video_generation=True,
-                model=model,
-                reserve=False,
-                enforce_concurrency_filter=False,
-                track_pending=True,
-                allowed_token_ids=allowed_token_ids,
-                managed_api_key_id=api_key_id,
-                allowlist_filter_reason_type=allowlist_filter_reason_type,
-                diagnostics_sink=token_selection_diagnostics,
-            )
+        try:
+            if generation_type == "image":
+                token = await self.load_balancer.select_token(
+                    for_image_generation=True,
+                    model=model,
+                    reserve=False,
+                    enforce_concurrency_filter=False,
+                    track_pending=True,
+                    allowed_token_ids=allowed_token_ids,
+                    managed_api_key_id=api_key_id,
+                    allowlist_filter_reason_type=allowlist_filter_reason_type,
+                    diagnostics_sink=token_selection_diagnostics,
+                )
+            else:
+                token = await self.load_balancer.select_token(
+                    for_video_generation=True,
+                    model=model,
+                    reserve=False,
+                    enforce_concurrency_filter=False,
+                    track_pending=True,
+                    allowed_token_ids=allowed_token_ids,
+                    managed_api_key_id=api_key_id,
+                    allowlist_filter_reason_type=allowlist_filter_reason_type,
+                    diagnostics_sink=token_selection_diagnostics,
+                )
+        except asyncio.CancelledError:
+            error_msg = "生成已取消: 客户端连接已断开"
+            record_generation_result(generation_type, "cancelled", time.time() - start_time)
+            await _finalize_early_failure(error_msg, 499)
+            if hasattr(self.flow_client, "clear_managed_api_key_id"):
+                self.flow_client.clear_managed_api_key_id()
+            raise
+        except Exception as e:
+            error_msg = f"生成失败: {str(e)}"
+            debug_logger.log_error(f"[GENERATION] token selection failed: {error_msg}")
+            record_generation_result(generation_type, "failed", time.time() - start_time)
+            await _finalize_early_failure(error_msg, 500)
+            if hasattr(self.flow_client, "clear_managed_api_key_id"):
+                self.flow_client.clear_managed_api_key_id()
+            if stream:
+                yield self._create_stream_chunk(f"❌ {error_msg}\n")
+            yield self._create_error_response(error_msg, status_code=500)
+            return
         perf_trace["token_select_ms"] = int((time.time() - token_select_started_at) * 1000)
         if token_selection_diagnostics:
             perf_trace["token_selection_diagnostics"] = token_selection_diagnostics
@@ -1350,12 +1648,17 @@ class GenerationHandler:
                 api_key_id=api_key_id,
                 operation=request_operation,
                 request_data=request_payload,
-                response_data={"error": error_msg, "performance": perf_trace},
+                response_data={
+                    "error": error_msg,
+                    "request_id": request_id,
+                    "performance": perf_trace,
+                },
                 status_code=503,
                 duration=time.time() - start_time,
                 log_id=request_log_state.get("id"),
                 status_text="failed",
                 progress=request_log_state.get("progress", 0),
+                request_log_state=request_log_state,
             )
             if stream:
                 yield self._create_stream_chunk(f"❌ {error_msg}\n")
@@ -1364,6 +1667,7 @@ class GenerationHandler:
 
         debug_logger.log_info(f"[GENERATION] 已选择Token: {token.id} ({token.email})")
         pending_token_state["active"] = True
+        request_log_state["token_id"] = token.id
         await self._update_request_log_progress(
             request_log_state,
             token_id=token.id,
@@ -1391,10 +1695,30 @@ class GenerationHandler:
                 error_msg = "Token AT无效或刷新失败"
                 debug_logger.log_error(f"[GENERATION] {error_msg}")
                 record_generation_result(generation_type, "failed", time.time() - start_time)
+                await _finalize_early_failure(error_msg, 503)
                 if stream:
                     yield self._create_stream_chunk(f"❌ {error_msg}\n")
                 yield self._create_error_response(error_msg, status_code=503)
                 return
+
+            if getattr(token, "auth_mode", "session_token") == "browser_profile":
+                profile_status = getattr(token, "browser_profile_status", None) or "unknown"
+                login_state = getattr(token, "browser_profile_login_state", None) or "unknown"
+                if profile_status != "connected" or login_state != "logged_in":
+                    error_msg = (
+                        "Browser profile is not logged in. Open the profile in admin, "
+                        "log in inside Fluxbox, then click Sync."
+                    )
+                    debug_logger.log_error(f"[GENERATION] {error_msg} token_id={token.id}")
+                    record_generation_result(generation_type, "failed", time.time() - start_time)
+                    await _finalize_early_failure(error_msg, 409)
+                    if stream:
+                        yield self._create_stream_chunk(f"❌ {error_msg}\n")
+                    yield self._create_error_response(error_msg, status_code=409)
+                    return
+                debug_logger.log_info(
+                    f"[GENERATION] Browser-profile token {token.id} is connected; using synced ST/AT for Flow request pipeline"
+                )
 
             # 4. 确保Project存在
             debug_logger.log_info(f"[GENERATION] 检查/创建Project...")
@@ -1404,6 +1728,7 @@ class GenerationHandler:
                 error_msg = "当前模型需要 " + get_paygate_tier_label(required_tier) + " 账号: " + model
                 debug_logger.log_error(f"[GENERATION] {error_msg}")
                 record_generation_result(generation_type, "failed", time.time() - start_time)
+                await _finalize_early_failure(error_msg, 403)
                 if stream:
                     yield self._create_stream_chunk(f"❌ {error_msg}\n")
                 yield self._create_error_response(error_msg, status_code=403)
@@ -1419,6 +1744,8 @@ class GenerationHandler:
             except ValueError as e:
                 err = str(e)
                 debug_logger.log_error(f"[GENERATION] {err}")
+                record_generation_result(generation_type, "failed", time.time() - start_time)
+                await _finalize_early_failure(err, 400)
                 if stream:
                     yield self._create_stream_chunk(f"❌ {err}\n")
                 yield self._create_error_response(err, status_code=400)
@@ -1484,14 +1811,24 @@ class GenerationHandler:
                 error_msg = generation_result.get("error_message") or "生成未成功完成"
                 debug_logger.log_warning(f"[GENERATION] 生成未成功，不扣次数: {error_msg}")
                 if token:
-                    await self.token_manager.record_error(token.id)
+                    error = Exception(error_msg)
+                    if self._should_count_token_error(error):
+                        await self.token_manager.record_error(token.id)
+                    else:
+                        debug_logger.log_info(
+                            f"[GENERATION] 跳过 token 错误计数: token_id={token.id}, reason={error_msg[:200]}"
+                        )
                 duration = time.time() - start_time
                 record_generation_result(generation_type, "failed", duration)
                 perf_trace["status"] = "failed"
                 perf_trace["total_ms"] = int(duration * 1000)
                 perf_trace["error"] = error_msg
                 prompt_for_log = prompt if len(prompt) <= 2000 else f"{prompt[:2000]}...(truncated)"
-                response_data = {"error": error_msg, "performance": perf_trace}
+                response_data = {
+                    "error": error_msg,
+                    "request_id": request_id,
+                    "performance": perf_trace,
+                }
                 response_data.update(error_extra)
                 await self._log_request(
                     token.id if token else None,
@@ -1504,6 +1841,7 @@ class GenerationHandler:
                     log_id=request_log_state.get("id"),
                     status_text="failed",
                     progress=request_log_state.get("progress", 0),
+                    request_log_state=request_log_state,
                 )
                 if not generation_result.get("error_emitted"):
                     if stream:
@@ -1534,6 +1872,7 @@ class GenerationHandler:
             # 构建响应数据，包含生成的URL
             response_data = {
                 "status": "success",
+                "request_id": request_id,
                 "model": model,
                 "prompt": prompt_for_log,
                 "performance": perf_trace
@@ -1569,6 +1908,7 @@ class GenerationHandler:
                 log_id=request_log_state.get("id"),
                 status_text="completed",
                 progress=100,
+                request_log_state=request_log_state,
             )
 
         except asyncio.CancelledError:
@@ -1585,20 +1925,29 @@ class GenerationHandler:
                 api_key_id,
                 request_operation if generation_type else "generate_unknown",
                 request_payload if 'request_payload' in locals() else {"model": model},
-                {"error": error_msg, "performance": perf_trace},
+                {
+                    "error": error_msg,
+                    "request_id": request_id,
+                    "performance": perf_trace,
+                },
                 499,
                 duration,
                 log_id=request_log_state.get("id"),
                 status_text="failed",
                 progress=request_log_state.get("progress", 0),
+                request_log_state=request_log_state,
             )
             raise
         except Exception as e:
             error_msg = f"生成失败: {str(e)}"
             debug_logger.log_error(f"[GENERATION] ❌ {error_msg}")
             if token:
-                # 记录错误（所有错误统一处理，不再特殊处理429）
-                await self.token_manager.record_error(token.id)
+                if self._should_count_token_error(e):
+                    await self.token_manager.record_error(token.id)
+                else:
+                    debug_logger.log_info(
+                        f"[GENERATION] 跳过 token 错误计数: token_id={token.id}, reason={str(e)[:200]}"
+                    )
 
             # 先将最终失败状态落库，再返回错误响应，避免日志停在 102。
             duration = time.time() - start_time
@@ -1612,12 +1961,17 @@ class GenerationHandler:
                 api_key_id,
                 request_operation if generation_type else "generate_unknown",
                 request_payload if 'request_payload' in locals() else {"model": model},
-                {"error": error_msg, "performance": perf_trace},
+                {
+                    "error": error_msg,
+                    "request_id": request_id,
+                    "performance": perf_trace,
+                },
                 500,
                 duration,
                 log_id=request_log_state.get("id"),
                 status_text="failed",
                 progress=request_log_state.get("progress", 0),
+                request_log_state=request_log_state,
             )
             if stream:
                 yield self._create_stream_chunk(f"❌ {error_msg}\n")
@@ -1625,14 +1979,42 @@ class GenerationHandler:
         finally:
             if hasattr(self.flow_client, "clear_managed_api_key_id"):
                 self.flow_client.clear_managed_api_key_id()
-            if pending_token_state.get("active") and token and self.load_balancer:
+            pending_token_id = token.id if token else request_log_state.get("token_id")
+            if pending_token_state.get("active") and pending_token_id and self.load_balancer:
                 await self.load_balancer.release_pending(
-                    token.id,
+                    pending_token_id,
                     for_image_generation=(generation_type == "image"),
                     for_video_generation=(generation_type == "video"),
                 )
                 pending_token_state["active"] = False
 
+
+    def _should_count_token_error(self, error: Exception) -> bool:
+        """Return whether a failure should count against the account token."""
+        error_text = str(error or "").strip().lower()
+        if not error_text:
+            return True
+
+        non_token_fault_markers = (
+            "failed to obtain recaptcha token",
+            "recaptcha evaluation failed",
+            "recaptcha 验证失败",
+            "recaptcha 错误",
+            "public_error_unusual_activity",
+            "too much traffic",
+            "error_no_slot_available",
+            "打码服务资源不足",
+            "打码服务资源阻塞",
+            "yescaptcha",
+            "capsolver",
+            "capmonster",
+            "ezcaptcha",
+        )
+        if any(marker in error_text for marker in non_token_fault_markers):
+            return False
+        if "没有可用的token进行" in error_text:
+            return False
+        return True
 
     def _get_no_token_error_message(self, generation_type: str) -> str:
         """获取无可用Token时的详细错误信息"""
@@ -1718,7 +2100,11 @@ class GenerationHandler:
                     progress=progress,
                 )
 
-            poll_hook = self._build_poll_task_progress_hook(poll_task_id)
+            poll_hook = self._build_poll_task_progress_hook(
+                poll_task_id,
+                request_log_state=request_log_state,
+                token_id=token.id,
+            )
             generate_started_at = time.time()
             async def _extension_generate_image():
                 return await self.flow_client.generate_image(
@@ -2099,7 +2485,11 @@ class GenerationHandler:
 
         # 不在本地等待视频硬并发槽位；请求一到就直接向上游提交。
         normalized_tier = normalize_user_paygate_tier(token.user_paygate_tier)
-        poll_hook = self._build_poll_task_progress_hook(poll_task_id)
+        poll_hook = self._build_poll_task_progress_hook(
+            poll_task_id,
+            request_log_state=request_log_state,
+            token_id=token.id,
+        )
 
         if video_trace is not None:
             video_trace["slot_wait_ms"] = 0
@@ -2164,6 +2554,14 @@ class GenerationHandler:
                     return
 
             # ========== 上传图片 ==========
+            if video_type == "omni" and max_images is not None and image_count > max_images:
+                error_msg = f"Omni supports at most {max_images} reference images; received {image_count}"
+                if stream:
+                    yield self._create_stream_chunk(f"{error_msg}\n")
+                self._mark_generation_failed(generation_result, error_msg)
+                yield self._create_error_response(error_msg, status_code=400)
+                return
+
             start_media_id = None
             end_media_id = None
             reference_images = []
@@ -2192,7 +2590,7 @@ class GenerationHandler:
                     debug_logger.log_info(f"[I2V] 上传首尾帧: {start_media_id}, {end_media_id}")
 
             # R2V: 多图处理
-            elif video_type == "r2v" and images:
+            elif video_type in {"r2v", "omni"} and images:
                 if stream:
                     yield self._create_stream_chunk(f"上传 {image_count} 张参考图片...\n")
 
@@ -2249,12 +2647,32 @@ class GenerationHandler:
                         token_video_concurrency=token.video_concurrency,
                         poll_task_progress=poll_hook,
                     )
-                if video_type == "r2v" and reference_images:
+                if video_type in {"r2v", "omni"} and reference_images:
+                    if video_type == "omni":
+                        return await self.flow_client.generate_omni_reference_video(
+                            at=token.at,
+                            st=token.st,
+                            project_id=project_id,
+                            prompt=prompt,
+                            aspect_ratio=model_config["aspect_ratio"],
+                            reference_media_ids=[item["mediaId"] for item in reference_images],
+                            model_usage_key=model_config.get("reference_model_key", "abra_r2v_8s"),
+                            model_display_name=model_config.get("reference_model_display_name", "Omni Flash"),
+                            duration=int(model_config.get("reference_duration", 8)),
+                            user_paygate_tier=normalized_tier,
+                            token_id=token.id,
+                            token_video_concurrency=token.video_concurrency,
+                            poll_task_progress=poll_hook,
+                        )
                     return await self.flow_client.generate_video_reference_images(
                         at=token.at,
                         project_id=project_id,
                         prompt=prompt,
-                        model_key=model_config["model_key"],
+                        model_key=(
+                            model_config.get("reference_model_key", "abra_r2v_8s")
+                            if video_type == "omni"
+                            else model_config["model_key"]
+                        ),
                         aspect_ratio=model_config["aspect_ratio"],
                         reference_images=reference_images,
                         user_paygate_tier=normalized_tier,
@@ -2387,7 +2805,11 @@ class GenerationHandler:
         if response_state is None:
             response_state = self._create_response_state()
 
-        poll_hook = self._build_poll_task_progress_hook(poll_task_id)
+        poll_hook = self._build_poll_task_progress_hook(
+            poll_task_id,
+            request_log_state=request_log_state,
+            token_id=token.id,
+        )
 
         max_attempts = config.max_poll_attempts
         poll_interval = config.poll_interval
@@ -2409,32 +2831,40 @@ class GenerationHandler:
                 consecutive_poll_errors = 0
                 last_poll_error = None
 
+                operation = checked_operations[0] if checked_operations else {}
+                status = operation.get("status") if isinstance(operation, dict) else None
+                progress = min(int((attempt / max_attempts) * 100), 95)
+                await self._update_request_log_progress(
+                    request_log_state,
+                    token_id=token.id,
+                    status_text="video_polling",
+                    progress=max(45, progress),
+                    response_extra={"upstream_status": status or "pending"},
+                )
+
+                # 流式文本仍每20秒报告一次 (poll_interval=3秒, 20秒约7次轮询)
+                progress_update_interval = 7  # 每7次轮询 = 21秒
+                if stream and attempt % progress_update_interval == 0:
+                    yield self._create_stream_chunk(f"生成进度: {progress}%\n")
+
                 if not checked_operations:
                     continue
 
-                operation = checked_operations[0]
-                status = operation.get("status")
-
-                # 状态更新 - 每20秒报告一次 (poll_interval=3秒, 20秒约7次轮询)
-                progress_update_interval = 7  # 每7次轮询 = 21秒
-                if stream and attempt % progress_update_interval == 0:  # 每20秒报告一次
-                    progress = min(int((attempt / max_attempts) * 100), 95)
-                    await self._update_request_log_progress(request_log_state, token_id=token.id, status_text="video_polling", progress=max(45, progress), response_extra={"upstream_status": status})
-                    yield self._create_stream_chunk(f"生成进度: {progress}%\n")
-
                 # 检查状态
                 if status == "MEDIA_GENERATION_STATUS_SUCCESSFUL":
-                    # 成功
-                    metadata = operation["operation"].get("metadata", {})
-                    video_info = metadata.get("video", {})
-                    source_video_url = video_info.get("fifeUrl")
-                    video_media_id = video_info.get("mediaGenerationId")
-                    uuid_match = re.search(r"/video/([0-9a-f-]{36})", source_video_url or "")
-                    if uuid_match:
-                        video_media_id = uuid_match.group(1)
-                    if not video_media_id and isinstance(operation, dict):
-                        video_media_id = operation.get("mediaName")
-                    aspect_ratio = video_info.get("aspectRatio", "VIDEO_ASPECT_RATIO_LANDSCAPE")
+                    resolved_video = await self._resolve_video_asset(
+                        token,
+                        operation,
+                        api_key_id=api_key_id,
+                        project_id=project_id,
+                        response_state=response_state,
+                    )
+                    metadata = resolved_video["metadata"]
+                    video_info = resolved_video["video_info"]
+                    source_video_url = resolved_video["video_url"]
+                    video_media_id = resolved_video["video_media_id"]
+                    aspect_ratio = resolved_video["aspect_ratio"]
+                    video_is_cached = bool(resolved_video.get("video_is_cached"))
 
                     if not source_video_url and not video_media_id:
                         error_msg = "视频生成失败: 视频URL为空"
@@ -2541,6 +2971,7 @@ class GenerationHandler:
                                         host = "localhost" if (config.server_host or "") == "0.0.0.0" else (config.server_host or "localhost")
                                         concat_url = f"http://{host}:{config.server_port}{concat_url}"
                                     source_video_url = concat_url
+                                    video_is_cached = False
                         except Exception as e:
                             debug_logger.log_error(f"[CONCAT] 拼接失败: {str(e)}")
 
@@ -2553,24 +2984,33 @@ class GenerationHandler:
                                 token_id=token.id,
                             )
                         except Exception as resolve_error:
+                            media_fetch_error = str(resolved_video.get("media_fetch_error") or "").strip()
                             error_msg = (
                                 "Video generated successfully, but resolving the download URL failed: "
                                 f"{self._normalize_error_message(resolve_error, max_length=240)}"
                             )
+                            if media_fetch_error:
+                                error_msg += f"; get_media fallback: {media_fetch_error}"
                             debug_logger.log_error(f"[VIDEO] media redirect resolve failed: {resolve_error}")
                             await self._fail_video_task(checked_operations, error_msg)
                             self._mark_generation_failed(
                                 generation_result,
                                 error_msg,
                                 status_code=502,
-                                error_extra={"video_cache_status": "resolve_failed"},
+                                error_extra={
+                                    "video_cache_status": "resolve_failed",
+                                    "get_media_error": media_fetch_error or None,
+                                },
                             )
                             if stream:
                                 yield self._create_stream_chunk(f"Error: {error_msg}\n")
                             yield self._create_error_response(
                                 error_msg,
                                 status_code=502,
-                                extra_fields={"video_cache_status": "resolve_failed"},
+                                extra_fields={
+                                    "video_cache_status": "resolve_failed",
+                                    "get_media_error": media_fetch_error or None,
+                                },
                             )
                             return
 
@@ -2582,7 +3022,11 @@ class GenerationHandler:
                             or "Signature=" in source_video_url
                         )
                     )
-                    if not config.cache_enabled:
+                    if video_is_cached:
+                        local_url = source_video_url
+                        if stream:
+                            yield self._create_stream_chunk("Video fetched and cached successfully...\n")
+                    elif not config.cache_enabled:
                         if not source_video_is_safe:
                             error_msg = (
                                 "Video generated successfully, but file cache is disabled "
@@ -2952,11 +3396,18 @@ class GenerationHandler:
         response_state: Optional[Dict[str, Any]] = None,
         flow_project_id: Optional[str] = None,
     ) -> str:
+        builder = getattr(self.file_cache, "build_url", None)
+        if callable(builder):
+            result = builder(
+                filename,
+                self._get_base_url(response_state),
+                flow_project_id=flow_project_id,
+            )
+            if isinstance(result, str):
+                return result
         base = f"{self._get_base_url(response_state)}/api/cache/blob/{filename}"
         pid = (flow_project_id or "").strip()
-        if pid:
-            return f"{base}?project_id={quote(pid, safe='')}"
-        return base
+        return f"{base}?project_id={quote(pid, safe='')}" if pid else base
 
     async def _update_request_log_progress(
         self,
@@ -2989,8 +3440,16 @@ class GenerationHandler:
             "status_text": status_text,
             "progress": safe_progress,
         }
+        request_id = str(request_log_state.get("request_id") or "").strip()
+        if request_id:
+            payload["request_id"] = request_id
         if isinstance(response_extra, dict):
             payload.update(response_extra)
+        if request_log_state.get("captcha_user_agent_set"):
+            payload["captcha_user_agent_set"] = True
+            provider = str(request_log_state.get("captcha_provider") or "").strip()
+            if provider:
+                payload["captcha_provider"] = provider
 
         should_write = (
             safe_progress in (0, 100)
@@ -3032,6 +3491,7 @@ class GenerationHandler:
         log_id: Optional[int] = None,
         status_text: Optional[str] = None,
         progress: Optional[int] = None,
+        request_log_state: Optional[Dict[str, Any]] = None,
     ):
         """???????????? log_id ????????"""
         try:
@@ -3043,8 +3503,17 @@ class GenerationHandler:
                 effective_progress = 100 if status_code == 200 else 0 if status_code >= 400 else 0
             effective_progress = max(0, min(100, int(effective_progress)))
 
+            effective_response_data = dict(response_data)
+            if isinstance(request_log_state, dict) and request_log_state.get("captcha_user_agent_set"):
+                metadata: Dict[str, Any] = {"captcha_user_agent_set": True}
+                provider = str(request_log_state.get("captcha_provider") or "").strip()
+                if provider:
+                    metadata["captcha_provider"] = provider
+                metadata.update(effective_response_data)
+                effective_response_data = metadata
+
             request_body = json.dumps(request_data, ensure_ascii=False)
-            response_body = json.dumps(response_data, ensure_ascii=False)
+            response_body = json.dumps(effective_response_data, ensure_ascii=False)
 
             if log_id:
                 await self.db.update_request_log(
