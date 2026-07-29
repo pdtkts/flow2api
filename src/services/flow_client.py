@@ -4966,7 +4966,36 @@ class FlowClient:
                     token_id=token_id,
                     managed_api_key_id=managed_api_key_id,
                 )
-                self._set_request_fingerprint(None)
+                extension_user_agent = None
+                consume_user_agent = getattr(service, "consume_token_user_agent", None)
+                if callable(consume_user_agent) and ext_req_id:
+                    extension_user_agent = consume_user_agent(ext_req_id)
+                if token and extension_user_agent:
+                    self._set_request_fingerprint(
+                        {
+                            "user_agent": extension_user_agent,
+                            "accept_language": self._get_primary_accept_language(),
+                            "sec_ch_ua": self._infer_sec_ch_ua_from_user_agent(
+                                extension_user_agent
+                            ),
+                            "project_id": project_id,
+                            "origin": "https://labs.google",
+                            "referer": self._build_flow_project_page_url(project_id),
+                        }
+                    )
+                    debug_logger.log_info(
+                        "[reCAPTCHA Extension] Applied solver-tab User-Agent to request fingerprint"
+                    )
+                    await _emit_poll_task_progress(
+                        poll_task_progress,
+                        {
+                            "captcha_status": "user_agent_set",
+                            "captcha_user_agent_set": True,
+                            "captcha_provider": "extension",
+                        },
+                    )
+                else:
+                    self._set_request_fingerprint(None)
                 if ext_req_id:
                     _flow_extension_upstream_req_id.set(ext_req_id)
                 else:
@@ -5234,7 +5263,8 @@ class FlowClient:
                     api_proxy_url = await self.proxy_manager.get_request_proxy_url()
                 except Exception as e:
                     debug_logger.log_warning(f"[reCAPTCHA] Failed to get proxy for API captcha: {e}")
-            # Bind solve and submit to the same deterministic browser identity and proxy.
+            # Bind solve and submit to the same proxy. The solver-provided User-Agent,
+            # when present, replaces the local fallback identity before submission.
             api_captcha_ua = self._generate_user_agent(
                 str(token_id or project_id or captcha_method)
             )
@@ -5255,7 +5285,6 @@ class FlowClient:
                 action,
                 proxy_url=api_proxy_url,
                 proxy_resolved=True,
-                user_agent=api_captcha_ua,
             )
             if api_result is None:
                 self._set_request_fingerprint(None)
@@ -5313,7 +5342,6 @@ class FlowClient:
         *,
         proxy_url: Optional[str] = None,
         proxy_resolved: bool = False,
-        user_agent: Optional[str] = None,
     ) -> Optional[tuple[str, Optional[str]]]:
         """通用API打码服务
         
@@ -5389,13 +5417,6 @@ class FlowClient:
                         "pageAction": page_action
                     }
                 }
-                effective_user_agent = str(
-                    user_agent
-                    or (self.get_request_fingerprint() or {}).get("user_agent")
-                    or self._generate_user_agent(str(project_id or method))
-                ).strip()
-                if effective_user_agent:
-                    create_data["task"]["userAgent"] = effective_user_agent
                 if min_score is not None:
                     create_data["task"]["minScore"] = min_score
 

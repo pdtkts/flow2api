@@ -823,15 +823,11 @@ def test_non_storage_sqlite_error_is_not_converted_to_507():
         raise AssertionError("Expected non-storage SQLite error to be re-raised")
 
 
-def test_runtime_sqlite_io_error_is_not_converted_to_507():
+def test_runtime_sqlite_io_error_is_sanitized_as_503():
     error = sqlite3.OperationalError("disk I/O error")
-
-    try:
-        asyncio.run(sqlite_operational_error_handler(None, error))
-    except sqlite3.OperationalError as exc:
-        assert exc is error
-    else:
-        raise AssertionError("Expected runtime SQLite I/O error to be re-raised")
+    response = asyncio.run(sqlite_operational_error_handler(None, error))
+    assert response.status_code == 503
+    assert b"storage_unavailable" in response.body
 
 
 def test_extract_artifact_urls_falls_back_to_preview_without_download_url():

@@ -55,6 +55,22 @@ class _FakeS3Client:
             "ETag": '"etag"',
         }
 
+    def list_objects_v2(self, **kwargs):
+        prefix = kwargs.get("Prefix", "")
+        return {
+            "Contents": [
+                {
+                    "Key": key,
+                    "Size": len(data),
+                    "LastModified": datetime.now(timezone.utc),
+                    "ETag": '"etag"',
+                }
+                for key, data in self.objects.items()
+                if key.startswith(prefix)
+            ],
+            "IsTruncated": False,
+        }
+
 
 class DigitalOceanSpacesBackendTests(unittest.IsolatedAsyncioTestCase):
     def _modules(self, client):
@@ -87,6 +103,69 @@ class DigitalOceanSpacesBackendTests(unittest.IsolatedAsyncioTestCase):
             backend.public_url("image.png"),
             "https://cdn.example.com/flow2api/cache/image.png",
         )
+
+    async def test_cdn_file_listing_includes_direct_public_url(self):
+        client = _FakeS3Client()
+        settings = DigitalOceanSpacesSettings(
+            access_key_id="key",
+            secret_access_key="secret",
+            region="nyc3",
+            bucket="bucket",
+            prefix="flow2api/cache",
+            delivery_mode="cdn",
+            cdn_base_url="https://cdn.example.com",
+            api_token="token",
+            cdn_endpoint_id="endpoint",
+        )
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(sys.modules, self._modules(client)):
+            backend = DigitalOceanSpacesBackend(settings)
+            await backend.store_bytes("image #1.png", b"png", "image/png")
+            cache = FileCache(cache_dir=tmp)
+            cache.provider = "digitalocean"
+            cache.delivery_mode = "cdn"
+            cache.backend = backend
+            files = await cache.list_files()
+
+        self.assertEqual(len(files), 1)
+        self.assertEqual(files[0]["name"], "image #1.png")
+        self.assertEqual(files[0]["kind"], "image")
+        self.assertEqual(files[0]["provider"], "digitalocean")
+        self.assertEqual(files[0]["delivery_mode"], "cdn")
+        self.assertEqual(
+            files[0]["public_url"],
+            "https://cdn.example.com/flow2api/cache/image%20%231.png",
+        )
+
+    async def test_local_file_listing_has_no_public_url(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = FileCache(cache_dir=tmp)
+            await cache.backend.store_bytes("image.png", b"png", "image/png")
+            files = await cache.list_files()
+
+        self.assertEqual(len(files), 1)
+        self.assertIsNone(files[0]["public_url"])
+
+    async def test_spaces_proxy_file_listing_has_no_public_url(self):
+        client = _FakeS3Client()
+        settings = DigitalOceanSpacesSettings(
+            access_key_id="key",
+            secret_access_key="secret",
+            region="nyc3",
+            bucket="bucket",
+            prefix="flow2api/cache",
+            delivery_mode="proxy",
+        )
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(sys.modules, self._modules(client)):
+            backend = DigitalOceanSpacesBackend(settings)
+            await backend.store_bytes("image.png", b"png", "image/png")
+            cache = FileCache(cache_dir=tmp)
+            cache.provider = "digitalocean"
+            cache.delivery_mode = "proxy"
+            cache.backend = backend
+            files = await cache.list_files()
+
+        self.assertEqual(len(files), 1)
+        self.assertIsNone(files[0]["public_url"])
 
     def test_missing_cdn_purge_configuration_is_rejected(self):
         settings = DigitalOceanSpacesSettings(

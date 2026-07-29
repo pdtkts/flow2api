@@ -10,7 +10,7 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from fastapi import APIRouter, Depends, File, HTTPException, Header, Query, Request, Response, UploadFile
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 from typing import Optional, List, Dict, Any
@@ -24,7 +24,7 @@ from curl_cffi.requests import AsyncSession
 from ..core.auth import AuthManager
 from ..core.api_key_manager import ApiKeyManager
 from ..core.database import Database
-from ..core.config import config, get_yescaptcha_min_score, normalize_yescaptcha_task_type
+from ..core.config import config, get_runtime_data_dir, get_yescaptcha_min_score, normalize_yescaptcha_task_type
 from ..core.models import GenerationConfig, Token
 from ..core.browser_runtime_status import (
     fail_runtime_prepare,
@@ -41,6 +41,8 @@ from ..services.runway_service import RunwayService
 from ..services.geminigen_service import GeminiGenService
 from ..services.generation_handler import MODEL_CONFIG
 from ..services.browser_profile_service import BrowserProfileService
+from ..services.browser_metrics_cleanup import get_last_browser_metrics_cleanup_stats
+from ..services.google_drive_backup import GoogleDriveBackupError, GoogleDriveBackupService
 
 try:
     import httpx
@@ -57,6 +59,7 @@ concurrency_manager: Optional[ConcurrencyManager] = None
 api_key_manager: Optional[ApiKeyManager] = None
 runway_service: Optional[RunwayService] = None
 geminigen_service: Optional[GeminiGenService] = None
+google_drive_backup_service: Optional[GoogleDriveBackupService] = None
 captcha_runtime_prepare_tasks: Dict[str, asyncio.Task] = {}
 
 # Admin session TTLs (seconds)
@@ -769,9 +772,10 @@ def set_dependencies(
     akm: Optional[ApiKeyManager] = None,
     rs: Optional[RunwayService] = None,
     gs: Optional[GeminiGenService] = None,
+    gdbs: Optional[GoogleDriveBackupService] = None,
 ):
     """Set service instances"""
-    global token_manager, proxy_manager, db, concurrency_manager, api_key_manager, runway_service, geminigen_service
+    global token_manager, proxy_manager, db, concurrency_manager, api_key_manager, runway_service, geminigen_service, google_drive_backup_service
     token_manager = tm
     proxy_manager = pm
     db = database
@@ -779,6 +783,7 @@ def set_dependencies(
     api_key_manager = akm
     runway_service = rs
     geminigen_service = gs
+    google_drive_backup_service = gdbs
 
 
 # ========== Request Models ==========
@@ -787,6 +792,17 @@ class LoginRequest(BaseModel):
     username: str
     password: str
     remember_me: bool = True
+
+
+class GoogleDriveBackupConfigRequest(BaseModel):
+    enabled: bool = False
+    schedule_time: str = "03:00"
+    timezone: str = "Asia/Karachi"
+    retention: int = Field(default=14, ge=1, le=365)
+
+
+class GoogleDriveRestoreRequest(BaseModel):
+    confirmation: str
 
 
 class AddTokenRequest(BaseModel):
@@ -3489,6 +3505,139 @@ async def download_sqlite_database(token: str = Depends(verify_admin_token)):
         raise HTTPException(status_code=500, detail=f"Database download failed: {exc}") from exc
 
 
+def _google_drive_backups() -> GoogleDriveBackupService:
+    if google_drive_backup_service is None:
+        raise HTTPException(status_code=503, detail="Google Drive backup service is not initialized")
+    return google_drive_backup_service
+
+
+def _google_drive_error(exc: GoogleDriveBackupError) -> HTTPException:
+    message = str(exc)
+    status = 409 if "already running" in message else 400
+    return HTTPException(status_code=status, detail=message)
+
+
+@router.get("/api/admin/backups/google-drive/status")
+async def google_drive_backup_status(token: str = Depends(verify_admin_token)):
+    return {"success": True, **_google_drive_backups().public_status()}
+
+
+@router.put("/api/admin/backups/google-drive/config")
+async def update_google_drive_backup_config(
+    payload: GoogleDriveBackupConfigRequest,
+    token: str = Depends(verify_admin_token),
+):
+    service = _google_drive_backups()
+    try:
+        status = service.update_config(
+            enabled=payload.enabled,
+            schedule_time=payload.schedule_time,
+            timezone_name=payload.timezone,
+            retention=payload.retention,
+        )
+    except GoogleDriveBackupError as exc:
+        raise _google_drive_error(exc) from exc
+    return {"success": True, **status}
+
+
+@router.post("/api/admin/backups/google-drive/oauth/start")
+async def start_google_drive_oauth(token: str = Depends(verify_admin_token)):
+    try:
+        authorization_url = _google_drive_backups().begin_oauth(token)
+    except GoogleDriveBackupError as exc:
+        raise _google_drive_error(exc) from exc
+    return {"success": True, "authorization_url": authorization_url}
+
+
+@router.get("/api/admin/backups/google-drive/oauth/callback")
+async def finish_google_drive_oauth(
+    request: Request,
+    state: str = Query(""),
+    code: str = Query(""),
+    error: str = Query(""),
+):
+    if error:
+        return RedirectResponse(url="/manage?google_drive=denied", status_code=303)
+    session_token = get_admin_token_from_cookie(request) or ""
+    if not session_token or not code or not state:
+        raise HTTPException(status_code=400, detail="OAuth callback is incomplete")
+    try:
+        await _google_drive_backups().finish_oauth(
+            state=state,
+            code=code,
+            admin_session=session_token,
+        )
+    except GoogleDriveBackupError as exc:
+        raise _google_drive_error(exc) from exc
+    return RedirectResponse(url="/manage?google_drive=connected", status_code=303)
+
+
+@router.post("/api/admin/backups/google-drive/test")
+async def test_google_drive_backup(token: str = Depends(verify_admin_token)):
+    try:
+        return await _google_drive_backups().test_connection()
+    except GoogleDriveBackupError as exc:
+        raise _google_drive_error(exc) from exc
+
+
+@router.post("/api/admin/backups/google-drive/disconnect")
+async def disconnect_google_drive_backup(token: str = Depends(verify_admin_token)):
+    await _google_drive_backups().disconnect()
+    return {"success": True}
+
+
+@router.post("/api/admin/backups/google-drive/backups")
+async def create_google_drive_backup(token: str = Depends(verify_admin_token)):
+    try:
+        job = await _google_drive_backups().start_backup("manual")
+    except GoogleDriveBackupError as exc:
+        raise _google_drive_error(exc) from exc
+    return JSONResponse(status_code=202, content={"success": True, "job": job})
+
+
+@router.get("/api/admin/backups/google-drive/job")
+async def get_google_drive_backup_job(token: str = Depends(verify_admin_token)):
+    return {"success": True, "job": _google_drive_backups().public_status().get("job")}
+
+
+@router.get("/api/admin/backups/google-drive/backups")
+async def list_google_drive_backups(token: str = Depends(verify_admin_token)):
+    service = _google_drive_backups()
+    if not service.public_status().get("connected"):
+        return {"success": True, "backups": []}
+    try:
+        backups = await service.list_backups()
+    except GoogleDriveBackupError as exc:
+        raise _google_drive_error(exc) from exc
+    return {"success": True, "backups": backups}
+
+
+@router.delete("/api/admin/backups/google-drive/backups/{file_id}")
+async def delete_google_drive_backup(file_id: str, token: str = Depends(verify_admin_token)):
+    try:
+        await _google_drive_backups().delete_backup(file_id)
+    except GoogleDriveBackupError as exc:
+        raise _google_drive_error(exc) from exc
+    return {"success": True}
+
+
+@router.post("/api/admin/backups/google-drive/backups/{file_id}/restore")
+async def restore_google_drive_backup(
+    file_id: str,
+    payload: GoogleDriveRestoreRequest,
+    token: str = Depends(verify_admin_token),
+):
+    if payload.confirmation.strip() != "RESTORE":
+        raise HTTPException(status_code=400, detail="Type RESTORE to confirm")
+    if not await db.is_admin_session_recent(token, 15 * 60):
+        raise HTTPException(status_code=403, detail="Log in again before restoring a backup")
+    try:
+        job = await _google_drive_backups().start_restore(file_id)
+    except GoogleDriveBackupError as exc:
+        raise _google_drive_error(exc) from exc
+    return JSONResponse(status_code=202, content={"success": True, "job": job})
+
+
 @router.get("/api/admin/managed-apikeys")
 async def list_managed_api_keys(token: str = Depends(verify_admin_token)):
     if not api_key_manager:
@@ -3588,6 +3737,23 @@ async def get_managed_api_key_adobe_usage(
         "months": months,
         "by_month": stats.get("by_month") or [],
         "by_month_by_operation": stats.get("by_month_by_operation") or [],
+    }
+
+
+@router.get("/api/admin/storage/status")
+async def get_storage_status(token: str = Depends(verify_admin_token)):
+    """Return sanitized persistent-volume usage and BrowserMetrics cleanup totals."""
+    data_dir = get_runtime_data_dir()
+    usage = await asyncio.to_thread(shutil.disk_usage, data_dir)
+    return {
+        "success": True,
+        "storage": {
+            "total_bytes": usage.total,
+            "used_bytes": usage.used,
+            "free_bytes": usage.free,
+            "used_percent": round((usage.used / usage.total) * 100, 1) if usage.total else 0,
+        },
+        "browser_metrics_cleanup": get_last_browser_metrics_cleanup_stats(),
     }
 
 

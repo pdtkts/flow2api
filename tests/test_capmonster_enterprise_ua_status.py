@@ -79,6 +79,7 @@ class CaptchaConfigTestCase(unittest.IsolatedAsyncioTestCase):
         task = session.calls[0][1]["json"]["task"]
         self.assertEqual(task["type"], "RecaptchaV3EnterpriseTask")
         self.assertEqual(task["minScore"], 0.9)
+        self.assertNotIn("userAgent", task)
         self.assertNotEqual(task["type"], "RecaptchaV3TaskProxyless")
 
         failed_session = _FakeSession([{"errorId": 1, "errorDescription": "unsupported"}])

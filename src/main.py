@@ -37,6 +37,8 @@ from .services.geminigen_service import GeminiGenService
 from .services.runway_service import RunwayService
 from .services.st_refresh_reasons import describe_st_refresh_reason
 from .services.browser_profile_service import BrowserProfileService
+from .services.browser_metrics_cleanup import cleanup_browser_metrics
+from .services.google_drive_backup import GoogleDriveBackupService
 from .api import routes, admin
 from .core.api_key_manager import ApiKeyManager
 from .core.auth import set_api_key_manager
@@ -520,6 +522,18 @@ async def lifespan(app: FastAPI):
         )
     print("=" * 60)
 
+    # BrowserMetrics is disposable Chromium telemetry. Reclaim it before SQLite
+    # touches a persistent volume that may already be full.
+    startup_metrics = await asyncio.to_thread(cleanup_browser_metrics)
+    if startup_metrics.removed_directories or startup_metrics.failures:
+        print(
+            "BrowserMetrics startup cleanup: "
+            f"removed={startup_metrics.removed_directories}, "
+            f"reclaimed={startup_metrics.reclaimed_bytes} bytes, "
+            f"skipped_active={startup_metrics.skipped_active_profiles}, "
+            f"failures={startup_metrics.failures}"
+        )
+
     # Get config from setting.toml
     config_dict = config.get_raw_config()
 
@@ -543,6 +557,7 @@ async def lifespan(app: FastAPI):
         validate=config.cache_provider == "digitalocean",
     )
     cache_cleanup_enabled = await generation_handler.file_cache.refresh_cleanup_task()
+    await google_drive_backup_service.start()
     captcha_config = await db.get_captcha_config()
 
     # 尽量在浏览器服务启动前就拿到 token 快照，后续并发管理和预热共用。
@@ -613,7 +628,6 @@ async def lifespan(app: FastAPI):
             print(f"WARN Remote browser pool prefill failed: {e}")
 
     # Start 429 auto-unban task
-    import asyncio
 
     async def request_log_cleanup_task():
         """Prune request log rows while leaving durable telemetry untouched."""
@@ -643,6 +657,28 @@ async def lifespan(app: FastAPI):
                 print(f"ERR Auto-unban task error: {e}")
 
     auto_unban_task_handle = asyncio.create_task(auto_unban_task())
+
+    async def browser_metrics_cleanup_task():
+        while True:
+            try:
+                await asyncio.sleep(6 * 3600)
+                stats = await asyncio.to_thread(cleanup_browser_metrics)
+                if stats.removed_directories or stats.failures:
+                    debug_logger.log_info(
+                        "[BrowserMetrics] periodic cleanup "
+                        f"removed={stats.removed_directories}, "
+                        f"reclaimed={stats.reclaimed_bytes}, "
+                        f"skipped_active={stats.skipped_active_profiles}, "
+                        f"failures={stats.failures}"
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                debug_logger.log_warning(
+                    f"[BrowserMetrics] periodic cleanup failed: {type(exc).__name__}"
+                )
+
+    browser_metrics_cleanup_handle = asyncio.create_task(browser_metrics_cleanup_task())
 
     async def scheduled_token_refresh_task():
         """Configurable scheduled token refresh that reuses existing refresh path."""
@@ -795,6 +831,7 @@ async def lifespan(app: FastAPI):
     else:
         print("WARN File cache cleanup task failed to start")
     print("OK 429 auto-unban task started (runs every hour)")
+    print("OK BrowserMetrics cleanup task started (runs every 6 hours)")
     print(f"OK Request log cleanup task started (retention: {REQUEST_LOG_RETENTION_DAYS} days)")
     print("OK Scheduled token refresh task started")
     print("OK Scheduled ST-only refresh task started")
@@ -810,6 +847,7 @@ async def lifespan(app: FastAPI):
     print("Flow2API Shutting down...")
     # Stop file cache cleanup task
     await generation_handler.file_cache.stop_cleanup_task()
+    await google_drive_backup_service.stop()
     # Stop auto-unban task
     request_log_cleanup_handle.cancel()
     try:
@@ -833,6 +871,11 @@ async def lifespan(app: FastAPI):
         await scheduled_st_only_refresh_handle
     except asyncio.CancelledError:
         pass
+    browser_metrics_cleanup_handle.cancel()
+    try:
+        await browser_metrics_cleanup_handle
+    except asyncio.CancelledError:
+        pass
     await token_manager.stop_protocol_refresher()
     profile_service = BrowserProfileService.get_existing_instance()
     if profile_service is not None:
@@ -845,6 +888,7 @@ async def lifespan(app: FastAPI):
     print("OK File cache cleanup task stopped")
     print("OK Request log cleanup task stopped")
     print("OK 429 auto-unban task stopped")
+    print("OK BrowserMetrics cleanup task stopped")
     print("OK Scheduled token refresh task stopped")
     print("OK Scheduled ST-only refresh task stopped")
     print("OK Protocol token refresh task stopped")
@@ -867,13 +911,23 @@ generation_handler = GenerationHandler(
 )
 runway_service = RunwayService(db, generation_handler.file_cache, proxy_manager)
 geminigen_service = GeminiGenService(db, generation_handler.file_cache, proxy_manager)
+google_drive_backup_service = GoogleDriveBackupService(db, app_version="1.0.0")
 managed_api_key_manager = ApiKeyManager(db, legacy_api_key_provider=lambda: config.api_key)
 
 # Set dependencies
 routes.set_generation_handler(generation_handler)
 routes.set_runway_service(runway_service)
 routes.set_geminigen_service(geminigen_service)
-admin.set_dependencies(token_manager, proxy_manager, db, concurrency_manager, managed_api_key_manager, runway_service, geminigen_service)
+admin.set_dependencies(
+    token_manager,
+    proxy_manager,
+    db,
+    concurrency_manager,
+    managed_api_key_manager,
+    runway_service,
+    geminigen_service,
+    google_drive_backup_service,
+)
 set_api_key_manager(managed_api_key_manager)
 
 # Create FastAPI app

@@ -1257,6 +1257,7 @@ class FileCache:
                 "modified_at": item.modified_at.isoformat(),
                 "provider": self.provider,
                 "delivery_mode": self.delivery_mode,
+                "public_url": self.backend.public_url(item.name),
             })
         return rows
 

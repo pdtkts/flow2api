@@ -3990,6 +3990,17 @@ class Database:
                     raise
             return True
 
+    async def is_admin_session_recent(self, token: str, max_age_seconds: int = 900) -> bool:
+        """Return whether the admin authenticated within the requested safety window."""
+        cutoff = int(datetime.now().timestamp()) - max(60, int(max_age_seconds))
+        async with self._connect() as db:
+            cursor = await db.execute(
+                "SELECT created_at FROM admin_sessions WHERE token = ?",
+                (token,),
+            )
+            row = await cursor.fetchone()
+            return bool(row and int(row[0]) >= cutoff)
+
     async def delete_admin_session(self, token: str) -> None:
         async with self._connect(write=True) as db:
             await db.execute("DELETE FROM admin_sessions WHERE token = ?", (token,))

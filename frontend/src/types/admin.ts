@@ -210,6 +210,7 @@ export interface CacheFileItem {
   modified_at?: string | null
   provider?: string
   delivery_mode?: string
+  public_url?: string | null
 }
 
 export interface CacheFilesResponse {

@@ -16,6 +16,7 @@ from ..core.logger import debug_logger
 from ..core.models import Token
 from ..core.config import get_runtime_data_dir
 from .browser_cookie_utils import extract_session_token_from_cookie_payload
+from .browser_metrics_cleanup import cleanup_browser_metrics, profile_process_ids
 
 
 BROWSER_PROFILE_ROOT = get_runtime_data_dir() / "browser_profiles"
@@ -161,34 +162,7 @@ class BrowserProfileService:
 
     @staticmethod
     def _profile_process_ids(profile_path: Optional[Path]) -> list[int]:
-        if os.name == "nt" or profile_path is None:
-            return []
-        proc_root = Path("/proc")
-        if not proc_root.exists():
-            return []
-        resolved_path = os.path.normcase(str(profile_path.resolve()))
-        process_ids: list[int] = []
-        for entry in proc_root.iterdir():
-            if not entry.name.isdigit():
-                continue
-            try:
-                args = [
-                    value.decode("utf-8", errors="surrogateescape")
-                    for value in (entry / "cmdline").read_bytes().split(b"\0")
-                    if value
-                ]
-            except (OSError, ValueError):
-                continue
-            for index, arg in enumerate(args):
-                candidate = None
-                if arg.startswith("--user-data-dir="):
-                    candidate = arg.split("=", 1)[1]
-                elif arg == "--user-data-dir" and index + 1 < len(args):
-                    candidate = args[index + 1]
-                if candidate and os.path.normcase(str(Path(candidate).resolve())) == resolved_path:
-                    process_ids.append(int(entry.name))
-                    break
-        return process_ids
+        return profile_process_ids(profile_path) if profile_path is not None else []
 
     @classmethod
     def _remove_stale_singleton_artifacts(cls, profile_path: Path) -> int:
@@ -235,6 +209,8 @@ class BrowserProfileService:
         except Exception:
             pass
         await cls._terminate_profile_processes(runtime.profile_path)
+        if runtime.profile_path is not None:
+            cleanup_browser_metrics(profiles=[runtime.profile_path])
 
     async def is_runtime_open(self, token_id: int) -> bool:
         stale_runtime: Optional[ProfileRuntime] = None
@@ -267,6 +243,12 @@ class BrowserProfileService:
                     playwright = await self._ensure_playwright()
                     profile_path = self.profile_path_for_token(token_id)
                     profile_path.mkdir(parents=True, exist_ok=True)
+                    metrics_stats = cleanup_browser_metrics(profiles=[profile_path])
+                    if metrics_stats.reclaimed_bytes:
+                        debug_logger.log_info(
+                            f"[BrowserProfile] reclaimed {metrics_stats.reclaimed_bytes} BrowserMetrics bytes "
+                            f"for token {token_id}"
+                        )
                     removed = self._remove_stale_singleton_artifacts(profile_path)
                     if removed:
                         debug_logger.log_info(

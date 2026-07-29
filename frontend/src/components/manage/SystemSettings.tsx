@@ -17,7 +17,7 @@ import {
   SelectValue,
 } from "../ui/select"
 import { toast } from "sonner"
-import { Download, Loader2, RefreshCw, Upload } from "lucide-react"
+import { Cloud, Download, Loader2, RefreshCw, Trash2, Upload } from "lucide-react"
 
 type CaptchaForm = {
   captcha_method: string
@@ -148,6 +148,55 @@ type GeminiGenSystemStatus = {
   }
 }
 
+type DriveBackupJob = {
+  id: string
+  kind: "backup" | "restore"
+  status: string
+  stage: string
+  started_at?: string
+  finished_at?: string
+  bytes_total?: number
+  bytes_transferred?: number
+  error?: string | null
+  restart_required?: boolean
+}
+
+type DriveBackupStatus = {
+  oauth_configured: boolean
+  connected: boolean
+  account_email?: string | null
+  enabled: boolean
+  schedule_time: string
+  timezone: string
+  retention: number
+  folder_configured: boolean
+  last_backup_at?: string | null
+  last_backup_status?: string | null
+  last_backup_error?: string | null
+  job?: DriveBackupJob | null
+}
+
+type DriveBackupFile = {
+  id: string
+  name: string
+  size: number
+  created_at?: string
+  backup_type?: string
+}
+
+const formatBytes = (value?: number) => {
+  const bytes = Math.max(0, Number(value || 0))
+  if (bytes < 1024) return `${bytes} B`
+  const units = ["KB", "MB", "GB", "TB"]
+  let amount = bytes / 1024
+  let unit = 0
+  while (amount >= 1024 && unit < units.length - 1) {
+    amount /= 1024
+    unit += 1
+  }
+  return `${amount.toFixed(amount >= 10 ? 1 : 2)} ${units[unit]}`
+}
+
 export function SystemSettings({ active }: { active: boolean }) {
   const { token } = useAuth()
 
@@ -161,6 +210,13 @@ export function SystemSettings({ active }: { active: boolean }) {
   const [dbRestoreBusy, setDbRestoreBusy] = useState(false)
   const [dbRestoreResult, setDbRestoreResult] = useState("")
   const [dbRestoreInputKey, setDbRestoreInputKey] = useState(0)
+  const [driveStatus, setDriveStatus] = useState<DriveBackupStatus | null>(null)
+  const [driveBackups, setDriveBackups] = useState<DriveBackupFile[]>([])
+  const [driveBusy, setDriveBusy] = useState(false)
+  const [driveEnabled, setDriveEnabled] = useState(false)
+  const [driveSchedule, setDriveSchedule] = useState("03:00")
+  const [driveTimezone, setDriveTimezone] = useState("Asia/Karachi")
+  const [driveRetention, setDriveRetention] = useState("14")
   const [errorBan, setErrorBan] = useState("3")
   const [errorBanEnabled, setErrorBanEnabled] = useState(true)
   const [debugEnabled, setDebugEnabled] = useState(false)
@@ -197,7 +253,7 @@ export function SystemSettings({ active }: { active: boolean }) {
   const loadAll = useCallback(async () => {
     if (!token || !active) return
 
-    const [a, p, g, c, plug, cap, workersResp, geminiStatusResp] = await Promise.all([
+    const [a, p, g, c, plug, cap, workersResp, geminiStatusResp, driveStatusResp, driveFilesResp] = await Promise.all([
       adminJson<{
         admin_username?: string
         api_key?: string
@@ -233,6 +289,8 @@ export function SystemSettings({ active }: { active: boolean }) {
         workers?: ExtensionWorkerRow[]
       }>("/api/admin/extension/workers", token),
       adminJson<GeminiGenSystemStatus>("/api/admin/geminigen/models/status?window=1h", token),
+      adminJson<{ success?: boolean } & DriveBackupStatus>("/api/admin/backups/google-drive/status", token),
+      adminJson<{ success?: boolean; backups?: DriveBackupFile[] }>("/api/admin/backups/google-drive/backups", token),
     ])
 
     if (a.data) {
@@ -337,11 +395,148 @@ export function SystemSettings({ active }: { active: boolean }) {
       }
     }
     if (geminiStatusResp.data) setGeminiGenStatus(geminiStatusResp.data)
+    if (driveStatusResp.data) {
+      const status = driveStatusResp.data
+      setDriveStatus(status)
+      setDriveEnabled(Boolean(status.enabled))
+      setDriveSchedule(status.schedule_time || "03:00")
+      setDriveTimezone(status.timezone || "Asia/Karachi")
+      setDriveRetention(String(status.retention || 14))
+    }
+    if (driveFilesResp.data?.backups) setDriveBackups(driveFilesResp.data.backups)
   }, [token, active])
 
   useEffect(() => {
     void loadAll()
   }, [loadAll])
+
+  const refreshDrive = useCallback(async () => {
+    if (!token) return
+    const statusResp = await adminJson<{ success?: boolean } & DriveBackupStatus>(
+      "/api/admin/backups/google-drive/status",
+      token
+    )
+    if (statusResp.data) setDriveStatus(statusResp.data)
+    if (statusResp.data?.connected) {
+      const filesResp = await adminJson<{ backups?: DriveBackupFile[] }>(
+        "/api/admin/backups/google-drive/backups",
+        token
+      )
+      if (filesResp.data?.backups) setDriveBackups(filesResp.data.backups)
+    } else {
+      setDriveBackups([])
+    }
+  }, [token])
+
+  useEffect(() => {
+    const running = driveStatus?.job?.status === "running"
+    if (!active || !token || !running) return
+    const handle = window.setInterval(() => void refreshDrive(), 2000)
+    return () => window.clearInterval(handle)
+  }, [active, token, driveStatus?.job?.status, refreshDrive])
+
+  const driveAction = async (action: () => Promise<void>) => {
+    setDriveBusy(true)
+    try {
+      await action()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Google Drive operation failed")
+    } finally {
+      setDriveBusy(false)
+    }
+  }
+
+  const connectDrive = () => driveAction(async () => {
+    const response = await adminJson<{ authorization_url?: string; detail?: string }>(
+      "/api/admin/backups/google-drive/oauth/start",
+      token,
+      { method: "POST" }
+    )
+    if (!response.ok || !response.data?.authorization_url) {
+      throw new Error(response.data?.detail || "Unable to start Google OAuth")
+    }
+    window.location.assign(response.data.authorization_url)
+  })
+
+  const testDrive = () => driveAction(async () => {
+    const response = await adminJson<{ success?: boolean; account_email?: string; detail?: string }>(
+      "/api/admin/backups/google-drive/test",
+      token,
+      { method: "POST" }
+    )
+    if (!response.ok || !response.data?.success) throw new Error(response.data?.detail || "Connection test failed")
+    toast.success(`Google Drive connected${response.data.account_email ? ` as ${response.data.account_email}` : ""}`)
+    await refreshDrive()
+  })
+
+  const saveDriveConfig = () => driveAction(async () => {
+    const response = await adminJson<{ success?: boolean; detail?: string }>(
+      "/api/admin/backups/google-drive/config",
+      token,
+      {
+        method: "PUT",
+        body: JSON.stringify({
+          enabled: driveEnabled,
+          schedule_time: driveSchedule,
+          timezone: driveTimezone.trim(),
+          retention: Number.parseInt(driveRetention, 10) || 14,
+        }),
+      }
+    )
+    if (!response.ok || !response.data?.success) throw new Error(response.data?.detail || "Backup settings were not saved")
+    toast.success("Google Drive backup settings saved")
+    await refreshDrive()
+  })
+
+  const startDriveBackup = () => driveAction(async () => {
+    const response = await adminJson<{ success?: boolean; detail?: string }>(
+      "/api/admin/backups/google-drive/backups",
+      token,
+      { method: "POST" }
+    )
+    if (!response.ok || !response.data?.success) throw new Error(response.data?.detail || "Backup could not start")
+    toast.success("Google Drive backup started")
+    await refreshDrive()
+  })
+
+  const disconnectDrive = () => driveAction(async () => {
+    if (!window.confirm("Disconnect Google Drive and disable automatic backups? Remote backups will remain in Drive.")) return
+    const response = await adminJson<{ success?: boolean; detail?: string }>(
+      "/api/admin/backups/google-drive/disconnect",
+      token,
+      { method: "POST" }
+    )
+    if (!response.ok || !response.data?.success) throw new Error(response.data?.detail || "Disconnect failed")
+    toast.success("Google Drive disconnected")
+    await refreshDrive()
+  })
+
+  const deleteDriveBackup = (backup: DriveBackupFile) => driveAction(async () => {
+    if (!window.confirm(`Delete ${backup.name} from Google Drive? This cannot be undone.`)) return
+    const response = await adminJson<{ success?: boolean; detail?: string }>(
+      `/api/admin/backups/google-drive/backups/${encodeURIComponent(backup.id)}`,
+      token,
+      { method: "DELETE" }
+    )
+    if (!response.ok || !response.data?.success) throw new Error(response.data?.detail || "Delete failed")
+    toast.success("Remote backup deleted")
+    await refreshDrive()
+  })
+
+  const restoreDriveBackup = (backup: DriveBackupFile) => driveAction(async () => {
+    const confirmation = window.prompt(
+      `Restore ${backup.name}? Current data will first be backed up to Drive. Type RESTORE to continue.`
+    )
+    if (confirmation !== "RESTORE") return
+    const response = await adminJson<{ success?: boolean; detail?: string }>(
+      `/api/admin/backups/google-drive/backups/${encodeURIComponent(backup.id)}/restore`,
+      token,
+      { method: "POST", body: JSON.stringify({ confirmation }) }
+    )
+    if (!response.ok || !response.data?.success) throw new Error(response.data?.detail || "Restore could not start")
+    toast.success("Restore started. Keep this page open to monitor validation.")
+    await refreshDrive()
+  })
 
   const saveErrorBan = async () => {
     if (!token) return
@@ -880,6 +1075,145 @@ export function SystemSettings({ active }: { active: boolean }) {
               Restore database
             </Button>
             {dbRestoreResult ? <p className="text-xs text-muted-foreground">{dbRestoreResult}</p> : null}
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card className="lg:col-span-2">
+        <CardHeader className="flex flex-row items-start justify-between gap-4">
+          <div>
+            <CardTitle className="flex items-center gap-2"><Cloud className="h-5 w-5" /> Google Drive backups</CardTitle>
+            <CardDescription>
+              Private database and browser-profile archives. BrowserMetrics and OAuth credentials are excluded.
+            </CardDescription>
+          </div>
+          <Button size="sm" variant="outline" onClick={() => void refreshDrive()} disabled={driveBusy}>
+            <RefreshCw className={`h-4 w-4 ${driveBusy ? "animate-spin" : ""}`} />
+          </Button>
+        </CardHeader>
+        <CardContent className="space-y-6">
+          <div className="grid gap-3 sm:grid-cols-3 text-sm">
+            <div className="rounded-md border bg-muted/20 px-3 py-2">
+              <div className="text-xs text-muted-foreground">OAuth environment</div>
+              <div className="font-medium">{driveStatus?.oauth_configured ? "Configured" : "Missing variables"}</div>
+            </div>
+            <div className="rounded-md border bg-muted/20 px-3 py-2">
+              <div className="text-xs text-muted-foreground">Connection</div>
+              <div className="font-medium">{driveStatus?.connected ? driveStatus.account_email || "Connected" : "Not connected"}</div>
+            </div>
+            <div className="rounded-md border bg-muted/20 px-3 py-2">
+              <div className="text-xs text-muted-foreground">Last backup</div>
+              <div className="font-medium">{driveStatus?.last_backup_status || "Never"}</div>
+              {driveStatus?.last_backup_at ? <div className="text-xs text-muted-foreground">{new Date(driveStatus.last_backup_at).toLocaleString()}</div> : null}
+            </div>
+          </div>
+
+          {!driveStatus?.oauth_configured ? (
+            <p className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-700 dark:text-amber-300">
+              Configure FLOW2API_GOOGLE_DRIVE_CLIENT_ID, FLOW2API_GOOGLE_DRIVE_CLIENT_SECRET, and
+              FLOW2API_GOOGLE_DRIVE_REDIRECT_URI in Railway before connecting.
+            </p>
+          ) : null}
+          <p className="text-xs text-muted-foreground">
+            Archives are not client-side encrypted and contain Flow tokens, Google cookies, and browser state. Keep the Drive folder private.
+          </p>
+
+          <div className="flex flex-wrap gap-2">
+            {!driveStatus?.connected ? (
+              <Button onClick={connectDrive} disabled={driveBusy || !driveStatus?.oauth_configured}>
+                {driveBusy ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Cloud className="mr-2 h-4 w-4" />}
+                Connect Google Drive
+              </Button>
+            ) : (
+              <>
+                <Button variant="secondary" onClick={testDrive} disabled={driveBusy}>Test connection</Button>
+                <Button variant="outline" onClick={disconnectDrive} disabled={driveBusy}>Disconnect</Button>
+              </>
+            )}
+          </div>
+
+          <div className="grid gap-4 border-t border-border pt-4 md:grid-cols-4">
+            <div className="flex items-center gap-2 md:col-span-4">
+              <Switch
+                id="drive-auto-backups"
+                checked={driveEnabled}
+                onCheckedChange={setDriveEnabled}
+                disabled={!driveStatus?.connected || driveBusy}
+              />
+              <Label htmlFor="drive-auto-backups">Enable automatic backups</Label>
+            </div>
+            <div>
+              <Label htmlFor="drive-schedule">Daily time</Label>
+              <Input id="drive-schedule" className="mt-1" type="time" value={driveSchedule} onChange={(event) => setDriveSchedule(event.target.value)} />
+            </div>
+            <div className="md:col-span-2">
+              <Label htmlFor="drive-timezone">Timezone</Label>
+              <Input id="drive-timezone" className="mt-1" value={driveTimezone} onChange={(event) => setDriveTimezone(event.target.value)} />
+            </div>
+            <div>
+              <Label htmlFor="drive-retention">Automatic backups retained</Label>
+              <Input id="drive-retention" className="mt-1" type="number" min={1} max={365} value={driveRetention} onChange={(event) => setDriveRetention(event.target.value)} />
+            </div>
+            <div className="flex flex-wrap gap-2 md:col-span-4">
+              <Button variant="secondary" onClick={saveDriveConfig} disabled={driveBusy || !driveStatus?.connected}>Save backup settings</Button>
+              <Button onClick={startDriveBackup} disabled={driveBusy || !driveStatus?.connected || driveStatus?.job?.status === "running"}>
+                <Upload className="mr-2 h-4 w-4" /> Backup now
+              </Button>
+            </div>
+          </div>
+
+          {driveStatus?.job ? (
+            <div className="space-y-2 rounded-md border px-3 py-3 text-sm">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="font-medium capitalize">{driveStatus.job.kind}: {driveStatus.job.status}</span>
+                <span className="text-xs text-muted-foreground">{driveStatus.job.stage.replaceAll("_", " ")}</span>
+              </div>
+              {Number(driveStatus.job.bytes_total || 0) > 0 ? (
+                <>
+                  <div className="h-2 overflow-hidden rounded-full bg-muted">
+                    <div
+                      className="h-full bg-primary transition-all"
+                      style={{ width: `${Math.min(100, ((driveStatus.job.bytes_transferred || 0) / (driveStatus.job.bytes_total || 1)) * 100)}%` }}
+                    />
+                  </div>
+                  <div className="text-xs text-muted-foreground">
+                    {formatBytes(driveStatus.job.bytes_transferred)} / {formatBytes(driveStatus.job.bytes_total)}
+                  </div>
+                </>
+              ) : null}
+              {driveStatus.job.error ? <p className="text-xs text-destructive">{driveStatus.job.error}</p> : null}
+              {driveStatus.job.restart_required ? <p className="text-xs text-amber-600">Restore completed. Restart the Railway service before continuing normal work.</p> : null}
+            </div>
+          ) : null}
+
+          <div className="space-y-3 border-t border-border pt-4">
+            <div className="flex items-center justify-between gap-3">
+              <Label>Remote backup history</Label>
+              <span className="text-xs text-muted-foreground">{driveBackups.length} backup(s)</span>
+            </div>
+            {driveBackups.length ? (
+              <div className="max-h-72 space-y-2 overflow-y-auto pr-1">
+                {driveBackups.map((backup) => (
+                  <div key={backup.id} className="flex flex-col gap-3 rounded-md border px-3 py-2 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="min-w-0">
+                      <div className="truncate text-sm font-medium">{backup.name}</div>
+                      <div className="text-xs text-muted-foreground">
+                        {backup.backup_type || "backup"} · {formatBytes(backup.size)}
+                        {backup.created_at ? ` · ${new Date(backup.created_at).toLocaleString()}` : ""}
+                      </div>
+                    </div>
+                    <div className="flex gap-2">
+                      <Button size="sm" variant="outline" onClick={() => restoreDriveBackup(backup)} disabled={driveBusy || driveStatus?.job?.status === "running"}>Restore</Button>
+                      <Button size="sm" variant="ghost" onClick={() => deleteDriveBackup(backup)} disabled={driveBusy || driveStatus?.job?.status === "running"}>
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="text-sm text-muted-foreground">No remote backups found.</p>
+            )}
           </div>
         </CardContent>
       </Card>

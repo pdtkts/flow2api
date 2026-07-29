@@ -44,26 +44,18 @@ function cacheAdminPreviewPath(fileName: string) {
 }
 
 function MediaTile({ file, token }: { file: CacheFileItem; token: string | null }) {
-  const [objectUrl, setObjectUrl] = useState<string | null>(null)
-  const [previewError, setPreviewError] = useState(false)
-  const [previewLoading, setPreviewLoading] = useState(true)
-  const objectUrlRef = useRef<string | null>(null)
+  const [proxyPreview, setProxyPreview] = useState<{
+    fileName: string
+    url: string | null
+    error: boolean
+  }>({ fileName: "", url: null, error: false })
+  const [failedUrl, setFailedUrl] = useState<string | null>(null)
+  const blobUrlRef = useRef<string | null>(null)
 
   useEffect(() => {
-    if (!token) {
-      setPreviewLoading(false)
-      setPreviewError(true)
-      return
-    }
-    let cancelled = false
-    setPreviewLoading(true)
-    setPreviewError(false)
-    if (objectUrlRef.current) {
-      URL.revokeObjectURL(objectUrlRef.current)
-      objectUrlRef.current = null
-    }
-    setObjectUrl(null)
+    if (file.public_url || !token) return
 
+    let cancelled = false
     const path = cacheAdminPreviewPath(file.name)
     void adminFetch(path, token)
       .then((res) => {
@@ -73,25 +65,30 @@ function MediaTile({ file, token }: { file: CacheFileItem; token: string | null 
       .then((blob) => {
         if (cancelled) return
         const u = URL.createObjectURL(blob)
-        objectUrlRef.current = u
-        setObjectUrl(u)
-        setPreviewLoading(false)
+        if (blobUrlRef.current) URL.revokeObjectURL(blobUrlRef.current)
+        blobUrlRef.current = u
+        setProxyPreview({ fileName: file.name, url: u, error: false })
       })
       .catch(() => {
         if (!cancelled) {
-          setPreviewError(true)
-          setPreviewLoading(false)
+          setProxyPreview({ fileName: file.name, url: null, error: true })
         }
       })
 
     return () => {
       cancelled = true
-      if (objectUrlRef.current) {
-        URL.revokeObjectURL(objectUrlRef.current)
-        objectUrlRef.current = null
+      if (blobUrlRef.current) {
+        URL.revokeObjectURL(blobUrlRef.current)
+        blobUrlRef.current = null
       }
     }
-  }, [file.name, token])
+  }, [file.name, file.public_url, token])
+
+  const currentProxyPreview = proxyPreview.fileName === file.name ? proxyPreview : null
+  const previewUrl = file.public_url || currentProxyPreview?.url || null
+  const previewLoading = !file.public_url && Boolean(token) && !currentProxyPreview
+  const previewError = failedUrl === previewUrl
+    || (!file.public_url && (!token || currentProxyPreview?.error === true))
 
   const meta = (
     <div className="border-t bg-muted/40 px-2 py-1.5 text-xs">
@@ -106,7 +103,7 @@ function MediaTile({ file, token }: { file: CacheFileItem; token: string | null 
     if (previewLoading) {
       return <div className="flex h-full min-h-[8rem] items-center justify-center bg-muted text-xs text-muted-foreground">Loading…</div>
     }
-    if (previewError || !objectUrl) {
+    if (previewError || !previewUrl) {
       return (
         <div className="flex h-full min-h-[8rem] flex-col items-center justify-center gap-1 bg-muted px-2 text-center text-xs text-muted-foreground">
           <span>Preview unavailable</span>
@@ -115,22 +112,22 @@ function MediaTile({ file, token }: { file: CacheFileItem; token: string | null 
     }
     if (file.kind === "image") {
       return (
-        <a href={objectUrl} target="_blank" rel="noreferrer" className="block aspect-[4/3] bg-muted">
-          <img src={objectUrl} alt="" className="h-full w-full object-cover" decoding="async" />
+        <a href={previewUrl} target="_blank" rel="noreferrer" className="block aspect-[4/3] bg-muted">
+          <img src={previewUrl} alt="" className="h-full w-full object-cover" decoding="async" onError={() => setFailedUrl(previewUrl)} />
         </a>
       )
     }
     if (file.kind === "video") {
       return (
         <div className="aspect-video bg-black">
-          <video src={objectUrl} className="h-full w-full object-contain" controls playsInline preload="metadata" muted />
+          <video src={previewUrl} className="h-full w-full object-contain" controls playsInline preload="metadata" muted onError={() => setFailedUrl(previewUrl)} />
         </div>
       )
     }
     return (
       <div className="flex min-h-[8rem] flex-col items-center justify-center gap-2 bg-muted/30 p-3">
         <File className="h-10 w-10 text-muted-foreground" />
-        <a href={objectUrl} target="_blank" rel="noreferrer" className="line-clamp-2 break-all text-center text-xs text-primary hover:underline">
+        <a href={previewUrl} target="_blank" rel="noreferrer" className="line-clamp-2 break-all text-center text-xs text-primary hover:underline">
           Open file
         </a>
       </div>

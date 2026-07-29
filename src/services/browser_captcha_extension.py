@@ -27,6 +27,22 @@ _DEDICATED_SCORE_WEIGHT_INFLIGHT = 15.0
 _DEDICATED_SCORE_WEIGHT_EMA_DIVISOR = 50.0
 _DEDICATED_SCORE_WEIGHT_TIMEOUT = 20.0
 _DEDICATED_TIMEOUT_WINDOW_SEC = 60.0
+_CAPTCHA_USER_AGENT_MAX_LENGTH = 512
+
+
+def normalize_extension_captcha_user_agent(value: Any) -> Optional[str]:
+    """Return a safe solver-produced UA without weakening token compatibility."""
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    if (
+        not normalized
+        or len(normalized) > _CAPTCHA_USER_AGENT_MAX_LENGTH
+        or "\r" in normalized
+        or "\n" in normalized
+    ):
+        return None
+    return normalized
 
 
 @dataclass
@@ -84,6 +100,9 @@ class ExtensionCaptchaService:
         self.pending_generation_requests: dict[str, tuple[asyncio.Future, WebSocket]] = {}
         # req_id -> websocket to notify after Flow upstream accepts/rejects the token
         self._upstream_verdict_targets: dict[str, WebSocket] = {}
+        # req_id -> validated UA returned by the WebSocket that solved that request.
+        # The raw value is consumed immediately by FlowClient and is never persisted.
+        self._token_user_agents: dict[str, str] = {}
         self._state_lock = asyncio.Lock()
         self._connection_changed = asyncio.Condition()
         self._queue_waiters: dict[str, int] = {}
@@ -500,6 +519,7 @@ class ExtensionCaptchaService:
                 stale_reqs = [rid for rid, ws in list(self._upstream_verdict_targets.items()) if ws is websocket]
                 for rid in stale_reqs:
                     self._upstream_verdict_targets.pop(rid, None)
+                    self._token_user_agents.pop(rid, None)
                 stale_gen_reqs = [
                     rid for rid, (_fut, ws) in list(self.pending_generation_requests.items()) if ws is websocket
                 ]
@@ -1159,6 +1179,11 @@ class ExtensionCaptchaService:
             if result.get("status") == "success":
                 tok = result.get("token")
                 if isinstance(tok, str) and tok.strip():
+                    user_agent = normalize_extension_captcha_user_agent(result.get("user_agent"))
+                    if user_agent is None:
+                        user_agent = normalize_extension_captcha_user_agent(result.get("userAgent"))
+                    if user_agent:
+                        self._token_user_agents[req_id] = user_agent
                     if track_dedicated:
                         async with self._dedicated_stats_lock:
                             self._dedicated_record_success_locked(
@@ -1204,6 +1229,13 @@ class ExtensionCaptchaService:
                     st.inflight_count = max(0, st.inflight_count - 1)
             self.pending_requests.pop(req_id, None)
 
+    def consume_token_user_agent(self, req_id: Optional[str]) -> Optional[str]:
+        """Consume validated solver metadata without changing get_token()'s tuple contract."""
+        rid = str(req_id or "").strip()
+        if not rid:
+            return None
+        return self._token_user_agents.pop(rid, None)
+
     async def notify_upstream_verdict(
         self,
         req_id: Optional[str],
@@ -1218,6 +1250,7 @@ class ExtensionCaptchaService:
             return
         async with self._state_lock:
             websocket = self._upstream_verdict_targets.pop(rid, None)
+            self._token_user_agents.pop(rid, None)
         if websocket is None:
             return
         payload = {
@@ -1239,6 +1272,7 @@ class ExtensionCaptchaService:
             return
         async with self._state_lock:
             self._upstream_verdict_targets.pop(rid, None)
+            self._token_user_agents.pop(rid, None)
 
     async def get_token(
         self,
