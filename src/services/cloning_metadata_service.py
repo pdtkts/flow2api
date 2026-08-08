@@ -474,6 +474,10 @@ class CloningMetadataService:
             allowed_providers=CLONING_PROVIDERS,
         )
         selected_model = (model or app_config.flow2api_cloning_model or "gemini-2.5-flash").strip()
+        configured_fallback = get_csv(app_config.flow2api_metadata_fallback_models)
+        effective_fallback = fallback_models
+        if effective_fallback is None and "cliproxy" in provider_chain:
+            effective_fallback = [candidate for candidate in configured_fallback if candidate != selected_model]
         retry_count = normalized_retry_count(app_config.flow2api_cloning_provider_retry_count)
         out: List[Dict[str, Any]] = []
         deadline_at = time.monotonic() + CLONING_PROMPTS_DEADLINE_SECONDS
@@ -489,7 +493,7 @@ class CloningMetadataService:
                 providers=provider_chain,
                 retry_count=retry_count,
                 model=selected_model,
-                fallback_models=fallback_models,
+                fallback_models=effective_fallback,
                 prompt_text=prompt,
                 image_bytes=image_bytes,
                 mime_type=str(image.get("mimeType") or mime_type),
@@ -514,6 +518,10 @@ class CloningMetadataService:
             allowed_providers=CLONING_PROVIDERS,
         )
         selected_model = (model or app_config.flow2api_cloning_model or "gemini-2.5-flash").strip()
+        configured_fallback = get_csv(app_config.flow2api_metadata_fallback_models)
+        effective_fallback = fallback_models
+        if effective_fallback is None and "cliproxy" in provider_chain:
+            effective_fallback = [candidate for candidate in configured_fallback if candidate != selected_model]
         retry_count = normalized_retry_count(app_config.flow2api_cloning_provider_retry_count)
         clone_prompt_raw = payload.get("imageClonePrompt") or ""
         try:
@@ -539,7 +547,7 @@ class CloningMetadataService:
             providers=provider_chain,
             retry_count=retry_count,
             model=selected_model,
-            fallback_models=fallback_models,
+            fallback_models=effective_fallback,
             prompt_text=instruction,
             image_bytes=image_bytes,
             mime_type=str(payload.get("mimeType") or mime_type),

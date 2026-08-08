@@ -1180,6 +1180,10 @@ class TokenManager:
         while True:
             await asyncio.sleep(60)
             try:
+                from .redis_runtime import redis_runtime
+
+                if redis_runtime.maintenance_active:
+                    continue
                 await self.run_protocol_refresh_once()
             except asyncio.CancelledError:
                 raise

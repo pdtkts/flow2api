@@ -34,7 +34,6 @@ GEMINIGEN_OPERATION_BY_KIND = {"image": "geminigen_image", "video": "geminigen_v
 GEMINIGEN_ORIGIN = "https://geminigen.ai"
 GEMINIGEN_ANTIBOT_SECRET_KEY = "45NPBH$&"
 GEMINIGEN_ANTIBOT_SECRET_SALT = "&vTQm0&u"
-GEMINIGEN_ANTIBOT_HEALTH_URL = "https://api.geminigen.ai/health"
 GEMINIGEN_GUARD_STABLE_ID = "MDYzYmU1NDQ1NDllN2IyZT"
 GEMINIGEN_DOM_FINGERPRINT_HEX = "250119fee98c924f2c0b975f6586ba302bfdf81d6586ba115666822156668221"
 GEMINIGEN_TIME_BUCKET_WINDOW_MS = 60_000
@@ -43,6 +42,7 @@ GEMINIGEN_GUARD_STABLE_ID_LEN = 22
 GEMINIGEN_GUARD_VERSION_BYTE = 1
 GEMINIGEN_REFRESH_BEFORE_EXPIRY_SEC = 180
 GEMINIGEN_CAPACITY_ERROR_CODE = "MAX_PROCESSING_IMAGEN_EXCEEDED"
+GEMINIGEN_DAILY_LIMIT_ERROR_CODE = "DAILY_LIMIT_EXCEEDED"
 GEMINIGEN_CAPACITY_COOLDOWN_INITIAL_SEC = 20.0
 GEMINIGEN_CAPACITY_COOLDOWN_MAX_SEC = 90.0
 GEMINIGEN_ACTIVE_STATUSES = {"queued", "processing", "submitted", "polling"}
@@ -50,6 +50,13 @@ GEMINIGEN_TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
 GEMINIGEN_UPSTREAM_CANCEL_MARKERS = ("cancel", "canceled", "cancelled", "stop", "stopped")
 GEMINIGEN_UPSTREAM_FAILURE_MARKERS = ("fail", "error", "reject")
 GEMINIGEN_PROFILE_CACHE_TTL = timedelta(hours=1)
+GEMINIGEN_QUOTA_PATHS = {
+    "image_gen": "/api/user/quota/image-gen",
+    "grok_image": "/api/user/quota/grok-image",
+    "grok_max": "/api/user/quota/grok-max",
+}
+GEMINIGEN_IMAGE_GEN_MAX_DAILY = 200
+GEMINIGEN_GROK_IMAGE_MAX_DAILY = 50
 
 
 @dataclass
@@ -58,6 +65,7 @@ class GeminiGenUpstreamError(RuntimeError):
     message: str
     error_code: Optional[str] = None
     retryable_capacity: bool = False
+    daily_limit_exceeded: bool = False
 
     def __post_init__(self) -> None:
         RuntimeError.__init__(self, self.message)
@@ -78,6 +86,26 @@ class GeminiGenService:
         self._capacity_cooldown_attempts: Dict[Tuple[int, str], int] = {}
         self._finalize_locks: Dict[str, asyncio.Lock] = {}
         self._profile_refreshing_account_ids: set[int] = set()
+        self._background_completion_jobs: set[str] = set()
+        self._background_completion_lock = asyncio.Lock()
+
+    async def _claim_background_completion(self, job_id: str) -> bool:
+        """Allow only one in-process completion loop to own a GeminiGen job."""
+        normalized = str(job_id or "").strip()
+        if not normalized:
+            return False
+        async with self._background_completion_lock:
+            if normalized in self._background_completion_jobs:
+                return False
+            self._background_completion_jobs.add(normalized)
+            return True
+
+    async def _release_background_completion(self, job_id: str) -> None:
+        normalized = str(job_id or "").strip()
+        if not normalized:
+            return
+        async with self._background_completion_lock:
+            self._background_completion_jobs.discard(normalized)
 
     @staticmethod
     def is_geminigen_model(model: str) -> bool:
@@ -197,7 +225,87 @@ class GeminiGenService:
             "remaining_grok_max_daily_videos": cls._optional_int(payload.get("remaining_grok_max_daily_videos")),
             "remaining_grok_max_daily_720p_videos": cls._optional_int(payload.get("remaining_grok_max_daily_720p_videos")),
             "remaining_grok_max_daily_10s_videos": cls._optional_int(payload.get("remaining_grok_max_daily_10s_videos")),
+            "remaining_grok_max_daily_15s_videos": cls._optional_int(payload.get("remaining_grok_max_daily_15s_videos")),
         }
+
+    @classmethod
+    def parse_image_gen_quota(cls, payload: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(payload, dict):
+            raise ValueError("Image Gen quota payload must be an object")
+        return {
+            "is_image_gen_max": bool(payload.get("is_image_gen_max"))
+            if payload.get("is_image_gen_max") is not None
+            else None,
+            "is_image_premium": bool(payload.get("is_image_premium"))
+            if payload.get("is_image_premium") is not None
+            else None,
+            "image_gen_concurrent_streams": cls._optional_int(payload.get("concurrent_streams")),
+            "remaining_image_gen_max_daily_images": cls._optional_int(
+                payload.get("remaining_image_gen_max_daily_images")
+            ),
+            "remaining_image_gen_free_daily_images": cls._optional_int(
+                payload.get("remaining_free_daily_images")
+            ),
+        }
+
+    @classmethod
+    def parse_grok_image_quota(cls, payload: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(payload, dict):
+            raise ValueError("Grok Image quota payload must be an object")
+        return {
+            "is_grok_image_max": bool(payload.get("is_grok_image_max"))
+            if payload.get("is_grok_image_max") is not None
+            else None,
+            "is_image_premium": bool(payload.get("is_image_premium"))
+            if payload.get("is_image_premium") is not None
+            else None,
+            "grok_image_concurrent_streams": cls._optional_int(payload.get("concurrent_streams")),
+            "remaining_grok_image_max_daily_images": cls._optional_int(
+                payload.get("remaining_grok_image_max_daily_images")
+            ),
+            "remaining_grok_image_free_daily_images": cls._optional_int(
+                payload.get("remaining_free_daily_images")
+            ),
+        }
+
+    @classmethod
+    def parse_grok_max_quota(cls, payload: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(payload, dict):
+            raise ValueError("Grok Max quota payload must be an object")
+        return {
+            "is_grok_max": bool(payload.get("is_grok_max"))
+            if payload.get("is_grok_max") is not None
+            else None,
+            "grok_max_concurrent_streams": cls._optional_int(payload.get("concurrent_streams")),
+            "remaining_grok_max_daily_videos": cls._optional_int(
+                payload.get("remaining_grok_max_daily_videos")
+            ),
+            "remaining_grok_max_daily_720p_videos": cls._optional_int(
+                payload.get("remaining_grok_max_daily_720p_videos")
+            ),
+            "remaining_grok_max_daily_10s_videos": cls._optional_int(
+                payload.get("remaining_grok_max_daily_10s_videos")
+            ),
+            "remaining_grok_max_daily_15s_videos": cls._optional_int(
+                payload.get("remaining_grok_max_daily_15s_videos")
+            ),
+        }
+
+    @staticmethod
+    def _active_image_quota_remaining(updates: Dict[str, Any], bucket: str) -> Optional[int]:
+        if bucket == "grok_image":
+            is_max = updates.get("is_grok_image_max")
+            max_remaining = updates.get("remaining_grok_image_max_daily_images")
+            free_remaining = updates.get("remaining_grok_image_free_daily_images")
+        else:
+            is_max = updates.get("is_image_gen_max")
+            max_remaining = updates.get("remaining_image_gen_max_daily_images")
+            free_remaining = updates.get("remaining_image_gen_free_daily_images")
+        if is_max is True:
+            return max_remaining
+        if is_max is False:
+            return free_remaining
+        return max_remaining if max_remaining is not None else free_remaining
 
     @staticmethod
     def is_account_profile_stale(account: GeminiGenAccount, *, now: Optional[datetime] = None) -> bool:
@@ -272,7 +380,7 @@ class GeminiGenService:
                 response = await session.get(
                     f"{self._api_base_url(cfg.base_url)}{path}",
                     params={"window": clean_window},
-                    headers=await self._headers(account, path, method="get"),
+                    headers=await self._headers(account, path, base_url=cfg.base_url, method="get"),
                     timeout=30,
                     proxy=proxy,
                     impersonate="chrome120",
@@ -355,9 +463,29 @@ class GeminiGenService:
     def _api_base_url(base_url: str) -> str:
         base = (base_url or "").strip().rstrip("/") or "https://api.geminigen.ai"
         parsed = urlparse(base)
-        if parsed.netloc == "geminigen.ai":
+        host = (parsed.hostname or "").lower()
+        if host in {"geminigen.ai", "api.geminigen.ai"}:
             return "https://api.geminigen.ai"
+        if host in {"snapgen.ai", "api.snapgen.ai"}:
+            return "https://api.snapgen.ai"
         return base
+
+    @classmethod
+    def _web_origin(cls, base_url: str) -> str:
+        api_base = cls._api_base_url(base_url)
+        parsed = urlparse(api_base)
+        host = (parsed.hostname or "").lower()
+        if host == "api.geminigen.ai":
+            return "https://geminigen.ai"
+        if host == "api.snapgen.ai":
+            return "https://snapgen.ai"
+        if host.startswith("api."):
+            host = host[4:]
+        if not host:
+            return GEMINIGEN_ORIGIN
+        scheme = parsed.scheme or "https"
+        port = f":{parsed.port}" if parsed.port else ""
+        return f"{scheme}://{host}{port}"
 
     @staticmethod
     def _bearer_header(raw_token: str) -> str:
@@ -420,7 +548,7 @@ class GeminiGenService:
             async with AsyncSession() as session:
                 response = await session.post(
                     f"{self._api_base_url(base_url)}{path}",
-                    headers=await self._headers(account, path, method="post"),
+                    headers=await self._headers(account, path, base_url=base_url, method="post"),
                     json={"refresh_token": refresh_token},
                     timeout=60,
                     proxy=proxy,
@@ -488,7 +616,7 @@ class GeminiGenService:
             and re.fullmatch(r"[A-Za-z0-9_-]+", stable_id)
         )
 
-    async def _sync_guard_skew_ms(self) -> int:
+    async def _sync_guard_skew_ms(self, base_url: str = "") -> int:
         now = time.monotonic()
         if now - self._guard_skew_synced_at < 300:
             return self._guard_skew_ms
@@ -498,13 +626,15 @@ class GeminiGenService:
                 return self._guard_skew_ms
             t0 = int(time.time() * 1000)
             proxy = await self._request_proxy()
+            origin = self._web_origin(base_url)
+            health_url = f"{self._api_base_url(base_url)}/health"
             async with AsyncSession() as session:
                 response = await session.get(
-                    GEMINIGEN_ANTIBOT_HEALTH_URL,
+                    health_url,
                     headers={
                         "Accept": "*/*",
-                        "Origin": GEMINIGEN_ORIGIN,
-                        "Referer": f"{GEMINIGEN_ORIGIN}/",
+                        "Origin": origin,
+                        "Referer": f"{origin}/",
                     },
                     timeout=30,
                     proxy=proxy,
@@ -525,11 +655,11 @@ class GeminiGenService:
             self._guard_skew_synced_at = time.monotonic()
             return self._guard_skew_ms
 
-    async def _compute_x_guard_id(self, *, path: str, method: str) -> str:
+    async def _compute_x_guard_id(self, *, path: str, method: str, base_url: str = "") -> str:
         stable_id = GEMINIGEN_GUARD_STABLE_ID
         if not self._valid_stable_id(stable_id):
             raise RuntimeError("Invalid GeminiGen backend guard stable id")
-        skew_ms = await self._sync_guard_skew_ms()
+        skew_ms = await self._sync_guard_skew_ms(base_url)
         bucket = (int(time.time() * 1000) + int(skew_ms)) // GEMINIGEN_TIME_BUCKET_WINDOW_MS
         dom_norm = self._normalize_dom_fp_hex(GEMINIGEN_DOM_FINGERPRINT_HEX)
         key_material = GEMINIGEN_ANTIBOT_SECRET_KEY
@@ -543,7 +673,15 @@ class GeminiGenService:
         parts.extend(self._rm_hex_pairs(dom_norm))
         return self._base64url(bytes(parts))
 
-    async def _headers(self, account: GeminiGenAccount, path: str, *, method: str = "get", multipart: bool = False) -> Dict[str, str]:
+    async def _headers(
+        self,
+        account: GeminiGenAccount,
+        path: str,
+        *,
+        base_url: str = "",
+        method: str = "get",
+        multipart: bool = False,
+    ) -> Dict[str, str]:
         ua = (
             f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
             f"(KHTML, like Gecko) Chrome/{GEMINIGEN_CHROME_MAJOR}.0.0.0 Safari/537.36"
@@ -552,15 +690,16 @@ class GeminiGenService:
             f'"Google Chrome";v="{GEMINIGEN_CHROME_MAJOR}", "Not.A/Brand";v="8", '
             f'"Chromium";v="{GEMINIGEN_CHROME_MAJOR}"'
         )
+        origin = self._web_origin(base_url)
         headers = {
             "Accept": "application/json, text/plain, */*",
             "Accept-Encoding": "gzip, deflate, br",
             "Accept-Language": "en-GB,en;q=0.9,ur-PK;q=0.8,ur;q=0.7,en-US;q=0.6",
             "Cache-Control": "no-cache",
-            "Origin": GEMINIGEN_ORIGIN,
+            "Origin": origin,
             "Pragma": "no-cache",
             "Priority": "u=1, i",
-            "Referer": f"{GEMINIGEN_ORIGIN}/",
+            "Referer": f"{origin}/",
             "Sec-CH-UA": sec_ch_ua,
             "Sec-CH-UA-Mobile": "?0",
             "Sec-CH-UA-Platform": '"Windows"',
@@ -568,7 +707,7 @@ class GeminiGenService:
             "Sec-Fetch-Mode": "cors",
             "Sec-Fetch-Site": "same-site",
             "User-Agent": ua,
-            "x-guard-id": await self._compute_x_guard_id(path=path, method=method),
+            "x-guard-id": await self._compute_x_guard_id(path=path, method=method, base_url=base_url),
         }
         bearer = GeminiGenService._bearer_header(account.bearer_token)
         if bearer:
@@ -1012,15 +1151,29 @@ class GeminiGenService:
             error_code = error_code or parsed.get("error_code") or parsed.get("code")
             error_message = error_message or parsed.get("error_message") or parsed.get("message") or parsed.get("error")
         lower_error_message = str(error_message or "").lower()
+        normalized_error_code = str(error_code or "").upper()
+        daily_limit_exceeded = (
+            normalized_error_code == GEMINIGEN_DAILY_LIMIT_ERROR_CODE
+            or (
+                status_code == 422
+                and "daily limit" in lower_error_message
+                and ("reached" in lower_error_message or "exceeded" in lower_error_message)
+            )
+        )
         retryable_capacity = (
-            str(error_code or "").upper() == GEMINIGEN_CAPACITY_ERROR_CODE
+            normalized_error_code == GEMINIGEN_CAPACITY_ERROR_CODE
             or (
                 status_code == 400
                 and "maximum number" in lower_error_message
                 and "concurrent image generation" in lower_error_message
             )
         )
-        if retryable_capacity:
+        if daily_limit_exceeded:
+            message = (
+                f"GeminiGen account daily limit exceeded ({GEMINIGEN_DAILY_LIMIT_ERROR_CODE}); "
+                "resets at 00:00 UTC"
+            )
+        elif retryable_capacity:
             message = f"GeminiGen upstream capacity is full ({GEMINIGEN_CAPACITY_ERROR_CODE})"
         else:
             suffix = f": {str(error_message).strip()[:240]}" if error_message else ""
@@ -1030,6 +1183,118 @@ class GeminiGenService:
             message=message,
             error_code=str(error_code) if error_code else None,
             retryable_capacity=retryable_capacity,
+            daily_limit_exceeded=daily_limit_exceeded,
+        )
+
+    @staticmethod
+    def _next_utc_midnight(now: Optional[datetime] = None) -> datetime:
+        current = now or datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        else:
+            current = current.astimezone(timezone.utc)
+        return (current.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)).replace(tzinfo=None)
+
+    @staticmethod
+    def _utc_iso(value: Optional[datetime]) -> Optional[str]:
+        if not value:
+            return None
+        normalized = value
+        if normalized.tzinfo is None:
+            normalized = normalized.replace(tzinfo=timezone.utc)
+        else:
+            normalized = normalized.astimezone(timezone.utc)
+        return normalized.isoformat().replace("+00:00", "Z")
+
+    @staticmethod
+    def _quota_bucket(kind: str, endpoint_type: str) -> str:
+        endpoint = str(endpoint_type or "").strip().lower()
+        if endpoint == "grok-image":
+            return "grok_image"
+        if endpoint == "veo-video" or str(kind or "").lower() == "video":
+            return "video"
+        return "image_gen"
+
+    @classmethod
+    def _daily_limit_reset_field(cls, kind: str, endpoint_type: str) -> str:
+        return {
+            "image_gen": "image_gen_daily_limit_reset_at",
+            "grok_image": "grok_image_daily_limit_reset_at",
+            "video": "video_daily_limit_reset_at",
+        }[cls._quota_bucket(kind, endpoint_type)]
+
+    @classmethod
+    def _quota_bucket_label(cls, kind: str, endpoint_type: str) -> str:
+        return {
+            "image_gen": "Imagen",
+            "grok_image": "Grok Image",
+            "video": "video",
+        }[cls._quota_bucket(kind, endpoint_type)]
+
+    async def _daily_limit_pool_state(self, kind: str, endpoint_type: str) -> Dict[str, Any]:
+        getter = getattr(self.db, "get_geminigen_daily_limit_pool_state", None)
+        if not callable(getter):
+            return {"account_count": 0, "daily_limited_count": 0, "earliest_reset_at": None}
+        try:
+            state = await getter(kind, endpoint_type=endpoint_type)
+        except TypeError:
+            state = await getter(kind)
+        reset_at = self._optional_datetime(state.get("earliest_reset_at"))
+        return {
+            "account_count": int(state.get("account_count") or 0),
+            "daily_limited_count": int(state.get("daily_limited_count") or 0),
+            "earliest_reset_at": reset_at,
+        }
+
+    async def _fail_task_for_daily_limit_pool(
+        self,
+        task: GeminiGenTask,
+        *,
+        request_log_id: Optional[int],
+        started_at: Optional[float],
+        reset_at: Optional[datetime],
+    ) -> GeminiGenTask:
+        retry_at = reset_at or self._next_utc_midnight()
+        retry_at_text = self._utc_iso(retry_at)
+        bucket_label = self._quota_bucket_label(task.kind, task.endpoint_type)
+        error = (
+            f"All GeminiGen accounts reached their {bucket_label} daily limit; "
+            f"retry after {retry_at_text}"
+        )
+        await self.db.update_geminigen_task(
+            task.job_id,
+            account_id=None,
+            upstream_uuid=None,
+            status="failed",
+            progress=0,
+            error_message=error,
+            error_code=GEMINIGEN_DAILY_LIMIT_ERROR_CODE,
+            retry_at=retry_at,
+            completed_at=datetime.utcnow(),
+        )
+        await self._update_request_log(
+            request_log_id,
+            status_text="failed",
+            progress=0,
+            status_code=429,
+            response={
+                "status": "failed",
+                "job_id": task.job_id,
+                "error_message": error,
+                "error_code": GEMINIGEN_DAILY_LIMIT_ERROR_CODE,
+                "retry_at": retry_at_text,
+            },
+            duration=time.perf_counter() - (started_at or time.perf_counter()),
+        )
+        return await self.db.get_geminigen_task(task.job_id) or task.model_copy(
+            update={
+                "account_id": None,
+                "status": "failed",
+                "progress": 0,
+                "error_message": error,
+                "error_code": GEMINIGEN_DAILY_LIMIT_ERROR_CODE,
+                "retry_at": retry_at,
+            }
         )
 
     def _capacity_key(self, account_id: Optional[int], kind: str) -> Optional[Tuple[int, str]]:
@@ -1088,16 +1353,28 @@ class GeminiGenService:
         else:
             await asyncio.sleep(min(1.0, remaining))
 
-    async def _acquire_geminigen_account(self, kind: str) -> Optional[GeminiGenAccount]:
+    async def _acquire_geminigen_account(self, kind: str, endpoint_type: str) -> Optional[GeminiGenAccount]:
         excluded = list(self._active_capacity_cooldowns(kind).keys())
         try:
-            return await self.db.acquire_geminigen_account(kind, excluded_account_ids=excluded)
+            account = await self.db.acquire_geminigen_account(
+                kind,
+                excluded_account_ids=excluded,
+                endpoint_type=endpoint_type,
+            )
         except TypeError:
-            account = await self.db.acquire_geminigen_account(kind)
-            if account and account.id in excluded:
-                await self.db.release_geminigen_account(account.id, kind)
-                return None
-            return account
+            try:
+                account = await self.db.acquire_geminigen_account(
+                    kind,
+                    excluded_account_ids=excluded,
+                )
+            except TypeError:
+                account = await self.db.acquire_geminigen_account(kind)
+                if account and account.id in excluded:
+                    await self.db.release_geminigen_account(account.id, kind)
+                    return None
+        if account and hasattr(self, "_profile_refreshing_account_ids"):
+            self.schedule_stale_account_profile_refresh([account])
+        return account
 
     async def _post_generation(self, *, account: GeminiGenAccount, base_url: str, endpoint_type: str, form: Dict[str, Any]) -> Dict[str, Any]:
         path = self._endpoint_path(endpoint_type)
@@ -1126,7 +1403,13 @@ class GeminiGenService:
                 async with AsyncSession() as session:
                     response = await session.post(
                         url,
-                        headers=await self._headers(account, path, method="post", multipart=True),
+                        headers=await self._headers(
+                            account,
+                            path,
+                            base_url=base_url,
+                            method="post",
+                            multipart=True,
+                        ),
                         multipart=multipart,
                         timeout=120,
                         proxy=proxy,
@@ -1154,7 +1437,7 @@ class GeminiGenService:
             async with AsyncSession() as session:
                 response = await session.get(
                     f"{self._api_base_url(base_url)}{path}",
-                    headers=await self._headers(account, path, method="get"),
+                    headers=await self._headers(account, path, base_url=base_url, method="get"),
                     timeout=60,
                     proxy=proxy,
                     impersonate="chrome120",
@@ -1222,20 +1505,9 @@ class GeminiGenService:
         if kind == "video" and not bool(getattr(cfg, "video_enabled", True)):
             raise RuntimeError("GeminiGen video mode is disabled")
         job_id = f"geminigen-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
-        request_log_id = await self._create_request_log(
-            api_key_id=api_key_id,
-            kind=kind,
-            public_model_id=public_model_id,
-            endpoint_type=str(manifest["endpoint_type"]),
-            prompt=prompt,
-            image_count=len(images or []),
-            options=options or {},
-            job_id=job_id,
-        )
         queued = GeminiGenTask(
             job_id=job_id,
             api_key_id=api_key_id,
-            request_log_id=request_log_id,
             public_model_id=public_model_id,
             kind=kind,
             endpoint_type=str(manifest["endpoint_type"]),
@@ -1244,7 +1516,31 @@ class GeminiGenService:
             progress=0,
             request_payload=json.dumps({"images": len(images or []), "options": options or {}}, ensure_ascii=False),
         )
-        await self.db.create_geminigen_task(queued)
+        request_log = RequestLog(
+            token_id=None,
+            api_key_id=api_key_id,
+            operation=GEMINIGEN_OPERATION_BY_KIND.get(kind, "geminigen_image"),
+            request_body=self._safe_log_json(
+                {
+                    "provider": "geminigen",
+                    "job_id": job_id,
+                    "model": public_model_id,
+                    "endpoint_type": str(manifest["endpoint_type"]),
+                    "prompt": prompt,
+                    "image_count": len(images or []),
+                    "options": options or {},
+                }
+            ),
+            response_body=self._safe_log_json({"status": "queued", "job_id": job_id}),
+            status_code=102,
+            duration=0,
+            status_text="geminigen_queued",
+            progress=0,
+        )
+        queued.request_log_id = await self.db.create_geminigen_task_with_request_log(
+            queued,
+            request_log,
+        )
         return queued
 
     async def start_and_complete_queued_task_in_background(
@@ -1257,6 +1553,8 @@ class GeminiGenService:
         base_url: Optional[str],
     ) -> None:
         """Wait for capacity, submit a queued task, then poll it to completion."""
+        if not await self._claim_background_completion(job_id):
+            return
         started_at = time.perf_counter()
         try:
             task = await self.db.get_geminigen_task(job_id)
@@ -1272,6 +1570,8 @@ class GeminiGenService:
             await self.wait_for_task(job_id, api_key_id=api_key_id, base_url=base_url)
         except Exception as exc:
             debug_logger.log_warning(f"GeminiGen queued background task failed for {job_id}: {exc}")
+        finally:
+            await self._release_background_completion(job_id)
 
     async def _start_queued_task(
         self,
@@ -1292,8 +1592,19 @@ class GeminiGenService:
         last_capacity_error: Optional[GeminiGenUpstreamError] = None
         manifest = geminigen_manifest_entry(task.public_model_id)
         while time.monotonic() < deadline:
-            account = await self._acquire_geminigen_account(task.kind)
+            account = await self._acquire_geminigen_account(task.kind, task.endpoint_type)
             if not account:
+                daily_pool = await self._daily_limit_pool_state(task.kind, task.endpoint_type)
+                if (
+                    daily_pool["account_count"] > 0
+                    and daily_pool["daily_limited_count"] >= daily_pool["account_count"]
+                ):
+                    return await self._fail_task_for_daily_limit_pool(
+                        task,
+                        request_log_id=request_log_id,
+                        started_at=started_at,
+                        reset_at=daily_pool["earliest_reset_at"],
+                    )
                 active_capacity = self._active_capacity_cooldowns(task.kind)
                 reason = "upstream_capacity_cooldown" if active_capacity else "waiting_for_account_slot"
                 await self._update_request_log(
@@ -1359,8 +1670,17 @@ class GeminiGenService:
                     upstream_uuid=upstream_uuid,
                     response_payload=json.dumps(created, ensure_ascii=False),
                     progress=5,
+                    error_code=None,
+                    retry_at=None,
                 )
-                await self.db.update_geminigen_account(account.id or 0, last_status="submitted", last_error=None)
+                await self.db.update_geminigen_account(
+                    account.id or 0,
+                    last_status="submitted",
+                    last_error=None,
+                )
+                decrement_quota = getattr(self.db, "decrement_geminigen_cached_quota", None)
+                if callable(decrement_quota):
+                    await decrement_quota(account.id or 0, task.endpoint_type)
                 await self._update_request_log(
                     request_log_id,
                     status_text="geminigen_submitted",
@@ -1370,6 +1690,48 @@ class GeminiGenService:
                 )
                 return await self.db.get_geminigen_task(job_id) or task
             except GeminiGenUpstreamError as exc:
+                if exc.daily_limit_exceeded:
+                    release_now = True
+                    reset_at = self._next_utc_midnight()
+                    reset_at_text = self._utc_iso(reset_at)
+                    quota_bucket = self._quota_bucket(task.kind, task.endpoint_type)
+                    daily_limit_field = self._daily_limit_reset_field(task.kind, task.endpoint_type)
+                    await self.db.update_geminigen_task(
+                        job_id,
+                        account_id=None,
+                        upstream_uuid=None,
+                        status="queued",
+                        progress=0,
+                        error_message=None,
+                        error_code=None,
+                        retry_at=None,
+                    )
+                    await self.db.update_geminigen_account(
+                        account.id or 0,
+                        **{
+                            daily_limit_field: reset_at,
+                            "last_status": f"daily_limited_{quota_bucket}",
+                            "last_error": GEMINIGEN_DAILY_LIMIT_ERROR_CODE,
+                        },
+                    )
+                    await self._update_request_log(
+                        request_log_id,
+                        status_text="geminigen_queued",
+                        progress=0,
+                        response={
+                            "status": "queued",
+                            "job_id": job_id,
+                            "reason": "account_daily_limit",
+                            "account_id": account.id,
+                            "kind": task.kind,
+                            "endpoint_type": task.endpoint_type,
+                            "quota_bucket": quota_bucket,
+                            "upstream_error_code": exc.error_code or GEMINIGEN_DAILY_LIMIT_ERROR_CODE,
+                            "reset_at": reset_at_text,
+                        },
+                        duration=time.perf_counter() - (started_at or time.perf_counter()),
+                    )
+                    continue
                 if exc.retryable_capacity:
                     saw_capacity = True
                     last_capacity_error = exc
@@ -1382,6 +1744,8 @@ class GeminiGenService:
                         status="queued",
                         progress=0,
                         error_message=None,
+                        error_code=None,
+                        retry_at=None,
                     )
                     await self.db.update_geminigen_account(
                         account.id or 0,
@@ -1588,20 +1952,35 @@ class GeminiGenService:
                 await self.db.release_geminigen_account(task.account_id, task.kind)
             else:
                 next_progress = self._history_progress(payload, task.progress)
-                await self.db.update_geminigen_task(job_id, status="processing", progress=next_progress, response_payload=json.dumps(payload, ensure_ascii=False))
-                await self._update_request_log(
-                    task.request_log_id,
-                    status_text="geminigen_polling",
-                    progress=next_progress,
-                    response={
-                        "status": "polling",
-                        "job_id": job_id,
-                        "upstream_uuid": task.upstream_uuid,
-                        "upstream_status": status_text,
-                        "upstream_progress": payload.get("status_percentage") if isinstance(payload, dict) else None,
-                    },
-                    duration=self._task_duration(task),
-                )
+                previous_status = ""
+                if task.response_payload:
+                    try:
+                        previous_payload = json.loads(task.response_payload)
+                        previous_status = self._extract_status(previous_payload)
+                    except Exception:
+                        previous_status = ""
+                if next_progress != task.progress or previous_status != status_text:
+                    await self.db.update_geminigen_task(
+                        job_id,
+                        status="processing",
+                        progress=next_progress,
+                        response_payload=json.dumps(payload, ensure_ascii=False),
+                    )
+                    await self._update_request_log(
+                        task.request_log_id,
+                        status_text="geminigen_polling",
+                        progress=next_progress,
+                        response={
+                            "status": "polling",
+                            "job_id": job_id,
+                            "upstream_uuid": task.upstream_uuid,
+                            "upstream_status": status_text,
+                            "upstream_progress": payload.get("status_percentage") if isinstance(payload, dict) else None,
+                        },
+                        duration=self._task_duration(task),
+                    )
+                else:
+                    return task
             return await self.db.get_geminigen_task(job_id) or task
         except Exception as exc:
             await self.db.update_geminigen_task(job_id, status="failed", error_message=str(exc), completed_at=datetime.utcnow())
@@ -1641,10 +2020,14 @@ class GeminiGenService:
         return await self.db.get_geminigen_task(job_id) or task
 
     async def complete_task_in_background(self, job_id: str, *, api_key_id: Optional[int], base_url: Optional[str]) -> None:
+        if not await self._claim_background_completion(job_id):
+            return
         try:
             await self.wait_for_task(job_id, api_key_id=api_key_id, base_url=base_url)
         except Exception as exc:
             debug_logger.log_warning(f"GeminiGen background poll failed for {job_id}: {exc}")
+        finally:
+            await self._release_background_completion(job_id)
 
     async def resume_active_tasks(self, *, base_url: Optional[str] = None, limit: int = 100) -> int:
         try:
@@ -1662,15 +2045,19 @@ class GeminiGenService:
             )
         return len(tasks)
 
-    async def _fetch_me_profile_payload(self, account: GeminiGenAccount, base_url: str) -> Dict[str, Any]:
+    async def _fetch_account_json_payload(
+        self,
+        account: GeminiGenAccount,
+        base_url: str,
+        path: str,
+    ) -> Dict[str, Any]:
         proxy = await self._request_proxy()
-        path = "/api/me"
         account = await self._ensure_fresh_account_token(account, base_url)
         for attempt in range(2):
             async with AsyncSession() as session:
                 response = await session.get(
                     f"{self._api_base_url(base_url)}{path}",
-                    headers=await self._headers(account, path, method="get"),
+                    headers=await self._headers(account, path, base_url=base_url, method="get"),
                     timeout=30,
                     proxy=proxy,
                     impersonate="chrome120",
@@ -1679,11 +2066,17 @@ class GeminiGenService:
                 break
             account = await self._refresh_account_token(account, base_url)
         if response.status_code >= 400:
-            raise RuntimeError(f"HTTP {response.status_code}: {response.text[:300]}")
+            raise RuntimeError(f"GET {path} failed HTTP {response.status_code}: {response.text[:300]}")
         try:
             payload = response.json()
         except Exception as exc:
-            raise RuntimeError("GeminiGen /api/me did not return JSON") from exc
+            raise RuntimeError(f"GeminiGen {path} did not return JSON") from exc
+        if not isinstance(payload, dict):
+            raise RuntimeError(f"GeminiGen {path} did not return an object")
+        return payload
+
+    async def _fetch_me_profile_payload(self, account: GeminiGenAccount, base_url: str) -> Dict[str, Any]:
+        payload = await self._fetch_account_json_payload(account, base_url, "/api/me")
         if not isinstance(payload, dict) or not payload.get("email"):
             raise RuntimeError("GeminiGen /api/me did not return an authenticated user")
         return payload
@@ -1697,16 +2090,93 @@ class GeminiGenService:
         try:
             payload = await self._fetch_me_profile_payload(account, cfg.base_url)
             profile_updates = self.parse_me_profile(payload)
-            status = "healthy"
-            error = ""
+            fresh_account = await self.db.get_geminigen_account(account_id) or account
+            quota_items = list(GEMINIGEN_QUOTA_PATHS.items())
+            quota_results = await asyncio.gather(
+                *[
+                    self._fetch_account_json_payload(fresh_account, cfg.base_url, path)
+                    for _, path in quota_items
+                ],
+                return_exceptions=True,
+            )
+            quota_updates: Dict[str, Any] = {}
+            quota_errors: List[str] = []
+            quota_successes = 0
+            parsers = {
+                "image_gen": self.parse_image_gen_quota,
+                "grok_image": self.parse_grok_image_quota,
+                "grok_max": self.parse_grok_max_quota,
+            }
+            for (bucket, _), result in zip(quota_items, quota_results):
+                if isinstance(result, BaseException):
+                    quota_errors.append(f"{bucket}: {result}")
+                    continue
+                try:
+                    parsed_quota = parsers[bucket](result)
+                except Exception as exc:
+                    quota_errors.append(f"{bucket}: {exc}")
+                    continue
+                quota_updates.update(parsed_quota)
+                quota_updates[f"{bucket}_quota_synced_at"] = synced_at
+                quota_successes += 1
+                if bucket in {"image_gen", "grok_image"}:
+                    remaining = self._active_image_quota_remaining(parsed_quota, bucket)
+                    if remaining is not None:
+                        reset_field = (
+                            "image_gen_daily_limit_reset_at"
+                            if bucket == "image_gen"
+                            else "grok_image_daily_limit_reset_at"
+                        )
+                        quota_updates[reset_field] = self._next_utc_midnight() if remaining <= 0 else None
+
+            quota_status = (
+                "healthy"
+                if quota_successes == len(quota_items)
+                else "partial"
+                if quota_successes > 0
+                else "failed"
+            )
+            quota_error = "; ".join(quota_errors)
+            quota_updates.update(
+                {
+                    "quota_synced_at": synced_at,
+                    "quota_sync_status": quota_status,
+                    "quota_sync_error": quota_error,
+                }
+            )
+
+            reset_values = {
+                "image_gen": quota_updates.get(
+                    "image_gen_daily_limit_reset_at",
+                    account.image_gen_daily_limit_reset_at,
+                ),
+                "grok_image": quota_updates.get(
+                    "grok_image_daily_limit_reset_at",
+                    account.grok_image_daily_limit_reset_at,
+                ),
+                "video": account.video_daily_limit_reset_at,
+            }
+            now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+            limited_buckets = [
+                bucket for bucket, reset_at in reset_values.items() if reset_at and reset_at > now_utc
+            ]
+            status = (
+                f"daily_limited_{limited_buckets[0]}"
+                if len(limited_buckets) == 1
+                else "daily_limited_multiple"
+                if limited_buckets
+                else "healthy"
+            )
+            error = GEMINIGEN_DAILY_LIMIT_ERROR_CODE if limited_buckets else ""
+            account_updates = {**profile_updates, **quota_updates}
             await self.db.update_geminigen_account(
                 account_id,
-                **profile_updates,
+                **account_updates,
                 last_status=status,
                 last_error=error,
                 profile_synced_at=synced_at,
-                profile_sync_status=status,
-                profile_sync_error=error,
+                profile_sync_status="healthy",
+                profile_sync_error="",
             )
         except Exception as exc:
             status = "failed"
@@ -1719,7 +2189,15 @@ class GeminiGenService:
                 profile_sync_status=status,
                 profile_sync_error=error,
             )
-        return {"success": status == "healthy", "status": status, "error": error}
+            quota_status = "not_synced"
+            quota_error = ""
+        return {
+            "success": status in {"healthy", "daily_limited_image_gen", "daily_limited_grok_image", "daily_limited_video", "daily_limited_multiple"},
+            "status": status,
+            "error": error,
+            "quota_status": quota_status,
+            "quota_error": quota_error,
+        }
 
     async def _refresh_account_profile_background(self, account_id: int) -> None:
         try:
@@ -1765,6 +2243,8 @@ class GeminiGenService:
             "cached_artifact_urls": task.cached_artifact_urls or [],
             "result_urls": result_urls,
             "error_message": task.error_message,
+            "error_code": task.error_code,
+            "retry_at": GeminiGenService._utc_iso(task.retry_at),
             "created_at": task.created_at.isoformat() if task.created_at else None,
             "completed_at": task.completed_at.isoformat() if task.completed_at else None,
         }
@@ -1773,13 +2253,31 @@ class GeminiGenService:
     def task_to_openai_payload(task: GeminiGenTask) -> Dict[str, Any]:
         if task.status in {"failed", "cancelled"}:
             cancelled = str(task.status or "").lower() == "cancelled"
-            return {
-                "error": {
+            daily_limited = task.error_code == GEMINIGEN_DAILY_LIMIT_ERROR_CODE
+            if cancelled:
+                error_payload = {
                     "message": task.error_message or f"GeminiGen task {task.status}",
-                    "type": "cancelled" if cancelled else "server_error",
-                    "code": "geminigen_generation_cancelled" if cancelled else "geminigen_generation_failed",
-                    "status_code": 499 if cancelled else 502,
-                },
+                    "type": "cancelled",
+                    "code": "geminigen_generation_cancelled",
+                    "status_code": 499,
+                }
+            elif daily_limited:
+                error_payload = {
+                    "message": task.error_message or f"GeminiGen task {task.status}",
+                    "type": "rate_limit_error",
+                    "code": GEMINIGEN_DAILY_LIMIT_ERROR_CODE,
+                    "status_code": 429,
+                    "retry_at": GeminiGenService._utc_iso(task.retry_at),
+                }
+            else:
+                error_payload = {
+                    "message": task.error_message or f"GeminiGen task {task.status}",
+                    "type": "server_error",
+                    "code": "geminigen_generation_failed",
+                    "status_code": 502,
+                }
+            return {
+                "error": error_payload,
                 "job_id": task.job_id,
                 "raw_artifact_urls": task.raw_artifact_urls or [],
                 "cached_artifact_urls": task.cached_artifact_urls or [],

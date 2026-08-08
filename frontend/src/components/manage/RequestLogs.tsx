@@ -30,6 +30,7 @@ export function RequestLogs() {
   const [hideGeneration, setHideGeneration] = useState(false)
   const [search, setSearch] = useState("")
   const fetchInFlight = useRef(false)
+  const fetchLogsRef = useRef<(silent?: boolean) => Promise<void>>(async () => undefined)
 
   const fetchLogs = useCallback(async (silent = false) => {
     if (!token || fetchInFlight.current) return
@@ -61,6 +62,10 @@ export function RequestLogs() {
   }, [token, page, hideGeneration, search])
 
   useEffect(() => {
+    fetchLogsRef.current = fetchLogs
+  }, [fetchLogs])
+
+  useEffect(() => {
     queueMicrotask(() => {
       void fetchLogs()
     })
@@ -69,16 +74,98 @@ export function RequestLogs() {
   useEffect(() => {
     if (!token) return
 
-    const refreshIfVisible = () => {
-      if (document.visibilityState === "visible") void fetchLogs(true)
+    let socket: WebSocket | null = null
+    let reconnectTimer: number | null = null
+    let refreshTimer: number | null = null
+    let stopped = false
+    let reconnectDelay = 500
+    const cursorKey = "flow2api.admin.events.cursor"
+
+    const scheduleRefresh = () => {
+      if (document.visibilityState !== "visible" || refreshTimer !== null) return
+      refreshTimer = window.setTimeout(() => {
+        refreshTimer = null
+        void fetchLogsRef.current(true)
+      }, 150)
     }
-    const intervalId = window.setInterval(refreshIfVisible, 2000)
+
+    const applyProgress = (data: Record<string, unknown>) => {
+      const rawId = data.id ?? (data.task_kind === "request_log" ? data.task_id : null)
+      const id = Number(rawId)
+      if (!Number.isFinite(id)) return
+      setLogs((current) => current.map((row) => {
+        if (row.id !== id) return row
+        return {
+          ...row,
+          status_code: typeof data.status_code === "number" ? data.status_code : row.status_code,
+          status_text: typeof data.status_text === "string" ? data.status_text : row.status_text,
+          progress: typeof data.progress === "number" ? data.progress : row.progress,
+          duration: typeof data.duration === "number" ? data.duration : row.duration,
+          updated_at: new Date().toISOString(),
+        }
+      }))
+    }
+
+    const connect = () => {
+      if (stopped) return
+      const cursor = sessionStorage.getItem(cursorKey) || "$"
+      const scheme = window.location.protocol === "https:" ? "wss" : "ws"
+      socket = new WebSocket(
+        `${scheme}://${window.location.host}/api/admin/events/ws?cursor=${encodeURIComponent(cursor)}`
+      )
+      socket.onopen = () => {
+        reconnectDelay = 500
+      }
+      socket.onmessage = (message) => {
+        try {
+          const event = JSON.parse(String(message.data || "{}")) as {
+            type?: string
+            cursor?: string
+            data?: Record<string, unknown>
+          }
+          if (event.cursor && event.cursor !== "$") sessionStorage.setItem(cursorKey, event.cursor)
+          const data = event.data || {}
+          if (event.type === "task_progress" || event.type === "request_summary_updated") {
+            applyProgress(data)
+            if (
+              Number(data.status_code || 0) >= 200 ||
+              ["completed", "failed", "cancelled", "canceled", "error", "timeout"].includes(String(data.status_text || "").toLowerCase())
+            ) {
+              scheduleRefresh()
+            }
+          }
+          if (event.type === "request_summary_created" || event.type === "resync") {
+            scheduleRefresh()
+          }
+        } catch {
+          // Ignore malformed or forward-compatible event frames.
+        }
+      }
+      socket.onclose = () => {
+        socket = null
+        if (stopped) return
+        reconnectTimer = window.setTimeout(connect, reconnectDelay)
+        reconnectDelay = Math.min(reconnectDelay * 2, 10_000)
+      }
+      socket.onerror = () => socket?.close()
+    }
+
+    const refreshIfVisible = () => {
+      if (document.visibilityState === "visible") {
+        void fetchLogsRef.current(true)
+        if (!socket && reconnectTimer === null) connect()
+      }
+    }
+    connect()
     document.addEventListener("visibilitychange", refreshIfVisible)
     return () => {
-      window.clearInterval(intervalId)
+      stopped = true
+      socket?.close()
+      if (reconnectTimer !== null) window.clearTimeout(reconnectTimer)
+      if (refreshTimer !== null) window.clearTimeout(refreshTimer)
       document.removeEventListener("visibilitychange", refreshIfVisible)
     }
-  }, [token, fetchLogs])
+  }, [token])
 
   const clearLogs = async () => {
     if (!token) return

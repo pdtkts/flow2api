@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import secrets
+import signal
 import shutil
 import sqlite3
 import tarfile
@@ -24,6 +25,16 @@ from ..core.config import config, get_runtime_data_dir, get_runtime_tmp_dir
 from ..core.logger import debug_logger
 from .browser_metrics_cleanup import cleanup_browser_metrics
 from .browser_profile_service import BrowserProfileService
+from .postgres_backup import (
+    ENCRYPTED_BACKUP_FORMAT_VERSION,
+    PostgresBackupError,
+    create_postgres_archive,
+    decrypt_and_extract_postgres_archive,
+    load_backup_keys,
+    restore_postgres_dump,
+    verify_restored_row_counts,
+)
+from .redis_runtime import redis_runtime
 
 
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
@@ -34,6 +45,21 @@ OAUTH_SCOPES = "openid email https://www.googleapis.com/auth/drive.file"
 BACKUP_FOLDER_NAME = "Flow2API Backups"
 BACKUP_FORMAT_VERSION = 1
 UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024
+VOLATILE_PROFILE_DIRECTORIES = {
+    "BrowserMetrics",
+    "Cache",
+    "Code Cache",
+    "Crashpad",
+    "DawnGraphiteCache",
+    "DawnWebGPUCache",
+    "GPUCache",
+    "GrShaderCache",
+    "GraphiteDawnCache",
+    "Sessions",
+    "ShaderCache",
+    "component_crx_cache",
+    "extensions_crx_cache",
+}
 
 
 class GoogleDriveBackupError(RuntimeError):
@@ -46,6 +72,15 @@ def _utc_now() -> datetime:
 
 def _iso_now() -> str:
     return _utc_now().isoformat()
+
+
+def _schedule_restore_restart() -> bool:
+    enabled = str(
+        os.environ.get("FLOW2API_AUTO_RESTART_AFTER_RESTORE", "true") or "true"
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    if enabled:
+        asyncio.get_running_loop().call_later(2.0, os.kill, os.getpid(), signal.SIGTERM)
+    return enabled
 
 
 def _atomic_json(path: Path, payload: dict[str, Any], *, mode: Optional[int] = None) -> None:
@@ -97,7 +132,7 @@ def _excluded_profile_path(relative: Path) -> bool:
     names = set(relative.parts)
     name = relative.name
     return (
-        "BrowserMetrics" in names
+        bool(VOLATILE_PROFILE_DIRECTORIES.intersection(names))
         or name.startswith("Singleton")
         or name.endswith(".part")
     )
@@ -249,6 +284,7 @@ class GoogleDriveBackupService:
             "last_backup_status": None,
             "last_backup_error": None,
             "last_automatic_date": None,
+            "last_rollback_cleanup_date": None,
         }
 
     @property
@@ -285,6 +321,10 @@ class GoogleDriveBackupService:
         credentials = self._credentials()
         job = self._sanitize_job(self._job)
         return {
+            "database_backend": getattr(self.database, "backend", "sqlite"),
+            "database_revision": getattr(self.database, "database_revision", None),
+            "encryption_configured": self._encryption_configured(),
+            "encryption_key_id": str(os.environ.get("FLOW2API_BACKUP_ACTIVE_KEY_ID", "") or "") or None,
             "oauth_configured": self.oauth_configured,
             "connected": bool(credentials.get("refresh_token")),
             "account_email": credentials.get("account_email") or None,
@@ -298,6 +338,15 @@ class GoogleDriveBackupService:
             "last_backup_error": self._config.get("last_backup_error"),
             "job": job or None,
         }
+
+    def _encryption_configured(self) -> bool:
+        if getattr(self.database, "backend", "sqlite") != "postgres":
+            return False
+        try:
+            load_backup_keys()
+            return True
+        except PostgresBackupError:
+            return False
 
     @staticmethod
     def _sanitize_job(job: dict[str, Any]) -> dict[str, Any]:
@@ -512,6 +561,20 @@ class GoogleDriveBackupService:
         while True:
             try:
                 await asyncio.sleep(30)
+                cleanup_date = _utc_now().date().isoformat()
+                if (
+                    self._credentials().get("refresh_token")
+                    and self._config.get("last_rollback_cleanup_date") != cleanup_date
+                ):
+                    try:
+                        await self._cleanup_expired_rollback_backups()
+                    except Exception as exc:
+                        debug_logger.log_warning(
+                            f"[GoogleDriveBackup] rollback cleanup failed: {type(exc).__name__}"
+                        )
+                    else:
+                        self._config["last_rollback_cleanup_date"] = cleanup_date
+                        _atomic_json(self.config_path, self._config)
                 if not self._config.get("enabled"):
                     continue
                 zone = ZoneInfo(str(self._config.get("timezone") or "Asia/Karachi"))
@@ -543,6 +606,8 @@ class GoogleDriveBackupService:
                 raise GoogleDriveBackupError("A Google Drive backup or restore job is already running")
             if not self._credentials().get("refresh_token"):
                 raise GoogleDriveBackupError("Google Drive is not connected")
+            if getattr(self.database, "backend", "sqlite") == "postgres" and not self._encryption_configured():
+                raise GoogleDriveBackupError("Configure PostgreSQL backup encryption keys first")
             job_id = uuid.uuid4().hex
             self._job = {
                 "id": job_id,
@@ -576,7 +641,9 @@ class GoogleDriveBackupService:
 
     async def _perform_backup(self, job_id: str, backup_type: str) -> dict[str, Any]:
         working_dir = self.tmp_root / f"job-{job_id}"
-        archive_path = working_dir / f"flow2api-{backup_type}-{_utc_now().strftime('%Y%m%dT%H%M%SZ')}.tar.gz"
+        is_postgres = getattr(self.database, "backend", "sqlite") == "postgres"
+        extension = ".f2a" if is_postgres else ".tar.gz"
+        archive_path = working_dir / f"flow2api-{backup_type}-{_utc_now().strftime('%Y%m%dT%H%M%SZ')}{extension}"
         shutil.rmtree(working_dir, ignore_errors=True)
         working_dir.mkdir(parents=True, exist_ok=False)
         try:
@@ -586,16 +653,27 @@ class GoogleDriveBackupService:
                 await profile_service.close_all()
             await asyncio.to_thread(cleanup_browser_metrics)
             self._job["stage"] = "creating_archive"
-            manifest = await asyncio.to_thread(
-                _build_archive,
-                Path(self.database.db_path),
-                self.profiles_root,
-                working_dir,
-                archive_path,
-                backup_id=job_id,
-                backup_type=backup_type,
-                app_version=self.app_version,
-            )
+            if is_postgres:
+                manifest = await create_postgres_archive(
+                    self.database,
+                    self.profiles_root,
+                    working_dir,
+                    archive_path,
+                    backup_id=job_id,
+                    backup_type=backup_type,
+                    app_version=self.app_version,
+                )
+            else:
+                manifest = await asyncio.to_thread(
+                    _build_archive,
+                    Path(self.database.db_path),
+                    self.profiles_root,
+                    working_dir,
+                    archive_path,
+                    backup_id=job_id,
+                    backup_type=backup_type,
+                    app_version=self.app_version,
+                )
             self._job["bytes_total"] = archive_path.stat().st_size
             self._job["stage"] = "uploading"
             remote = await self._upload_archive(archive_path, manifest, backup_type)
@@ -613,19 +691,30 @@ class GoogleDriveBackupService:
         metadata = {
             "name": archive_path.name,
             "parents": [folder_id],
-            "mimeType": "application/gzip",
+            "mimeType": "application/octet-stream" if manifest.get("database_backend") == "postgres" else "application/gzip",
             "appProperties": {
                 "flow2apiBackup": "true",
                 "backupType": backup_type,
-                "formatVersion": str(BACKUP_FORMAT_VERSION),
+                "formatVersion": str(manifest.get("format_version") or BACKUP_FORMAT_VERSION),
                 "backupId": str(manifest["backup_id"]),
-                "archiveSha256": str(manifest["archive_sha256"]),
+                "archiveSha256": str(
+                    manifest.get("encrypted_archive_sha256") or manifest.get("archive_sha256") or ""
+                ),
+                "databaseBackend": str(manifest.get("database_backend") or "sqlite"),
+                "databaseRevision": str(manifest.get("database_revision") or ""),
+                "encryptionKeyId": str(manifest.get("encryption_key_id") or ""),
+                "backupFormat": str(manifest.get("dump_format") or "sqlite-snapshot"),
+                **(
+                    {"rollbackExpiresAt": (_utc_now() + timedelta(days=7)).isoformat()}
+                    if backup_type.startswith(("pre-change", "pre_change", "pre-restore", "pre_restore"))
+                    else {}
+                ),
             },
         }
         total = archive_path.stat().st_size
         headers = {
             "Authorization": f"Bearer {token}",
-            "X-Upload-Content-Type": "application/gzip",
+            "X-Upload-Content-Type": metadata["mimeType"],
             "X-Upload-Content-Length": str(total),
             "Content-Type": "application/json; charset=UTF-8",
         }
@@ -689,6 +778,12 @@ class GoogleDriveBackupService:
             "backup_type": properties.get("backupType"),
             "backup_id": properties.get("backupId"),
             "sha256": properties.get("archiveSha256"),
+            "rollback_expires_at": properties.get("rollbackExpiresAt"),
+            "database_backend": properties.get("databaseBackend") or "sqlite",
+            "database_revision": properties.get("databaseRevision") or None,
+            "encryption_key_id": properties.get("encryptionKeyId") or None,
+            "backup_format": properties.get("backupFormat") or "sqlite-snapshot",
+            "format_version": int(properties.get("formatVersion") or 1),
         }
 
     async def delete_backup(self, file_id: str) -> None:
@@ -702,6 +797,24 @@ class GoogleDriveBackupService:
         retention = int(self._config.get("retention") or 14)
         for item in automatic[retention:]:
             await self._drive_json("DELETE", f"/files/{item['id']}")
+
+    async def _cleanup_expired_rollback_backups(self) -> int:
+        now = _utc_now()
+        deleted = 0
+        for item in await self.list_backups():
+            expires_raw = str(item.get("rollback_expires_at") or "").strip()
+            if not expires_raw:
+                continue
+            try:
+                expires_at = datetime.fromisoformat(expires_raw.replace("Z", "+00:00"))
+                if expires_at.tzinfo is None:
+                    expires_at = expires_at.replace(tzinfo=timezone.utc)
+            except ValueError:
+                continue
+            if expires_at <= now:
+                await self._drive_json("DELETE", f"/files/{item['id']}")
+                deleted += 1
+        return deleted
 
     async def _download_backup(self, file_id: str, destination: Path) -> dict[str, Any]:
         backups = {str(item.get("id")): item for item in await self.list_backups()}
@@ -756,6 +869,9 @@ class GoogleDriveBackupService:
             return self._sanitize_job(self._job)
 
     async def _run_restore(self, job_id: str, file_id: str) -> None:
+        if getattr(self.database, "backend", "sqlite") == "postgres":
+            await self._run_postgres_restore(job_id, file_id)
+            return
         working_dir = self.tmp_root / f"restore-{job_id}"
         archive_path = working_dir / "restore.tar.gz"
         extracted = working_dir / "extracted"
@@ -813,5 +929,237 @@ class GoogleDriveBackupService:
                 status="failed", stage="failed", finished_at=_iso_now(), error=str(exc)[:300]
             )
             debug_logger.log_warning(f"[GoogleDriveBackup] restore failed: {type(exc).__name__}")
+        finally:
+            await asyncio.to_thread(shutil.rmtree, working_dir, True)
+
+    async def _apply_restored_profiles(self, extracted: Path, rollback_profiles: Path) -> None:
+        staged_profiles = extracted / "browser_profiles"
+        rollback_profiles.parent.mkdir(parents=True, exist_ok=True)
+        await asyncio.to_thread(shutil.rmtree, rollback_profiles, True)
+        if self.profiles_root.exists():
+            os.replace(self.profiles_root, rollback_profiles)
+        try:
+            if staged_profiles.exists():
+                os.replace(staged_profiles, self.profiles_root)
+            else:
+                self.profiles_root.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            await asyncio.to_thread(shutil.rmtree, self.profiles_root, True)
+            if rollback_profiles.exists():
+                os.replace(rollback_profiles, self.profiles_root)
+            raise
+
+    async def _wait_for_restore_drain(self, timeout_seconds: int = 300) -> dict[str, int]:
+        deadline = time.monotonic() + max(1, int(timeout_seconds))
+        remaining = {"redis": 0, "runway": 0, "geminigen": 0}
+        while True:
+            redis_total = 0
+            async for key in redis_runtime.client.scan_iter(match="flow2api:inflight:*"):
+                try:
+                    redis_total += max(0, int(await redis_runtime.client.get(key) or 0))
+                except (TypeError, ValueError):
+                    continue
+            async with self.database._connect() as connection:
+                runway_cursor = await connection.execute(
+                    "SELECT COALESCE(SUM(in_flight), 0) AS count FROM runway_accounts"
+                )
+                gemini_cursor = await connection.execute(
+                    """
+                    SELECT COALESCE(SUM(image_in_flight + video_in_flight), 0) AS count
+                    FROM geminigen_accounts
+                    """
+                )
+                runway_total = int((await runway_cursor.fetchone())["count"] or 0)
+                gemini_total = int((await gemini_cursor.fetchone())["count"] or 0)
+            remaining = {
+                "redis": redis_total,
+                "runway": runway_total,
+                "geminigen": gemini_total,
+            }
+            if not any(remaining.values()):
+                return remaining
+            if time.monotonic() >= deadline:
+                raise GoogleDriveBackupError(
+                    f"Active work did not drain before restore: {remaining}"
+                )
+            await asyncio.sleep(1)
+
+    async def _restore_downloaded_postgres_archive(
+        self,
+        encrypted_path: Path,
+        working_dir: Path,
+        rollback_profiles: Path,
+        *,
+        on_database_restore_start: Callable[[], None] | None = None,
+    ) -> dict[str, Any]:
+        working_dir.mkdir(parents=True, exist_ok=True)
+        manifest, extracted = await decrypt_and_extract_postgres_archive(encrypted_path, working_dir)
+        self._job["stage"] = "restoring_database"
+        if on_database_restore_start is not None:
+            on_database_restore_start()
+        await restore_postgres_dump(self.database, extracted / "database" / "flow2api.dump")
+        await verify_restored_row_counts(self.database, manifest.get("row_counts") or {})
+        self._job["stage"] = "restoring_profiles"
+        await self._apply_restored_profiles(extracted, rollback_profiles)
+        await self.database.reload_config_to_memory()
+        return manifest
+
+    async def _run_postgres_restore(self, job_id: str, file_id: str) -> None:
+        working_dir = self.tmp_root / f"restore-{job_id}"
+        archive_path = working_dir / "restore.f2a"
+        rollback_profiles = self.profiles_root.with_name(f"browser_profiles.pre-restore-{job_id}")
+        pre_restore_remote: dict[str, Any] | None = None
+        maintenance_set = False
+        rollback_succeeded = False
+        restore_started = False
+        try:
+            working_dir.mkdir(parents=True, exist_ok=False)
+            known_backups = {str(item.get("id")): item for item in await self.list_backups()}
+            selected_metadata = known_backups.get(file_id)
+            if not selected_metadata:
+                raise GoogleDriveBackupError("Backup file was not found in the private backup folder")
+            if selected_metadata.get("database_backend") != "postgres":
+                raise GoogleDriveBackupError(
+                    "SQLite rollback artifacts cannot be restored into PostgreSQL"
+                )
+            if not redis_runtime.ready:
+                raise GoogleDriveBackupError("Redis is required for PostgreSQL restore maintenance")
+            await redis_runtime.set_maintenance(
+                True,
+                reason="postgres_restore",
+                owner="google_drive_restore",
+            )
+            maintenance_set = True
+            self._job["stage"] = "draining"
+            await self._wait_for_restore_drain(300)
+            self._job["stage"] = "safety_backup"
+            pre_restore_remote = await self._perform_backup(
+                f"pre-restore-{job_id}", "pre_restore"
+            )
+            self._job.update(stage="downloading", bytes_total=0, bytes_transferred=0)
+            await self._download_backup(file_id, archive_path)
+            self._job["stage"] = "validating"
+            profile_service = BrowserProfileService.get_existing_instance()
+            if profile_service is not None:
+                await profile_service.close_all()
+
+            def mark_restore_started() -> None:
+                nonlocal restore_started
+                restore_started = True
+
+            manifest = await self._restore_downloaded_postgres_archive(
+                archive_path,
+                working_dir / "selected",
+                rollback_profiles,
+                on_database_restore_start=mark_restore_started,
+            )
+            async with self.database._connect(write=True) as connection:
+                await connection.execute(
+                    """
+                    INSERT INTO system_metadata (key, value, updated_at)
+                    VALUES ('last_restore_at', ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP
+                    """,
+                    (_iso_now(),),
+                )
+                await connection.execute(
+                    """
+                    INSERT INTO system_metadata (key, value, updated_at)
+                    VALUES ('last_restore_backup_id', ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP
+                    """,
+                    (str(manifest.get("backup_id") or file_id),),
+                )
+                await connection.commit()
+            health = await self.database.health_snapshot()
+            if not health.get("database_ready"):
+                raise GoogleDriveBackupError("PostgreSQL did not become ready after restore")
+            restore_status = {
+                "status": "restart_pending",
+                "backup_id": str(manifest.get("backup_id") or file_id),
+                "restored_at": _iso_now(),
+            }
+            await redis_runtime.client.set(
+                "flow2api:restore:status",
+                json.dumps(restore_status, separators=(",", ":")),
+            )
+            await asyncio.to_thread(shutil.rmtree, rollback_profiles, True)
+            self._job.update(
+                status="completed",
+                stage="restart_pending",
+                finished_at=_iso_now(),
+                restart_required=True,
+            )
+            _schedule_restore_restart()
+        except Exception as exc:
+            rollback_error: Exception | None = None
+            if restore_started and pre_restore_remote and pre_restore_remote.get("id"):
+                try:
+                    recovery_dir = working_dir / "recovery"
+                    recovery_dir.mkdir(parents=True, exist_ok=True)
+                    recovery_archive = recovery_dir / "pre-restore.f2a"
+                    await self._download_backup(str(pre_restore_remote["id"]), recovery_archive)
+                    await self._restore_downloaded_postgres_archive(
+                        recovery_archive,
+                        recovery_dir / "unpacked",
+                        rollback_profiles,
+                    )
+                    await asyncio.to_thread(shutil.rmtree, rollback_profiles, True)
+                    rollback_succeeded = True
+                except Exception as rollback_exc:
+                    rollback_error = rollback_exc
+                    debug_logger.log_warning(
+                        f"[GoogleDriveBackup] PostgreSQL restore rollback failed: {type(rollback_exc).__name__}"
+                    )
+            if rollback_succeeded:
+                rollback_status = {
+                    "status": "rollback_restart_pending",
+                    "failed_backup_id": file_id,
+                    "rolled_back_at": _iso_now(),
+                    "error": str(exc)[:300],
+                }
+                try:
+                    await redis_runtime.client.set(
+                        "flow2api:restore:status",
+                        json.dumps(rollback_status, separators=(",", ":")),
+                    )
+                except Exception:
+                    pass
+                _schedule_restore_restart()
+            elif restore_started:
+                failure_status = {
+                    "status": "rollback_failed",
+                    "failed_backup_id": file_id,
+                    "failed_at": _iso_now(),
+                    "error": str(exc)[:300],
+                    "rollback_error": str(rollback_error or "pre-restore backup unavailable")[:300],
+                }
+                try:
+                    await redis_runtime.client.set(
+                        "flow2api:restore:status",
+                        json.dumps(failure_status, separators=(",", ":")),
+                        ex=7 * 24 * 3600,
+                    )
+                except Exception:
+                    pass
+            elif maintenance_set:
+                try:
+                    await redis_runtime.set_maintenance(False, reason="restore_failed")
+                except Exception:
+                    pass
+            self._job.update(
+                status="failed",
+                stage=(
+                    "rollback_restart_pending"
+                    if rollback_succeeded
+                    else "rollback_failed" if restore_started else "failed"
+                ),
+                finished_at=_iso_now(),
+                error=str(exc)[:300],
+                restart_required=rollback_succeeded,
+            )
+            debug_logger.log_warning(
+                f"[GoogleDriveBackup] PostgreSQL restore failed: {type(exc).__name__}"
+            )
         finally:
             await asyncio.to_thread(shutil.rmtree, working_dir, True)

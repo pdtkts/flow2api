@@ -34,13 +34,15 @@ services:
       - NOVNC_PORT=${NOVNC_PORT:-6080}
       - VNC_PASSWORD=${VNC_PASSWORD:-}
       - FLOW2API_API_ONLY_HOST=${FLOW2API_API_ONLY_HOST:-flow-api.prismacreative.online}
-      - FLOW2API_DB_URL=${FLOW2API_DB_URL:-postgresql://flow2api:flow2api@postgres:5432/flow2api}
       - FLOW2API_REDIS_URL=${FLOW2API_REDIS_URL:-redis://redis:6379/0}
+      - FLOW2API_REDIS_MODE=${FLOW2API_REDIS_MODE:-shadow}
+      - FLOW2API_DATABASE_BACKEND=${FLOW2API_DATABASE_BACKEND:-sqlite}
+      - FLOW2API_DATABASE_URL=${FLOW2API_DATABASE_URL:-}
+      - FLOW2API_DB_SCHEMA=${FLOW2API_DB_SCHEMA:-flow2api}
+      - FLOW2API_REQUIRE_CUTOVER_MARKER=${FLOW2API_REQUIRE_CUTOVER_MARKER:-true}
     shm_size: ${SHM_SIZE:-2gb}
     restart: unless-stopped
     depends_on:
-      postgres:
-        condition: service_healthy
       redis:
         condition: service_healthy
 
@@ -69,25 +71,12 @@ services:
   redis:
     image: redis:7-alpine
     container_name: agent-gateway-redis
-    command: ["redis-server", "--appendonly", "yes"]
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec", "--maxmemory", "384mb", "--maxmemory-policy", "noeviction"]
+    mem_limit: 512m
+    volumes:
+      - flow2api-headed-redis-data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    restart: unless-stopped
-
-  postgres:
-    image: postgres:16-alpine
-    container_name: flow2api-headed-postgres
-    environment:
-      - POSTGRES_USER=${POSTGRES_USER:-flow2api}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-flow2api}
-      - POSTGRES_DB=${POSTGRES_DB:-flow2api}
-    volumes:
-      - flow2api-headed-postgres-data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-flow2api} -d ${POSTGRES_DB:-flow2api}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -105,4 +94,4 @@ services:
     restart: unless-stopped
 
 volumes:
-  flow2api-headed-postgres-data:
+  flow2api-headed-redis-data:

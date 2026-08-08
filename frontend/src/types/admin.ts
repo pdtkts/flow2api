@@ -139,6 +139,8 @@ export interface LogListItem {
   progress?: number | null
   created_at?: string | null
   updated_at?: string | null
+  payload_available?: boolean
+  payload_storage_error?: string | null
   error_summary?: string
   captcha_user_agent_set?: boolean
   captcha_provider?: string | null
@@ -148,6 +150,8 @@ export interface LogListItem {
 export interface LogDetail extends LogListItem {
   request_body?: string | null
   response_body?: string | null
+  request_size_bytes?: number
+  response_size_bytes?: number
 }
 
 export interface ImportTokenItem {

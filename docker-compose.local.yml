@@ -16,7 +16,10 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - FLOW2API_API_ONLY_HOST=${FLOW2API_API_ONLY_HOST:-}
-      - FLOW2API_DB_URL=${FLOW2API_DB_URL:-postgresql://flow2api:flow2api@postgres:5432/flow2api}
+      - FLOW2API_DATABASE_BACKEND=${FLOW2API_DATABASE_BACKEND:-postgres}
+      - FLOW2API_DATABASE_URL=${FLOW2API_DATABASE_URL:-postgresql://flow2api:flow2api@postgres:5432/flow2api}
+      - FLOW2API_DB_SCHEMA=${FLOW2API_DB_SCHEMA:-flow2api}
+      - FLOW2API_REQUIRE_CUTOVER_MARKER=${FLOW2API_REQUIRE_CUTOVER_MARKER:-false}
       - FLOW2API_REDIS_URL=${FLOW2API_REDIS_URL:-redis://redis:6379/0}
     depends_on:
       postgres:

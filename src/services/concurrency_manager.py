@@ -3,12 +3,13 @@ import asyncio
 import time
 from typing import Dict, Optional
 from ..core.logger import debug_logger
+from .redis_runtime import RedisRuntime, RedisUnavailableError
 
 
 class ConcurrencyManager:
     """Manages concurrent request limits for each token"""
 
-    def __init__(self):
+    def __init__(self, redis_runtime: Optional[RedisRuntime] = None):
         """Initialize concurrency manager"""
         # token_id -> max concurrency limit (only stores >0 values, missing means unlimited)
         self._image_limits: Dict[int, int] = {}
@@ -17,6 +18,7 @@ class ConcurrencyManager:
         self._image_inflight: Dict[int, int] = {}
         self._video_inflight: Dict[int, int] = {}
         self._lock = asyncio.Lock()  # Protect concurrent access
+        self.redis_runtime = redis_runtime
 
     async def initialize(self, tokens: list):
         """
@@ -43,6 +45,10 @@ class ConcurrencyManager:
                     self._video_limits[token.id] = token.video_concurrency
 
             debug_logger.log_info(f"Concurrency manager initialized with {len(tokens)} tokens")
+        if self.redis_runtime is not None and self.redis_runtime.ready:
+            await self.redis_runtime.initialize_inflight(
+                [int(token.id) for token in tokens if getattr(token, "id", None) is not None]
+            )
 
     async def can_use_image(self, token_id: int) -> bool:
         """
@@ -54,6 +60,12 @@ class ConcurrencyManager:
         Returns:
             True if token has available image concurrency, False if concurrency is 0
         """
+        runtime = self.redis_runtime
+        if runtime is not None and runtime.required and runtime.ready:
+            remote = await runtime.get_inflight("image", token_id)
+            limit = self._image_limits.get(token_id)
+            if remote is not None and limit is not None:
+                return remote < limit
         async with self._lock:
             limit = self._image_limits.get(token_id)
             # Missing limit means unlimited (-1)
@@ -79,6 +91,12 @@ class ConcurrencyManager:
         Returns:
             True if token has available video concurrency, False if concurrency is 0
         """
+        runtime = self.redis_runtime
+        if runtime is not None and runtime.required and runtime.ready:
+            remote = await runtime.get_inflight("video", token_id)
+            limit = self._video_limits.get(token_id)
+            if remote is not None and limit is not None:
+                return remote < limit
         async with self._lock:
             limit = self._video_limits.get(token_id)
             # Missing limit means unlimited (-1)
@@ -104,6 +122,19 @@ class ConcurrencyManager:
         Returns:
             True if acquired, False if not available
         """
+        runtime = self.redis_runtime
+        if runtime is not None and runtime.required:
+            if not runtime.ready:
+                return False
+            try:
+                acquired, remote_count = await runtime.acquire_inflight(
+                    "image", token_id, self._image_limits.get(token_id)
+                )
+            except RedisUnavailableError:
+                return False
+            async with self._lock:
+                self._image_inflight[token_id] = remote_count
+            return acquired
         async with self._lock:
             limit = self._image_limits.get(token_id)
             inflight = self._image_inflight.get(token_id, 0)
@@ -117,7 +148,12 @@ class ConcurrencyManager:
                 debug_logger.log_info(f"Token {token_id} acquired image slot (inflight: {new_inflight}, limit: unlimited)")
             else:
                 debug_logger.log_info(f"Token {token_id} acquired image slot (inflight: {new_inflight}/{limit})")
-            return True
+        if runtime is not None and runtime.ready and runtime.mode == "shadow":
+            try:
+                await runtime.acquire_inflight("image", token_id, limit)
+            except RedisUnavailableError:
+                pass
+        return True
 
     async def wait_acquire_image(self, token_id: int, timeout_seconds: float) -> tuple[bool, int]:
         """等待获取图片硬并发槽位，避免请求在短暂竞争下直接失败。"""
@@ -163,6 +199,19 @@ class ConcurrencyManager:
         Returns:
             True if acquired, False if not available
         """
+        runtime = self.redis_runtime
+        if runtime is not None and runtime.required:
+            if not runtime.ready:
+                return False
+            try:
+                acquired, remote_count = await runtime.acquire_inflight(
+                    "video", token_id, self._video_limits.get(token_id)
+                )
+            except RedisUnavailableError:
+                return False
+            async with self._lock:
+                self._video_inflight[token_id] = remote_count
+            return acquired
         async with self._lock:
             limit = self._video_limits.get(token_id)
             inflight = self._video_inflight.get(token_id, 0)
@@ -176,7 +225,12 @@ class ConcurrencyManager:
                 debug_logger.log_info(f"Token {token_id} acquired video slot (inflight: {new_inflight}, limit: unlimited)")
             else:
                 debug_logger.log_info(f"Token {token_id} acquired video slot (inflight: {new_inflight}/{limit})")
-            return True
+        if runtime is not None and runtime.ready and runtime.mode == "shadow":
+            try:
+                await runtime.acquire_inflight("video", token_id, limit)
+            except RedisUnavailableError:
+                pass
+        return True
 
     async def release_image(self, token_id: int):
         """
@@ -185,6 +239,13 @@ class ConcurrencyManager:
         Args:
             token_id: Token ID
         """
+        runtime = self.redis_runtime
+        if runtime is not None and runtime.ready:
+            remote_count = await runtime.release_inflight("image", token_id)
+            if runtime.required:
+                async with self._lock:
+                    self._image_inflight[token_id] = remote_count
+                return
         async with self._lock:
             inflight = self._image_inflight.get(token_id, 0)
             if inflight <= 0:
@@ -207,6 +268,13 @@ class ConcurrencyManager:
         Args:
             token_id: Token ID
         """
+        runtime = self.redis_runtime
+        if runtime is not None and runtime.ready:
+            remote_count = await runtime.release_inflight("video", token_id)
+            if runtime.required:
+                async with self._lock:
+                    self._video_inflight[token_id] = remote_count
+                return
         async with self._lock:
             inflight = self._video_inflight.get(token_id, 0)
             if inflight <= 0:
@@ -258,11 +326,19 @@ class ConcurrencyManager:
 
     async def get_image_inflight(self, token_id: int) -> int:
         """Get current in-flight image request count for token"""
+        if self.redis_runtime is not None and self.redis_runtime.ready:
+            remote = await self.redis_runtime.get_inflight("image", token_id)
+            if remote is not None:
+                return remote
         async with self._lock:
             return self._image_inflight.get(token_id, 0)
 
     async def get_video_inflight(self, token_id: int) -> int:
         """Get current in-flight video request count for token"""
+        if self.redis_runtime is not None and self.redis_runtime.ready:
+            remote = await self.redis_runtime.get_inflight("video", token_id)
+            if remote is not None:
+                return remote
         async with self._lock:
             return self._video_inflight.get(token_id, 0)
 

@@ -13,6 +13,7 @@ from fastapi import HTTPException
 from ..core.config import config as app_config
 
 CLONING_PROVIDERS = [
+    "cliproxy",
     "gemini_native",
     "openai",
     "openrouter",
@@ -21,6 +22,7 @@ CLONING_PROVIDERS = [
 ]
 
 METADATA_PROVIDERS = [
+    "cliproxy",
     "gemini_native",
     "openai",
     "openrouter",
@@ -134,7 +136,7 @@ class LlmProviderChain:
         configured_order = [p.strip().lower() for p in str(provider_order_csv or "").split(",") if p.strip()]
         configured_order = [p for p in configured_order if p in allowed_set]
         if not configured_order:
-            configured_order = [legacy] + [p for p in allowed if p != legacy]
+            configured_order = list(allowed)
         else:
             configured_order = configured_order + [p for p in allowed if p not in configured_order]
 
@@ -207,9 +209,48 @@ class LlmProviderChain:
         deadline_at: Optional[float] = None,
     ) -> Dict[str, Any]:
         models = [model] + [m for m in (fallback_models or []) if m and m != model]
+        gateway_namespaces = {"codex", "gemini", "claude", "xai", "kimi", "vertex"}
+
+        def is_gateway_model(value: str) -> bool:
+            return "/" in str(value or "") and str(value).split("/", 1)[0] in gateway_namespaces
+
+        if provider == "cliproxy":
+            gateway_models = [candidate for candidate in models if is_gateway_model(candidate)]
+            if gateway_models:
+                models = gateway_models
+        else:
+            downstream_models: List[str] = []
+            for candidate in models:
+                if not is_gateway_model(candidate):
+                    downstream_models.append(candidate)
+                    continue
+                namespace, raw_model = candidate.split("/", 1)
+                if provider == "openai" and namespace == "codex":
+                    downstream_models.append(raw_model)
+                elif provider in {"gemini_native", "third_party_gemini"} and namespace == "gemini":
+                    downstream_models.append(raw_model)
+                elif provider == "openrouter":
+                    openrouter_namespaces = {
+                        "codex": "openai",
+                        "gemini": "google",
+                        "claude": "anthropic",
+                        "xai": "x-ai",
+                        "kimi": "moonshotai",
+                    }
+                    openrouter_namespace = openrouter_namespaces.get(namespace)
+                    if openrouter_namespace:
+                        downstream_models.append(
+                            raw_model if "/" in raw_model else f"{openrouter_namespace}/{raw_model}"
+                        )
+            if downstream_models:
+                models = list(dict.fromkeys(downstream_models))
         last_err: Optional[Exception] = None
         for candidate in models:
             try:
+                if provider == "cliproxy":
+                    return await self._invoke_cliproxy(
+                        candidate, prompt_text, image_bytes, mime_type, deadline_at
+                    )
                 if provider == "openai":
                     return await self._invoke_openai(
                         candidate, prompt_text, image_bytes, mime_type, use_cloning_credentials, deadline_at
@@ -231,6 +272,11 @@ class LlmProviderChain:
                 )
             except Exception as exc:
                 last_err = exc
+                if isinstance(exc, HTTPException) and int(exc.status_code) in {400, 404}:
+                    # A model rejected as unknown/incompatible should advance to
+                    # the next configured model without treating the provider
+                    # itself as unhealthy.
+                    continue
                 if not is_retryable_error(exc):
                     raise
                 continue
@@ -242,6 +288,27 @@ class LlmProviderChain:
                 detail=last_err.detail,
             ) from last_err
         raise HTTPException(status_code=500, detail=str(last_err)) from last_err
+
+    async def _invoke_cliproxy(
+        self,
+        model: str,
+        prompt_text: str,
+        image_bytes: Optional[bytes],
+        mime_type: str,
+        deadline_at: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        # Imported lazily to keep the management adapter independent from the
+        # provider-chain module during application startup.
+        from .cliproxy_client import CLIProxyInferenceClient
+
+        return await CLIProxyInferenceClient().chat_json(
+            model=model,
+            prompt_text=prompt_text,
+            image_bytes=image_bytes,
+            mime_type=mime_type,
+            timeout=_json_http_timeout(deadline_at),
+            max_tokens=_JSON_CHAT_MAX_TOKENS,
+        )
 
     async def _invoke_openai(
         self,

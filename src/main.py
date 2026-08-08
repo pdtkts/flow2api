@@ -3,11 +3,13 @@ import asyncio
 import errno
 import gc
 import heapq
+import json
 import os
 import shutil
 import sqlite3
 import sys
 import tempfile
+import time
 import warnings
 from datetime import datetime, timezone
 
@@ -21,12 +23,18 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from .core.config import config
-from .core.database import Database
+from .core.database import create_database
+from .core.postgres_database import DatabaseUnavailableError
 from .core.storage_errors import (
     is_sqlite_recoverable_storage_error,
     sqlite_operational_error_handler,
 )
-from .core.monitoring import CONTENT_TYPE_LATEST, render_main_metrics
+from .core.monitoring import (
+    CONTENT_TYPE_LATEST,
+    record_endpoint_duration,
+    render_main_metrics,
+    set_event_loop_lag,
+)
 from .services.flow_client import FlowClient
 from .services.proxy_manager import ProxyManager
 from .services.token_manager import TokenManager
@@ -39,6 +47,8 @@ from .services.st_refresh_reasons import describe_st_refresh_reason
 from .services.browser_profile_service import BrowserProfileService
 from .services.browser_metrics_cleanup import cleanup_browser_metrics
 from .services.google_drive_backup import GoogleDriveBackupService
+from .services.redis_runtime import redis_runtime
+from .services.failed_payload_store import failed_payload_manager
 from .api import routes, admin
 from .core.api_key_manager import ApiKeyManager
 from .core.auth import set_api_key_manager
@@ -207,6 +217,60 @@ class ApiOnlyHostMiddleware(BaseHTTPMiddleware):
         return JSONResponse({"detail": "Not Found"}, status_code=404)
 
 
+class PerformanceMetricsMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        started = time.perf_counter()
+        response = None
+        try:
+            response = await call_next(request)
+            return response
+        finally:
+            route_obj = request.scope.get("route")
+            route = getattr(route_obj, "path", None) or request.url.path
+            try:
+                request_bytes = max(0, int(request.headers.get("content-length", "0") or 0))
+            except (TypeError, ValueError):
+                request_bytes = 0
+            record_endpoint_duration(
+                request.method,
+                route,
+                getattr(response, "status_code", 500),
+                time.perf_counter() - started,
+                request_bytes,
+            )
+
+
+class MaintenanceMiddleware(BaseHTTPMiddleware):
+    """Block new submissions and admin mutations while Redis maintenance is active."""
+
+    _ALLOWED_MUTATION_PREFIXES = (
+        "/api/admin/maintenance",
+        "/api/admin/backups/google-drive",
+    )
+    _ALLOWED_MUTATION_PATHS = {
+        "/api/admin/login",
+        "/api/admin/logout",
+        "/api/login",
+        "/api/logout",
+    }
+
+    async def dispatch(self, request: Request, call_next):
+        method = request.method.upper()
+        path = request.url.path.rstrip("/") or "/"
+        if (
+            redis_runtime.maintenance_active
+            and method not in {"GET", "HEAD", "OPTIONS"}
+            and path not in self._ALLOWED_MUTATION_PATHS
+            and not path.startswith(self._ALLOWED_MUTATION_PREFIXES)
+        ):
+            return JSONResponse(
+                {"detail": "maintenance"},
+                status_code=503,
+                headers={"Retry-After": "5"},
+            )
+        return await call_next(request)
+
+
 def _storage_recovery_diagnostic(stats: dict) -> str:
     return (
         "Flow2API startup blocked: storage I/O remains unavailable after cache recovery "
@@ -225,7 +289,7 @@ EMERGENCY_PRUNE_TABLES = (
     "api_key_audit_logs",
     "admin_sessions",
 )
-REQUEST_LOG_RETENTION_DAYS = 3
+REQUEST_LOG_RETENTION_DAYS = 7
 REQUEST_LOG_CLEANUP_INTERVAL_SECONDS = 12 * 3600
 
 
@@ -539,6 +603,7 @@ async def lifespan(app: FastAPI):
 
     # Check if database exists (determine if first startup)
     is_first_startup = not db.db_exists()
+    db.enable_persistent_connections()
 
     # Initialize database tables/configuration, reclaiming generated cache once on storage pressure.
     await _init_database_with_storage_recovery(
@@ -547,6 +612,9 @@ async def lifespan(app: FastAPI):
         config_dict=config_dict,
         is_first_startup=is_first_startup,
     )
+    await db.cache_schema_capabilities()
+    db.set_event_runtime(redis_runtime)
+    redis_warm = await redis_runtime.start(db)
 
     # 启动时统一把数据库配置同步到内存，避免 personal/brower 相关运行时配置遗漏。
     await db.reload_config_to_memory()
@@ -555,6 +623,11 @@ async def lifespan(app: FastAPI):
         config.cache_provider,
         config.cache_delivery_mode,
         validate=config.cache_provider == "digitalocean",
+    )
+    db.set_log_payload_manager(failed_payload_manager)
+    await failed_payload_manager.start(
+        db,
+        enabled=config.cache_provider == "digitalocean",
     )
     cache_cleanup_enabled = await generation_handler.file_cache.refresh_cleanup_task()
     await google_drive_backup_service.start()
@@ -619,6 +692,11 @@ async def lifespan(app: FastAPI):
 
     # Initialize concurrency manager
     await concurrency_manager.initialize(tokens)
+    if redis_runtime.ready:
+        print(
+            "OK Redis runtime warmed "
+            f"(auth_records={redis_warm['auth_records']}, active_tasks={redis_warm['active_tasks']})"
+        )
 
     if config.captcha_method == "remote_browser":
         try:
@@ -629,14 +707,48 @@ async def lifespan(app: FastAPI):
 
     # Start 429 auto-unban task
 
-    async def request_log_cleanup_task():
-        """Prune request log rows while leaving durable telemetry untouched."""
+    async def event_loop_lag_task():
+        interval = 0.5
+        expected = asyncio.get_running_loop().time() + interval
         while True:
             try:
-                deleted = await db.delete_request_logs_older_than(REQUEST_LOG_RETENTION_DAYS)
-                if deleted:
+                await asyncio.sleep(interval)
+                now = asyncio.get_running_loop().time()
+                set_event_loop_lag(max(0.0, now - expected))
+                expected = now + interval
+            except asyncio.CancelledError:
+                raise
+
+    event_loop_lag_handle = asyncio.create_task(event_loop_lag_task())
+
+    async def request_log_cleanup_task():
+        """Run bounded seven-day cleanup after the maintenance rollout enables it."""
+        while True:
+            try:
+                retention_enabled = str(os.environ.get("FLOW2API_RETENTION_ENABLED", "0") or "0").strip().lower() in {
+                    "1", "true", "yes", "on"
+                }
+                if not retention_enabled:
+                    await asyncio.sleep(3600)
+                    continue
+                if redis_runtime.maintenance_active:
+                    await asyncio.sleep(60)
+                    continue
+                totals: dict[str, int] = {}
+                for _ in range(100):
+                    batch = await db.cleanup_retention_batch(REQUEST_LOG_RETENTION_DAYS, 500)
+                    for key, value in batch.items():
+                        totals[key] = totals.get(key, 0) + int(value)
+                    if not any(int(value) for value in batch.values()):
+                        break
+                    await asyncio.sleep(0)
+                totals["spaces_payloads"] = await failed_payload_manager.cleanup_expired(
+                    REQUEST_LOG_RETENTION_DAYS
+                )
+                await db.optimize_after_retention()
+                if any(totals.values()):
                     debug_logger.log_info(
-                        f"[REQUEST_LOG_CLEANUP] Deleted {deleted} request log row(s) older than {REQUEST_LOG_RETENTION_DAYS} days"
+                        f"[RETENTION] seven-day cleanup totals={totals}"
                     )
                 await asyncio.sleep(REQUEST_LOG_CLEANUP_INTERVAL_SECONDS)
             except asyncio.CancelledError:
@@ -652,6 +764,8 @@ async def lifespan(app: FastAPI):
         while True:
             try:
                 await asyncio.sleep(3600)  # 每小时执行一次
+                if redis_runtime.maintenance_active:
+                    continue
                 await token_manager.auto_unban_429_tokens()
             except Exception as e:
                 print(f"ERR Auto-unban task error: {e}")
@@ -687,6 +801,8 @@ async def lifespan(app: FastAPI):
                 interval_minutes = max(1, int(config.session_refresh_scheduler_interval_minutes))
                 await asyncio.sleep(interval_minutes * 60)
                 if not config.session_refresh_scheduler_enabled:
+                    continue
+                if redis_runtime.maintenance_active:
                     continue
 
                 all_tokens = await token_manager.get_active_tokens()
@@ -753,6 +869,8 @@ async def lifespan(app: FastAPI):
                 await asyncio.sleep(interval_minutes * 60)
                 if not config.st_only_refresh_scheduler_enabled:
                     continue
+                if redis_runtime.maintenance_active:
+                    continue
 
                 all_tokens = await token_manager.get_active_tokens()
                 if not all_tokens:
@@ -818,8 +936,45 @@ async def lifespan(app: FastAPI):
                 debug_logger.log_error(f"[ST_SCHEDULER] task error: {e}")
 
     scheduled_st_only_refresh_handle = asyncio.create_task(scheduled_st_only_refresh_task())
-    token_manager.start_protocol_refresher()
     resumed_geminigen_tasks = await geminigen_service.resume_active_tasks()
+
+    # Restore/cutover maintenance is cleared only after the new PostgreSQL
+    # process has warmed Redis and recovered active tasks.
+    if getattr(db, "backend", "sqlite") == "postgres" and redis_runtime.ready:
+        raw_restore_status = await redis_runtime.client.get("flow2api:restore:status")
+        if isinstance(raw_restore_status, bytes):
+            raw_restore_status = raw_restore_status.decode("utf-8", errors="replace")
+        try:
+            restore_status = json.loads(raw_restore_status) if raw_restore_status else {}
+        except (TypeError, ValueError):
+            restore_status = {}
+        restore_state = str(restore_status.get("status") or "")
+        restore_restart_pending = restore_state in {
+            "restart_pending",
+            "rollback_restart_pending",
+        }
+        cutover_restart_pending = redis_runtime.maintenance_reason == "postgres_cutover"
+        if restore_restart_pending or cutover_restart_pending:
+            database_health = await db.health_snapshot()
+            if database_health.get("database_ready"):
+                await redis_runtime.set_maintenance(False, reason="readiness_verified")
+                if restore_status:
+                    restore_status.update(
+                        status=(
+                            "rollback_completed"
+                            if restore_state == "rollback_restart_pending"
+                            else "completed"
+                        ),
+                        readiness_verified_at=datetime.now(timezone.utc).isoformat(),
+                    )
+                    await redis_runtime.client.set(
+                        "flow2api:restore:status",
+                        json.dumps(restore_status, separators=(",", ":")),
+                        ex=7 * 24 * 3600,
+                    )
+
+    if not redis_runtime.maintenance_active:
+        token_manager.start_protocol_refresher()
 
     print("OK Database initialized")
     print(f"OK Total tokens: {len(tokens)}")
@@ -854,6 +1009,11 @@ async def lifespan(app: FastAPI):
         await request_log_cleanup_handle
     except asyncio.CancelledError:
         pass
+    event_loop_lag_handle.cancel()
+    try:
+        await event_loop_lag_handle
+    except asyncio.CancelledError:
+        pass
     auto_unban_task_handle.cancel()
     try:
         await auto_unban_task_handle
@@ -877,6 +1037,8 @@ async def lifespan(app: FastAPI):
     except asyncio.CancelledError:
         pass
     await token_manager.stop_protocol_refresher()
+    await failed_payload_manager.stop()
+    await redis_runtime.stop()
     profile_service = BrowserProfileService.get_existing_instance()
     if profile_service is not None:
         closed_profiles = await profile_service.close_all()
@@ -885,6 +1047,7 @@ async def lifespan(app: FastAPI):
     if browser_service:
         await browser_service.close()
         print("OK Browser captcha service closed")
+    await db.close_runtime_connections()
     print("OK File cache cleanup task stopped")
     print("OK Request log cleanup task stopped")
     print("OK 429 auto-unban task stopped")
@@ -895,11 +1058,11 @@ async def lifespan(app: FastAPI):
 
 
 # Initialize components
-db = Database()
+db = create_database()
 proxy_manager = ProxyManager(db)
 flow_client = FlowClient(proxy_manager, db)
 token_manager = TokenManager(db, flow_client)
-concurrency_manager = ConcurrencyManager()
+concurrency_manager = ConcurrencyManager(redis_runtime=redis_runtime)
 load_balancer = LoadBalancer(token_manager, concurrency_manager)
 generation_handler = GenerationHandler(
     flow_client,
@@ -912,7 +1075,11 @@ generation_handler = GenerationHandler(
 runway_service = RunwayService(db, generation_handler.file_cache, proxy_manager)
 geminigen_service = GeminiGenService(db, generation_handler.file_cache, proxy_manager)
 google_drive_backup_service = GoogleDriveBackupService(db, app_version="1.0.0")
-managed_api_key_manager = ApiKeyManager(db, legacy_api_key_provider=lambda: config.api_key)
+managed_api_key_manager = ApiKeyManager(
+    db,
+    legacy_api_key_provider=lambda: config.api_key,
+    redis_runtime=redis_runtime,
+)
 
 # Set dependencies
 routes.set_generation_handler(generation_handler)
@@ -939,8 +1106,21 @@ app = FastAPI(
 )
 app.add_exception_handler(sqlite3.OperationalError, sqlite_operational_error_handler)
 
+
+async def database_unavailable_handler(request: Request, exc: DatabaseUnavailableError):
+    return JSONResponse(
+        {"detail": "database_unavailable"},
+        status_code=503,
+        headers={"Retry-After": "5"},
+    )
+
+
+app.add_exception_handler(DatabaseUnavailableError, database_unavailable_handler)
+
 # CORS is added after this block so CORS is outer and still applies to 404s
 app.add_middleware(ApiOnlyHostMiddleware)
+app.add_middleware(PerformanceMetricsMiddleware)
+app.add_middleware(MaintenanceMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],

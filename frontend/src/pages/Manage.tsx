@@ -7,6 +7,7 @@ import { SystemSettings } from "../components/manage/SystemSettings"
 import { RequestLogs } from "../components/manage/RequestLogs"
 import { CacheManagement } from "../components/manage/CacheManagement"
 import { AgentGateway } from "../components/manage/AgentGateway"
+import { AIGateway } from "../components/manage/AIGateway"
 import { ApiKeyManagement } from "../components/manage/ApiKeyManagement"
 import { AdobeSettings } from "../components/manage/AdobeSettings"
 import { RunwaySettings } from "../components/manage/RunwaySettings"
@@ -15,7 +16,7 @@ import { cn } from "@/lib/utils"
 import { useAuth } from "../contexts/AuthContext"
 import { adminJson } from "../lib/adminApi"
 
-const MANAGE_TABS = ["tokens", "apikeys", "settings", "logs", "adobe", "runway", "geminigen", "cache", "agent"] as const
+const MANAGE_TABS = ["tokens", "apikeys", "settings", "logs", "adobe", "gateway", "runway", "geminigen", "cache", "agent"] as const
 type ManageTab = (typeof MANAGE_TABS)[number]
 
 function parseManageTab(raw: string | null): ManageTab {
@@ -31,10 +32,10 @@ export default function Manage() {
     () => parseManageTab(searchParams.get("tab")),
     [searchParams]
   )
-  const setTab = (v: string) => {
+  const setTab = useCallback((v: string) => {
     if (v === "tokens") setSearchParams({})
     else setSearchParams({ tab: v })
-  }
+  }, [setSearchParams])
   useEffect(() => {
     const raw = searchParams.get("tab")
     if (raw && !MANAGE_TABS.includes(raw as ManageTab)) {
@@ -52,18 +53,21 @@ export default function Manage() {
   }, [token])
 
   useEffect(() => {
-    void refreshAgentVisibility()
+    const initial = window.setTimeout(() => void refreshAgentVisibility(), 0)
     const timer = window.setInterval(() => {
       void refreshAgentVisibility()
     }, 5000)
-    return () => window.clearInterval(timer)
+    return () => {
+      window.clearTimeout(initial)
+      window.clearInterval(timer)
+    }
   }, [refreshAgentVisibility])
 
   useEffect(() => {
     if (tab === "agent" && !showAgentTab) {
       setTab("settings")
     }
-  }, [tab, showAgentTab])
+  }, [setTab, tab, showAgentTab])
 
   return (
     <Layout>
@@ -117,6 +121,14 @@ export default function Manage() {
               )}
             >
               Runway
+            </TabsTrigger>
+            <TabsTrigger
+              value="gateway"
+              className={cn(
+                "rounded-none border-b-2 border-transparent px-1 py-3 data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:shadow-none"
+              )}
+            >
+              AI Gateway
             </TabsTrigger>
             <TabsTrigger
               value="geminigen"
@@ -183,6 +195,11 @@ export default function Manage() {
         <TabsContent value="runway" className="mt-0 outline-none focus-visible:ring-0">
           <div className="animate-in fade-in duration-300">
             <RunwaySettings active={tab === "runway"} />
+          </div>
+        </TabsContent>
+        <TabsContent value="gateway" className="mt-0 outline-none focus-visible:ring-0">
+          <div className="animate-in fade-in duration-300">
+            <AIGateway active={tab === "gateway"} />
           </div>
         </TabsContent>
         <TabsContent value="geminigen" className="mt-0 outline-none focus-visible:ring-0">

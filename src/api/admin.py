@@ -5,11 +5,13 @@ import inspect
 import json
 import mimetypes
 import hashlib
+import os
 import shutil
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from fastapi import APIRouter, Depends, File, HTTPException, Header, Query, Request, Response, UploadFile
+from urllib.parse import urlsplit
+from fastapi import APIRouter, Depends, File, HTTPException, Header, Query, Request, Response, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
@@ -38,11 +40,16 @@ from ..services.token_manager import TokenManager
 from ..services.proxy_manager import ProxyManager
 from ..services.concurrency_manager import ConcurrencyManager
 from ..services.runway_service import RunwayService
-from ..services.geminigen_service import GeminiGenService
+from ..services.geminigen_service import (
+    GEMINIGEN_GROK_IMAGE_MAX_DAILY,
+    GEMINIGEN_IMAGE_GEN_MAX_DAILY,
+    GeminiGenService,
+)
 from ..services.generation_handler import MODEL_CONFIG
 from ..services.browser_profile_service import BrowserProfileService
 from ..services.browser_metrics_cleanup import get_last_browser_metrics_cleanup_stats
 from ..services.google_drive_backup import GoogleDriveBackupError, GoogleDriveBackupService
+from ..services.redis_runtime import RedisUnavailableError, redis_runtime
 
 try:
     import httpx
@@ -803,6 +810,11 @@ class GoogleDriveBackupConfigRequest(BaseModel):
 
 class GoogleDriveRestoreRequest(BaseModel):
     confirmation: str
+
+
+class MaintenanceRequest(BaseModel):
+    active: bool
+    reason: str = Field(default="operator_requested", max_length=300)
 
 
 class AddTokenRequest(BaseModel):
@@ -2516,6 +2528,75 @@ def _geminigen_account_payload(account, generation_stats: Optional[Dict[str, int
         except Exception:
             active_benefits = []
     generation_stats = generation_stats or {}
+    now_utc = datetime.now(timezone.utc)
+
+    def daily_limit_state(value: Optional[datetime]) -> tuple[bool, Optional[str]]:
+        if not value:
+            return False, None
+        normalized = (
+            value.replace(tzinfo=timezone.utc)
+            if value.tzinfo is None
+            else value.astimezone(timezone.utc)
+        )
+        return normalized > now_utc, normalized.isoformat().replace("+00:00", "Z")
+
+    image_gen_daily_limited, image_gen_daily_limit_reset_at = daily_limit_state(
+        getattr(account, "image_gen_daily_limit_reset_at", None)
+    )
+    grok_image_daily_limited, grok_image_daily_limit_reset_at = daily_limit_state(
+        getattr(account, "grok_image_daily_limit_reset_at", None)
+    )
+    video_daily_limited, video_daily_limit_reset_at = daily_limit_state(
+        getattr(account, "video_daily_limit_reset_at", None)
+    )
+    last_status = account.last_status or ""
+    last_error = account.last_error or ""
+    if (
+        last_error == "DAILY_LIMIT_EXCEEDED"
+        and last_status.startswith("daily_limited_")
+        and not image_gen_daily_limited
+        and not grok_image_daily_limited
+        and not video_daily_limited
+    ):
+        last_status = ""
+        last_error = ""
+
+    def quota_summary(
+        *,
+        is_max: Optional[bool],
+        max_remaining: Optional[int],
+        free_remaining: Optional[int],
+        max_total: int,
+    ) -> Dict[str, Any]:
+        if is_max is True and max_remaining is not None:
+            remaining = max(0, int(max_remaining))
+            return {
+                "tier": "max",
+                "remaining": remaining,
+                "used": max(0, min(max_total, max_total - remaining)),
+                "max": max_total,
+            }
+        if free_remaining is not None:
+            return {
+                "tier": "free",
+                "remaining": max(0, int(free_remaining)),
+                "used": None,
+                "max": None,
+            }
+        return {"tier": "unknown", "remaining": None, "used": None, "max": None}
+
+    image_gen_quota = quota_summary(
+        is_max=getattr(account, "is_image_gen_max", None),
+        max_remaining=getattr(account, "remaining_image_gen_max_daily_images", None),
+        free_remaining=getattr(account, "remaining_image_gen_free_daily_images", None),
+        max_total=GEMINIGEN_IMAGE_GEN_MAX_DAILY,
+    )
+    grok_image_quota = quota_summary(
+        is_max=getattr(account, "is_grok_image_max", None),
+        max_remaining=getattr(account, "remaining_grok_image_max_daily_images", None),
+        free_remaining=getattr(account, "remaining_grok_image_free_daily_images", None),
+        max_total=GEMINIGEN_GROK_IMAGE_MAX_DAILY,
+    )
     return {
         "id": account.id,
         "label": account.label,
@@ -2534,12 +2615,47 @@ def _geminigen_account_payload(account, generation_stats: Optional[Dict[str, int
         "video_concurrency": account.video_concurrency,
         "image_in_flight": account.image_in_flight,
         "video_in_flight": account.video_in_flight,
+        "image_gen_daily_limited": image_gen_daily_limited,
+        "grok_image_daily_limited": grok_image_daily_limited,
+        "video_daily_limited": video_daily_limited,
+        "image_gen_daily_limit_reset_at": image_gen_daily_limit_reset_at,
+        "grok_image_daily_limit_reset_at": grok_image_daily_limit_reset_at,
+        "video_daily_limit_reset_at": video_daily_limit_reset_at,
+        "image_gen_quota": image_gen_quota,
+        "grok_image_quota": grok_image_quota,
+        "is_image_gen_max": getattr(account, "is_image_gen_max", None),
+        "is_image_premium": getattr(account, "is_image_premium", None),
+        "image_gen_concurrent_streams": getattr(account, "image_gen_concurrent_streams", None),
+        "remaining_image_gen_max_daily_images": getattr(
+            account,
+            "remaining_image_gen_max_daily_images",
+            None,
+        ),
+        "remaining_image_gen_free_daily_images": getattr(
+            account,
+            "remaining_image_gen_free_daily_images",
+            None,
+        ),
+        "is_grok_image_max": getattr(account, "is_grok_image_max", None),
+        "grok_image_concurrent_streams": getattr(account, "grok_image_concurrent_streams", None),
+        "remaining_grok_image_max_daily_images": getattr(
+            account,
+            "remaining_grok_image_max_daily_images",
+            None,
+        ),
+        "remaining_grok_image_free_daily_images": getattr(
+            account,
+            "remaining_grok_image_free_daily_images",
+            None,
+        ),
+        "is_grok_max": getattr(account, "is_grok_max", None),
+        "grok_max_concurrent_streams": getattr(account, "grok_max_concurrent_streams", None),
         "image_generated_today": int(generation_stats.get("image_generated_today") or 0),
         "image_generated_total": int(generation_stats.get("image_generated_total") or 0),
         "video_generated_today": int(generation_stats.get("video_generated_today") or 0),
         "video_generated_total": int(generation_stats.get("video_generated_total") or 0),
-        "last_status": account.last_status or "",
-        "last_error": account.last_error or "",
+        "last_status": last_status,
+        "last_error": last_error,
         "last_used_at": account.last_used_at.isoformat() if account.last_used_at else None,
         "profile_user_id": account.profile_user_id,
         "profile_uuid": account.profile_uuid,
@@ -2559,6 +2675,10 @@ def _geminigen_account_payload(account, generation_stats: Optional[Dict[str, int
         "remaining_grok_max_daily_videos": account.remaining_grok_max_daily_videos,
         "remaining_grok_max_daily_720p_videos": account.remaining_grok_max_daily_720p_videos,
         "remaining_grok_max_daily_10s_videos": account.remaining_grok_max_daily_10s_videos,
+        "remaining_grok_max_daily_15s_videos": account.remaining_grok_max_daily_15s_videos,
+        "quota_synced_at": account.quota_synced_at.isoformat() if account.quota_synced_at else None,
+        "quota_sync_status": account.quota_sync_status or "",
+        "quota_sync_error": account.quota_sync_error or "",
         "profile_synced_at": account.profile_synced_at.isoformat() if account.profile_synced_at else None,
         "profile_sync_status": account.profile_sync_status or "",
         "profile_sync_error": account.profile_sync_error or "",
@@ -3017,8 +3137,17 @@ async def delete_geminigen_account(
     account_id: int,
     token: str = Depends(verify_admin_token),
 ):
-    await db.delete_geminigen_account(account_id)
-    return {"success": True, "account_id": account_id}
+    account = await db.get_geminigen_account(account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="GeminiGen account not found")
+    cleared = await db.clear_geminigen_queue(
+        account_id=account_id,
+        reason="GeminiGen account deleted by admin",
+    )
+    deleted = await db.delete_geminigen_account(account_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="GeminiGen account not found")
+    return {"success": True, "account_id": account_id, **cleared}
 
 
 @router.post("/api/admin/geminigen/queue/clear")
@@ -3207,7 +3336,21 @@ async def health_check():
     """Public health check endpoint - no auth required"""
     try:
         snapshot = await build_public_health_snapshot(db)
-        snapshot["database_ready"] = True
+        database_status = await db.health_snapshot()
+        snapshot.update(database_status)
+        redis_status = redis_runtime.status_snapshot()
+        snapshot["redis_ready"] = redis_status["redis_ready"]
+        snapshot["event_consumer_ready"] = redis_status["event_consumer_ready"]
+        snapshot["maintenance"] = redis_runtime.maintenance_snapshot()
+        snapshot["degraded"] = bool(
+            not database_status.get("database_ready", False)
+            or redis_runtime.maintenance_active
+            or (
+            redis_runtime.mode != "off"
+            and (not redis_status["redis_ready"] or not redis_status["event_consumer_ready"])
+            )
+        )
+        snapshot["redis"] = redis_status
         return snapshot
     except Exception:
         return JSONResponse(
@@ -3215,10 +3358,132 @@ async def health_check():
             content={
                 "backend_running": True,
                 "database_ready": False,
+                "database_backend": getattr(db, "backend", "unknown"),
+                "database_revision": getattr(db, "database_revision", None),
+                "redis_ready": redis_runtime.ready,
+                "event_consumer_ready": redis_runtime.event_consumer_ready,
+                "degraded": True,
                 "has_active_tokens": False,
                 "error": "database_unavailable",
+                "maintenance": redis_runtime.maintenance_snapshot(),
             },
         )
+
+
+@router.get("/api/admin/maintenance")
+async def get_maintenance_state(token: str = Depends(verify_admin_token)):
+    return {"success": True, "maintenance": redis_runtime.maintenance_snapshot()}
+
+
+@router.post("/api/admin/maintenance")
+async def update_maintenance_state(
+    payload: MaintenanceRequest,
+    token: str = Depends(verify_admin_token),
+):
+    try:
+        state = await redis_runtime.set_maintenance(
+            payload.active,
+            reason=payload.reason,
+            owner="admin",
+        )
+    except RedisUnavailableError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="redis_unavailable",
+            headers={"Retry-After": "5"},
+        ) from exc
+    return {"success": True, "maintenance": state}
+
+
+def _websocket_uses_api_only_host(websocket: WebSocket) -> bool:
+    configured = {
+        value.strip().lower()
+        for value in str(os.environ.get("FLOW2API_API_ONLY_HOST", "") or "").split(",")
+        if value.strip()
+    }
+    if not configured:
+        return False
+    forwarded = str(websocket.headers.get("x-forwarded-host") or "").split(",", 1)[0].strip()
+    host = forwarded or str(websocket.headers.get("host") or "").strip()
+    hostname = urlsplit(f"//{host}").hostname or host.split(":", 1)[0]
+    return hostname.lower() in configured
+
+
+def _websocket_origin_is_same_origin(websocket: WebSocket) -> bool:
+    origin = str(websocket.headers.get("origin") or "").strip()
+    if not origin or origin.lower() == "null":
+        return False
+    parsed_origin = urlsplit(origin)
+    if parsed_origin.scheme not in {"http", "https"} or not parsed_origin.hostname:
+        return False
+
+    forwarded_host = str(websocket.headers.get("x-forwarded-host") or "").split(",", 1)[0].strip()
+    expected_host = forwarded_host or str(websocket.headers.get("host") or "").strip()
+    forwarded_proto = str(websocket.headers.get("x-forwarded-proto") or "").split(",", 1)[0].strip().lower()
+    expected_scheme = forwarded_proto or ("https" if websocket.url.scheme == "wss" else "http")
+    parsed_expected = urlsplit(f"{expected_scheme}://{expected_host}")
+
+    def normalized_origin(parsed):
+        default_port = 443 if parsed.scheme == "https" else 80
+        return parsed.scheme, (parsed.hostname or "").lower(), parsed.port or default_port
+
+    return normalized_origin(parsed_origin) == normalized_origin(parsed_expected)
+
+
+@router.websocket("/api/admin/events/ws")
+async def admin_events_websocket(websocket: WebSocket):
+    """Authenticated dashboard event feed with Redis cursor replay."""
+    if _websocket_uses_api_only_host(websocket):
+        await websocket.close(code=1008, reason="admin_websocket_not_available_on_api_host")
+        return
+    if not _websocket_origin_is_same_origin(websocket):
+        await websocket.close(code=1008, reason="same_origin_required")
+        return
+    session_token = str(websocket.cookies.get(ADMIN_SESSION_COOKIE_NAME) or "").strip()
+    if not await is_admin_session_token_valid(session_token):
+        await websocket.close(code=1008, reason="admin_session_required")
+        return
+
+    await websocket.accept()
+    if not redis_runtime.ready:
+        await websocket.close(code=1013, reason="redis_unavailable")
+        return
+
+    cursor = str(websocket.query_params.get("cursor") or "$").strip() or "$"
+    redis_runtime.websocket_clients += 1
+    try:
+        if await redis_runtime.cursor_was_trimmed(cursor):
+            await websocket.send_json(
+                {
+                    "type": "resync",
+                    "data": {"reason": "cursor_trimmed"},
+                    "cursor": cursor,
+                }
+            )
+            cursor = "$"
+        await websocket.send_json(
+            {
+                "type": "redis_state",
+                "data": redis_runtime.status_snapshot(),
+                "cursor": cursor,
+            }
+        )
+        while True:
+            try:
+                events = await redis_runtime.read_events(cursor, block_ms=15_000, count=100)
+            except RedisUnavailableError:
+                await websocket.close(code=1013, reason="redis_unavailable")
+                return
+            if not events:
+                await websocket.send_json({"type": "ping", "cursor": cursor})
+                continue
+            for event in events:
+                cursor = event.cursor
+                await websocket.send_json(event.as_dict())
+    except WebSocketDisconnect:
+        return
+    finally:
+        redis_runtime.websocket_clients = max(0, redis_runtime.websocket_clients - 1)
 
 
 @router.get("/api/stats")
@@ -3285,6 +3550,8 @@ async def get_logs(
             "progress": log.get("progress") or 0,
             "created_at": log.get("created_at"),
             "updated_at": log.get("updated_at"),
+            "payload_available": bool(log.get("payload_available")),
+            "payload_storage_error": log.get("payload_storage_error"),
             "error_summary": _extract_error_summary(log.get("response_body_excerpt")) if status_code is not None and status_code >= 400 else "",
             "captcha_user_agent_set": captcha_ua["captcha_user_agent_set"],
             "captcha_provider": captcha_ua["captcha_provider"],
@@ -3302,12 +3569,24 @@ async def get_log_detail(
     if not log:
         raise HTTPException(status_code=404, detail="日志不存在")
 
-    error_summary = _extract_error_summary(log.get("response_body"))
-    captcha_ua = _extract_captcha_user_agent_metadata(log.get("response_body"))
+    request_body = log.get("request_body")
+    response_body = log.get("response_body")
+    payload_available = bool(log.get("payload_available"))
+    if payload_available and log.get("payload_object_key") and db.log_payload_manager is not None:
+        try:
+            stored_payload = await db.log_payload_manager.load(str(log["payload_object_key"]))
+            if stored_payload:
+                request_body = stored_payload.get("request_body", request_body)
+                response_body = stored_payload.get("response_body", response_body)
+        except Exception as exc:
+            log["payload_storage_error"] = f"payload_read_failed:{type(exc).__name__}"
+
+    error_summary = _extract_error_summary(response_body)
+    captcha_ua = _extract_captcha_user_agent_metadata(response_body)
 
     return {
         "id": log.get("id"),
-        "job_id": log.get("job_id") or _extract_log_job_id(log.get("response_body"), log.get("request_body")),
+        "job_id": log.get("job_id") or _extract_log_job_id(response_body, request_body),
         "token_id": log.get("token_id"),
         "token_email": log.get("token_email"),
         "token_username": log.get("token_username"),
@@ -3321,11 +3600,15 @@ async def get_log_detail(
         "progress": log.get("progress") or 0,
         "created_at": log.get("created_at"),
         "updated_at": log.get("updated_at"),
+        "payload_available": payload_available,
+        "payload_storage_error": log.get("payload_storage_error"),
+        "request_size_bytes": log.get("request_size_bytes") or 0,
+        "response_size_bytes": log.get("response_size_bytes") or 0,
         "error_summary": error_summary,
         "captcha_user_agent_set": captcha_ua["captcha_user_agent_set"],
         "captcha_provider": captcha_ua["captcha_provider"],
-        "request_body": log.get("request_body"),
-        "response_body": log.get("response_body"),
+        "request_body": request_body,
+        "response_body": response_body,
     }
 
 
@@ -3419,6 +3702,8 @@ async def restore_sqlite_database(
     """Restore flow.db from an uploaded SQLite file."""
     if db is None:
         raise HTTPException(status_code=500, detail="Database service is not initialized")
+    if getattr(db, "backend", "sqlite") != "sqlite":
+        raise HTTPException(status_code=410, detail="sqlite_restore_removed")
 
     db_path = Path(db.db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -3442,13 +3727,15 @@ async def restore_sqlite_database(
 
             validation = _validate_uploaded_sqlite_database(upload_path)
 
+            await db.close_runtime_connections()
             if db_path.exists():
-                shutil.copy2(db_path, backup_path)
+                await asyncio.to_thread(_create_sqlite_database_snapshot, db_path, backup_path)
 
             upload_path.replace(db_path)
 
             await db.init_db()
             await db.check_and_migrate_db(config.get_raw_config())
+            await db.cache_schema_capabilities()
             await db.reload_config_to_memory()
 
         return {
@@ -3473,6 +3760,8 @@ async def download_sqlite_database(token: str = Depends(verify_admin_token)):
     """Download a consistent snapshot of the current flow.db SQLite database."""
     if db is None:
         raise HTTPException(status_code=500, detail="Database service is not initialized")
+    if getattr(db, "backend", "sqlite") != "sqlite":
+        raise HTTPException(status_code=410, detail="sqlite_download_removed")
 
     db_path = Path(db.db_path)
     if not db_path.is_file():
@@ -3643,6 +3932,10 @@ async def list_managed_api_keys(token: str = Depends(verify_admin_token)):
     if not api_key_manager:
         raise HTTPException(status_code=503, detail="API key manager not initialized")
     keys = await db.list_api_keys()
+    runtime = getattr(api_key_manager, "redis_runtime", None)
+    if runtime is not None and runtime.ready:
+        for row in keys:
+            row["is_online"] = await runtime.is_present(int(row["id"]))
     return {"success": True, "keys": keys}
 
 
@@ -3716,6 +4009,8 @@ async def update_managed_api_key(
         account_ids=valid_account_ids,
         endpoint_limits=request.endpoint_limits,
     )
+    if api_key_manager:
+        await api_key_manager.invalidate(key_id)
     return {"success": True, "message": "Managed API key updated"}
 
 
@@ -3973,8 +4268,58 @@ async def delete_managed_api_key(
     detail = await db.get_api_key_detail(key_id)
     if not detail:
         raise HTTPException(status_code=404, detail="Managed API key not found")
-    await db.delete_api_key(key_id)
-    return {"success": True, "message": "Managed API key deleted"}
+
+    cache_rows = await db.list_cache_files_for_api_key_cleanup(key_id)
+    cache_objects_deleted = 0
+    if cache_rows:
+        from . import routes
+
+        file_cache = getattr(getattr(routes, "generation_handler", None), "file_cache", None)
+        if file_cache is None or getattr(file_cache, "backend", None) is None:
+            raise HTTPException(status_code=503, detail="Cache storage is unavailable; managed API key was not deleted")
+        try:
+            for row in cache_rows:
+                filename = Path(str(row.get("filename") or "")).name
+                if filename and await file_cache.backend.delete(filename):
+                    cache_objects_deleted += 1
+        except Exception as exc:
+            from ..core.logger import debug_logger
+
+            debug_logger.log_error(
+                f"Managed API key cache cleanup failed: key_id={key_id}, error_type={type(exc).__name__}"
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="Cache storage cleanup failed; managed API key was not deleted",
+            ) from exc
+
+    result = await db.delete_api_key(key_id)
+    if not result.get("deleted"):
+        raise HTTPException(status_code=404, detail="Managed API key not found")
+    if api_key_manager:
+        await api_key_manager.invalidate(key_id)
+
+    worker_sessions_terminated = 0
+    try:
+        from ..services.browser_captcha_extension import ExtensionCaptchaService
+
+        extension_service = await ExtensionCaptchaService.get_instance(db=db)
+        worker_sessions_terminated = await extension_service.kill_managed_api_key_sessions(key_id)
+    except Exception as exc:
+        from ..core.logger import debug_logger
+
+        debug_logger.log_error(
+            f"Managed API key worker cleanup failed: key_id={key_id}, error_type={type(exc).__name__}"
+        )
+
+    return {
+        "success": True,
+        "message": "Managed API key deleted",
+        "key_id": key_id,
+        "cache_objects_deleted": cache_objects_deleted,
+        "worker_sessions_terminated": worker_sessions_terminated,
+        **result,
+    }
 
 
 @router.get("/api/admin/captcha-worker-keys")
@@ -5164,3 +5509,14 @@ async def plugin_check_tokens(
             "credits": row.get("credits", 0),
         })
     return {"success": True, "tokens": result}
+
+
+# Keep the CLIProxy surface in a small, auditable allowlist module. Every route
+# inherits the same persistent admin-session check used throughout this API.
+from .cliproxy_admin import router as cliproxy_admin_router
+
+router.include_router(
+    cliproxy_admin_router,
+    prefix="/api/admin/cliproxy",
+    dependencies=[Depends(verify_admin_token)],
+)

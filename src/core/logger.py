@@ -1,8 +1,12 @@
 """Debug logger module for detailed API request/response logging"""
 import json
 import logging
+import logging.handlers
+import os
+import queue
 import re
 import sys
+import atexit
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Any, Optional
@@ -127,11 +131,34 @@ class SensitiveAccessLogFilter(logging.Filter):
             record.args = sanitize_data_for_log(args)
         return True
 
+
+class _DroppingQueueHandler(logging.handlers.QueueHandler):
+    """Bounded non-blocking QueueHandler with an observable drop counter."""
+
+    def __init__(self, log_queue: queue.Queue):
+        super().__init__(log_queue)
+        self.dropped = 0
+
+    def enqueue(self, record: logging.LogRecord) -> None:
+        try:
+            self.queue.put_nowait(record)
+        except queue.Full:
+            self.dropped += 1
+
 class DebugLogger:
     """Debug logger for API requests and responses"""
 
     def __init__(self):
         self.log_file = Path("logs.txt")
+        default_payload_logging = not bool(os.environ.get("RAILWAY_ENVIRONMENT"))
+        raw_payload_logging = str(os.environ.get("FLOW2API_DEBUG_PAYLOAD_LOGGING", "") or "").strip().lower()
+        self.payload_logging_enabled = (
+            raw_payload_logging in {"1", "true", "yes", "on"}
+            if raw_payload_logging
+            else default_payload_logging
+        )
+        self._queue_handler: Optional[_DroppingQueueHandler] = None
+        self._queue_listener: Optional[logging.handlers.QueueListener] = None
         self._setup_logger()
 
     def _setup_logger(self):
@@ -144,10 +171,12 @@ class DebugLogger:
         self.logger.handlers.clear()
 
         # Create file handler
-        file_handler = logging.FileHandler(
+        file_handler = logging.handlers.RotatingFileHandler(
             self.log_file,
             mode='a',
-            encoding='utf-8'
+            encoding='utf-8',
+            maxBytes=25 * 1024 * 1024,
+            backupCount=2,
         )
         file_handler.setLevel(logging.DEBUG)
 
@@ -163,12 +192,46 @@ class DebugLogger:
         file_handler.setFormatter(formatter)
         stream_handler.setFormatter(formatter)
 
-        # Add handler
-        self.logger.addHandler(file_handler)
-        self.logger.addHandler(stream_handler)
+        synchronous = str(os.environ.get("FLOW2API_SYNC_DEBUG_LOGGING", "0") or "0").strip().lower() in {
+            "1", "true", "yes", "on"
+        }
+        if synchronous:
+            self.logger.addHandler(file_handler)
+            self.logger.addHandler(stream_handler)
+        else:
+            log_queue: queue.Queue = queue.Queue(
+                maxsize=max(100, int(os.environ.get("FLOW2API_LOG_QUEUE_SIZE", "10000") or 10000))
+            )
+            self._queue_handler = _DroppingQueueHandler(log_queue)
+            self.logger.addHandler(self._queue_handler)
+            self._queue_listener = logging.handlers.QueueListener(
+                log_queue,
+                file_handler,
+                stream_handler,
+                respect_handler_level=True,
+            )
+            self._queue_listener.start()
+            atexit.register(self.close)
 
         # Prevent propagation to root logger
         self.logger.propagate = False
+
+    def close(self) -> None:
+        listener, self._queue_listener = self._queue_listener, None
+        if listener is not None:
+            try:
+                listener.stop()
+            except Exception:
+                pass
+
+    def queue_status(self) -> Dict[str, int]:
+        if self._queue_handler is None:
+            return {"depth": 0, "capacity": 0, "dropped": 0}
+        return {
+            "depth": int(self._queue_handler.queue.qsize()),
+            "capacity": int(self._queue_handler.queue.maxsize),
+            "dropped": int(self._queue_handler.dropped),
+        }
 
     def _mask_token(self, token: str) -> str:
         """Mask token for logging (show first 6 and last 6 characters)"""
@@ -224,7 +287,7 @@ class DebugLogger:
     ):
         """Log API request details to log.txt"""
 
-        if not config.debug_enabled or not config.debug_log_requests:
+        if not self.payload_logging_enabled or not config.debug_enabled or not config.debug_log_requests:
             return
 
         try:
@@ -284,7 +347,7 @@ class DebugLogger:
     ):
         """Log API response details to log.txt"""
 
-        if not config.debug_enabled or not config.debug_log_responses:
+        if not self.payload_logging_enabled or not config.debug_enabled or not config.debug_log_responses:
             return
 
         try:

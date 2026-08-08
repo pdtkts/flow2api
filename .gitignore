@@ -24,6 +24,8 @@ wheels/
 .installed.cfg
 *.egg
 scripts/
+!src/scripts/
+!src/scripts/*.py
 # Database
 *.db
 *.sqlite
@@ -77,6 +79,11 @@ tests/*
 !tests/test_browser_profile_lifecycle.py
 !tests/test_cache_backends.py
 !tests/test_capmonster_enterprise_ua_status.py
+!tests/test_geminigen_generation_capacity.py
+!tests/test_cliproxy_gateway.py
+!tests/test_performance_runtime.py
+!tests/test_postgres_bridge.py
+!tests/test_postgres_integration.py
 
 # Root GUI static build (keep local-only)
 /static/

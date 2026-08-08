@@ -8115,9 +8115,13 @@ class BrowserCaptchaService:
                 )
             except Exception:
                 pass
-        if browser_pid and self._is_pid_running(browser_pid):
-            self._terminate_pid_tree(browser_pid, reason=reason)
-        self._terminate_browser_processes_for_profile_dirs(profile_dirs, reason=reason)
+        if browser_pid and await asyncio.to_thread(self._is_pid_running, browser_pid):
+            await asyncio.to_thread(self._terminate_pid_tree, browser_pid, reason=reason)
+        await asyncio.to_thread(
+            self._terminate_browser_processes_for_profile_dirs,
+            profile_dirs,
+            reason=reason,
+        )
         self._browser_process_pid = None
         await asyncio.sleep(0.3)
 

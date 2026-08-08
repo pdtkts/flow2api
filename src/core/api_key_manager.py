@@ -10,6 +10,8 @@ import time
 from dataclasses import dataclass
 from typing import Dict, Optional, Set, Tuple
 
+from ..services.redis_runtime import RedisRuntime, RedisUnavailableError
+
 
 def adobe_flags_from_scopes(scopes: Set[str]) -> Tuple[bool, bool, bool]:
     """Adobe route access is driven only by scope tokens (not legacy api_keys columns at auth time)."""
@@ -37,9 +39,10 @@ class AuthContext:
 class ApiKeyManager:
     """Validates API keys, account bindings, and simple fixed-window rate limits."""
 
-    def __init__(self, db, legacy_api_key_provider):
+    def __init__(self, db, legacy_api_key_provider, redis_runtime: Optional[RedisRuntime] = None):
         self.db = db
         self.legacy_api_key_provider = legacy_api_key_provider
+        self.redis_runtime = redis_runtime
         self._rate_limit_lock = asyncio.Lock()
         self._window_counters: Dict[Tuple[int, str, int], int] = {}
 
@@ -88,12 +91,25 @@ class ApiKeyManager:
         require_assignment: bool = False,
         enforce_rate_limits: bool = True,
         touch_usage: bool = True,
+        require_redis: bool = False,
     ) -> AuthContext:
         if not provided_api_key:
             raise PermissionError("Missing API key")
 
-        # Try managed keys first
-        row = await self.db.get_client_api_key_by_hash(self._digest(provided_api_key))
+        runtime = self.redis_runtime
+        if require_redis and runtime is not None:
+            runtime.ensure_ready()
+
+        # Try managed keys first. In required mode Redis is authoritative for a
+        # short cache window; shadow mode still reads SQLite and mirrors values.
+        key_hash = self._digest(provided_api_key)
+        cached = None
+        if runtime is not None and runtime.ready and runtime.required:
+            cached = await runtime.get_auth_cache(key_hash)
+        row = cached.get("row") if isinstance(cached, dict) else None
+        cached_accounts = cached.get("account_ids") if isinstance(cached, dict) else None
+        if not row:
+            row = await self.db.get_client_api_key_by_hash(key_hash)
         if row:
             if not bool(row.get("is_active", True)):
                 raise PermissionError("API key is disabled")
@@ -106,7 +122,10 @@ class ApiKeyManager:
                     raise PermissionError("API key expired")
 
             key_id = int(row["id"])
-            allowed_accounts = set(await self.db.get_api_key_account_ids(key_id))
+            if isinstance(cached_accounts, list):
+                allowed_accounts = {int(value) for value in cached_accounts}
+            else:
+                allowed_accounts = set(await self.db.get_api_key_account_ids(key_id))
             scopes = {x.strip() for x in (row.get("scopes") or "").split(",") if x.strip()}
             if not scopes:
                 scopes = {"*"}
@@ -114,10 +133,31 @@ class ApiKeyManager:
             if require_assignment and not allowed_accounts:
                 raise PermissionError("No accounts assigned to this API key")
 
+            if runtime is not None and runtime.ready and cached is None:
+                await runtime.set_auth_cache(
+                    key_hash,
+                    {"row": row, "account_ids": sorted(allowed_accounts)},
+                )
+
             if enforce_rate_limits:
-                await self._enforce_rate_limits(key_id=key_id, endpoint=endpoint)
+                await self._enforce_rate_limits(
+                    key_id=key_id,
+                    endpoint=endpoint,
+                    require_redis=require_redis,
+                )
             if touch_usage:
-                await self.db.touch_api_key_usage(key_id)
+                if runtime is not None and runtime.ready:
+                    try:
+                        await runtime.queue_usage_touch(key_id)
+                    except RedisUnavailableError:
+                        if require_redis:
+                            raise
+                        await self.db.touch_api_key_usage(key_id)
+                    else:
+                        if not runtime.required:
+                            await self.db.touch_api_key_usage(key_id)
+                else:
+                    await self.db.touch_api_key_usage(key_id)
 
             acl, ame, atr = adobe_flags_from_scopes(scopes)
 
@@ -135,6 +175,8 @@ class ApiKeyManager:
         # Legacy fallback
         legacy = (self.legacy_api_key_provider() or "").strip()
         if legacy and hmac.compare_digest(provided_api_key, legacy):
+            if require_redis and runtime is not None:
+                runtime.ensure_ready()
             return AuthContext(
                 key_id=None,
                 key_label="legacy-global",
@@ -148,8 +190,15 @@ class ApiKeyManager:
 
         raise PermissionError("Invalid API key")
 
-    async def _enforce_rate_limits(self, key_id: int, endpoint: str):
-        limits = await self.db.get_api_key_rate_limits(key_id, endpoint)
+    async def _enforce_rate_limits(self, key_id: int, endpoint: str, *, require_redis: bool = False):
+        runtime = self.redis_runtime
+        limits = None
+        if runtime is not None and runtime.ready and runtime.required:
+            limits = await runtime.get_rate_config(key_id, endpoint)
+        if limits is None:
+            limits = await self.db.get_api_key_rate_limits(key_id, endpoint)
+            if runtime is not None and runtime.ready:
+                await runtime.set_rate_config(key_id, endpoint, limits)
         if not limits:
             return
 
@@ -159,6 +208,22 @@ class ApiKeyManager:
 
         rpm = int(limits.get("rpm") or 0)
         rph = int(limits.get("rph") or 0)
+
+        if runtime is not None and runtime.ready and runtime.required:
+            try:
+                await runtime.enforce_rate_limits(
+                    key_id=key_id,
+                    endpoint=endpoint,
+                    rpm=rpm,
+                    rph=rph,
+                    now=now,
+                )
+                return
+            except RedisUnavailableError:
+                if require_redis:
+                    raise
+        if require_redis and runtime is not None:
+            raise RedisUnavailableError("redis_unavailable")
 
         async with self._rate_limit_lock:
             if rpm > 0:
@@ -174,3 +239,21 @@ class ApiKeyManager:
                 if hour_count > rph:
                     raise RuntimeError(f"Rate limit exceeded: {rph} requests/hour for {endpoint}")
                 self._window_counters[hour_key] = hour_count
+
+        if runtime is not None and runtime.ready and runtime.mode == "shadow":
+            try:
+                await runtime.enforce_rate_limits(
+                    key_id=key_id,
+                    endpoint=endpoint,
+                    rpm=rpm,
+                    rph=rph,
+                    now=now,
+                )
+            except (RuntimeError, RedisUnavailableError):
+                # Shadow decisions are observed through Redis metrics/events but
+                # never change the current in-process authoritative result.
+                pass
+
+    async def invalidate(self, key_id: int) -> None:
+        if self.redis_runtime is not None:
+            await self.redis_runtime.invalidate_api_key(key_id)

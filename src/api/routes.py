@@ -62,6 +62,7 @@ from ..services.generation_handler import MODEL_CONFIG, GenerationHandler
 from ..services.geminigen_service import GeminiGenService
 from ..services.llm_provider_chain import LlmProviderChain
 from ..services.runway_service import RunwayService
+from ..services.redis_runtime import RedisUnavailableError
 from ..services.tas_tracker_service import TaskTrackerService
 
 router = APIRouter()
@@ -191,7 +192,26 @@ async def report_client_presence(
     """Record a lightweight heartbeat for a managed desktop client."""
     if auth_core.api_key_manager is None or auth_ctx.key_id is None:
         raise HTTPException(status_code=503, detail="API key manager not initialized")
-    await auth_core.api_key_manager.db.touch_api_key_presence(auth_ctx.key_id)
+    runtime = getattr(auth_core.api_key_manager, "redis_runtime", None)
+    if runtime is not None and runtime.ready:
+        try:
+            await runtime.touch_presence(auth_ctx.key_id)
+        except RedisUnavailableError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="redis_unavailable",
+                headers={"Retry-After": "5"},
+            ) from exc
+        if not runtime.required:
+            await auth_core.api_key_manager.db.touch_api_key_presence(auth_ctx.key_id)
+    elif runtime is not None and runtime.required:
+        raise HTTPException(
+            status_code=503,
+            detail="redis_unavailable",
+            headers={"Retry-After": "5"},
+        )
+    else:
+        await auth_core.api_key_manager.db.touch_api_key_presence(auth_ctx.key_id)
     return Response(status_code=204)
 
 
@@ -2576,6 +2596,23 @@ async def list_models(auth_ctx: AuthContext = Depends(verify_api_key_flexible)):
     return {"object": "list", "data": models}
 
 
+@router.get("/v1/generation-capacity")
+async def get_generation_capacity(auth_ctx: AuthContext = Depends(verify_api_key_flexible)):
+    """Return aggregate provider thread capacity without exposing account details."""
+    _require_geminigen_scope(auth_ctx)
+    handler = _ensure_generation_handler()
+    capacity = await handler.db.get_geminigen_generation_capacity()
+    return {
+        "object": "generation_capacity",
+        "providers": {
+            "geminigen": {
+                "image_threads": capacity["image_threads"],
+                "video_threads": capacity["video_threads"],
+            }
+        },
+    }
+
+
 @router.get("/v1/models/aliases")
 async def list_model_aliases(auth_ctx: AuthContext = Depends(verify_api_key_flexible)):
     """List simplified model aliases for generationConfig-based resolution."""
@@ -3048,7 +3085,26 @@ async def get_job_status(
     raw_request: Request,
     auth_ctx: AuthContext = Depends(verify_api_key_flexible),
 ):
-    """Poll async generation job status."""
+    """Read persisted async generation status without duplicating provider polling."""
+    if job_id.startswith("geminigen-") and geminigen_service is not None:
+        geminigen_task = await geminigen_service.db.get_geminigen_task(job_id)
+        if geminigen_task:
+            if auth_ctx.key_id is None or geminigen_task.api_key_id != auth_ctx.key_id:
+                raise HTTPException(status_code=403, detail="Not authorized to view this job")
+            return geminigen_service.task_to_public_dict(geminigen_task)
+
+    if job_id.startswith("runway-") and runway_service is not None:
+        runway_task = await runway_service.db.get_runway_task(job_id)
+        if runway_task:
+            if auth_ctx.key_id is None or runway_task.api_key_id != auth_ctx.key_id:
+                raise HTTPException(status_code=403, detail="Not authorized to view this job")
+            runway_task = await runway_service.poll_task(
+                job_id,
+                api_key_id=auth_ctx.key_id,
+                base_url=_get_request_base_url(raw_request),
+            )
+            return runway_service.task_to_public_dict(runway_task)
+
     handler = _ensure_generation_handler()
     task = await handler.db.get_task(job_id)
     if not task:
@@ -3068,11 +3124,6 @@ async def get_job_status(
             if geminigen_task:
                 if auth_ctx.key_id is None or geminigen_task.api_key_id != auth_ctx.key_id:
                     raise HTTPException(status_code=403, detail="Not authorized to view this job")
-                geminigen_task = await geminigen_service.poll_task(
-                    job_id,
-                    api_key_id=auth_ctx.key_id,
-                    base_url=_get_request_base_url(raw_request),
-                )
                 return geminigen_service.task_to_public_dict(geminigen_task)
         raise HTTPException(status_code=404, detail="Job not found")
 

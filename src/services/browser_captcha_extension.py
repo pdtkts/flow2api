@@ -1561,6 +1561,24 @@ class ExtensionCaptchaService:
             killed += 1
         return killed
 
+    async def kill_managed_api_key_sessions(self, key_id: int) -> int:
+        """Terminate extension sessions authenticated by a deleted managed API key."""
+        kid = int(key_id)
+        killed = 0
+        for conn in list(self.active_connections):
+            if conn.managed_api_key_id is None or int(conn.managed_api_key_id) != kid:
+                continue
+            try:
+                await conn.websocket.close(
+                    code=1000,
+                    reason="Managed API key deleted by admin",
+                )
+            except Exception:
+                pass
+            self.disconnect(conn.websocket)
+            killed += 1
+        return killed
+
     async def bind_route_key(self, route_key: str, managed_api_key_id: int) -> None:
         normalized_route = (route_key or "").strip()
         if not normalized_route:

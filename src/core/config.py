@@ -135,6 +135,9 @@ def get_runtime_data_dir() -> Path:
 
 def get_runtime_tmp_dir() -> Path:
     """Return the directory that should hold generated/cache files."""
+    explicit_tmp = _env_value("FLOW2API_TMP_DIR")
+    if explicit_tmp:
+        return Path(explicit_tmp).expanduser()
     volume_mount = _env_value("RAILWAY_VOLUME_MOUNT_PATH")
     if volume_mount:
         return Path(volume_mount).expanduser() / "tmp"
@@ -655,6 +658,30 @@ class Config:
         if "generation_routing" not in self._config:
             self._config["generation_routing"] = {}
         self._config["generation_routing"]["flow2api_cloning_model"] = str(value or "gemini-2.5-flash")
+
+    @property
+    def cliproxy_base_url(self) -> str:
+        """Private CLIProxy inference/management origin (environment only)."""
+        return _env_value("FLOW2API_CLIPROXY_BASE_URL").rstrip("/")
+
+    @property
+    def cliproxy_public_url(self) -> str:
+        """Public CLIProxy origin used for OAuth callbacks and break-glass UI."""
+        return _env_value("FLOW2API_CLIPROXY_PUBLIC_URL").rstrip("/")
+
+    @property
+    def cliproxy_api_key(self) -> str:
+        """CLIProxy inference key. This value is never database-backed."""
+        return _env_value("FLOW2API_CLIPROXY_API_KEY")
+
+    @property
+    def cliproxy_management_key(self) -> str:
+        """CLIProxy management key. This value is never database-backed."""
+        return _env_value("FLOW2API_CLIPROXY_MANAGEMENT_KEY")
+
+    @property
+    def cliproxy_version(self) -> str:
+        return _env_value("FLOW2API_CLIPROXY_VERSION") or "v7.2.120"
 
     @property
     def flow2api_cloning_backend(self) -> str:

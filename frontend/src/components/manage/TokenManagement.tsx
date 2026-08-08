@@ -13,6 +13,13 @@ import { Textarea } from "../ui/textarea"
 import { toast } from "sonner"
 import { RefreshCw, Download, Upload, Plus, Loader2, RefreshCcw, Pencil, Trash2, ExternalLink } from "lucide-react"
 
+type GeminiGenQuotaSummary = {
+  tier: "max" | "free" | "unknown"
+  remaining: number | null
+  used: number | null
+  max: number | null
+}
+
 type GeminiGenAccountSummary = {
   id: number
   label: string
@@ -22,6 +29,14 @@ type GeminiGenAccountSummary = {
   video_concurrency: number
   image_in_flight: number
   video_in_flight: number
+  image_gen_daily_limited?: boolean
+  grok_image_daily_limited?: boolean
+  video_daily_limited?: boolean
+  image_gen_daily_limit_reset_at?: string | null
+  grok_image_daily_limit_reset_at?: string | null
+  video_daily_limit_reset_at?: string | null
+  image_gen_quota?: GeminiGenQuotaSummary
+  grok_image_quota?: GeminiGenQuotaSummary
   image_generated_today?: number
   image_generated_total?: number
   video_generated_today?: number
@@ -45,6 +60,10 @@ type GeminiGenAccountSummary = {
   remaining_grok_max_daily_videos?: number | null
   remaining_grok_max_daily_720p_videos?: number | null
   remaining_grok_max_daily_10s_videos?: number | null
+  remaining_grok_max_daily_15s_videos?: number | null
+  quota_synced_at?: string | null
+  quota_sync_status?: string
+  quota_sync_error?: string
   profile_synced_at?: string | null
   profile_sync_status?: string
   profile_sync_error?: string
@@ -127,12 +146,54 @@ function formatNumberValue(value: number | null | undefined) {
   return value === null || value === undefined ? "-" : value.toLocaleString()
 }
 
+function formatGeminiGenDailyLimitCountdown(value: string | null | undefined) {
+  if (!value) return "until 00:00 UTC"
+  const reset = new Date(value)
+  if (Number.isNaN(reset.getTime())) return value
+  const remainingMinutes = Math.max(0, Math.ceil((reset.getTime() - Date.now()) / 60_000))
+  const hours = Math.floor(remainingMinutes / 60)
+  const minutes = remainingMinutes % 60
+  return `resets in ${hours}h ${minutes}m (${reset.toLocaleTimeString("en-US", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+    timeZone: "UTC",
+  })} UTC)`
+}
+
+function GeminiGenImageQuotaLine({ label, quota }: { label: string; quota?: GeminiGenQuotaSummary }) {
+  const hasKnownMax = quota?.used !== null && quota?.used !== undefined && quota.max !== null && quota.max !== undefined
+  const text = hasKnownMax
+    ? `${quota.used} / ${quota.max}`
+    : quota?.remaining !== null && quota?.remaining !== undefined
+      ? `${quota.remaining} remaining`
+      : "-"
+  const percent = hasKnownMax && quota.max ? Math.max(0, Math.min(100, ((quota.used || 0) / quota.max) * 100)) : 0
+  const exhausted = quota?.remaining === 0
+  return (
+    <div className="min-w-[150px]">
+      <div className="flex items-center justify-between gap-3 text-[11px]">
+        <span className="text-muted-foreground">{label}</span>
+        <span className={exhausted ? "font-medium text-destructive" : "font-medium tabular-nums"}>{text}</span>
+      </div>
+      {hasKnownMax ? (
+        <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-muted">
+          <div className={exhausted ? "h-full bg-destructive" : "h-full bg-emerald-500"} style={{ width: `${percent}%` }} />
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
 function geminiGenVideoQuota(account: GeminiGenAccountSummary) {
   const quotas = [
     account.remaining_daily_videos !== null && account.remaining_daily_videos !== undefined ? `Daily ${account.remaining_daily_videos}` : "",
     account.remaining_bulk_videos !== null && account.remaining_bulk_videos !== undefined ? `Bulk ${account.remaining_bulk_videos}` : "",
     account.remaining_grok_max_daily_videos !== null && account.remaining_grok_max_daily_videos !== undefined
       ? `Grok ${account.remaining_grok_max_daily_videos}`
+      : "",
+    account.remaining_grok_max_daily_15s_videos !== null && account.remaining_grok_max_daily_15s_videos !== undefined
+      ? `15s ${account.remaining_grok_max_daily_15s_videos}`
       : "",
   ].filter(Boolean)
   return quotas.length ? quotas.join(" / ") : "-"
@@ -727,6 +788,7 @@ export function TokenManagement() {
                     <TableHead className="text-center">Image slots</TableHead>
                     <TableHead className="text-center">Video slots</TableHead>
                     <TableHead className="text-center">Image generated</TableHead>
+                    <TableHead>Image quotas</TableHead>
                     <TableHead className="text-center">Video generated</TableHead>
                     <TableHead>Video quota</TableHead>
                     <TableHead>Benefits</TableHead>
@@ -737,7 +799,7 @@ export function TokenManagement() {
                 <TableBody>
                   {!geminiGenAccounts.length ? (
                     <TableRow>
-                      <TableCell colSpan={12} className="text-center text-muted-foreground py-8">
+                      <TableCell colSpan={13} className="text-center text-muted-foreground py-8">
                         {geminiGenLoading ? "Loading..." : "No GeminiGen accounts configured"}
                       </TableCell>
                     </TableRow>
@@ -754,15 +816,32 @@ export function TokenManagement() {
                           ) : null}
                         </TableCell>
                         <TableCell className="text-center">
-                          <span
-                            className={`inline-flex rounded px-2 py-0.5 text-xs ${
-                              account.is_active && account.profile_is_active !== false
-                                ? "bg-green-500/15 text-green-700 dark:text-green-400"
-                                : "bg-muted text-muted-foreground"
-                            }`}
-                          >
-                            {!account.is_active ? "Disabled" : account.profile_is_active === false ? "Inactive" : "Active"}
-                          </span>
+                          <div className="flex flex-col items-center gap-1">
+                            <span
+                              className={`inline-flex rounded px-2 py-0.5 text-xs ${
+                                account.is_active && account.profile_is_active !== false
+                                  ? "bg-green-500/15 text-green-700 dark:text-green-400"
+                                  : "bg-muted text-muted-foreground"
+                              }`}
+                            >
+                              {!account.is_active ? "Disabled" : account.profile_is_active === false ? "Inactive" : "Active"}
+                            </span>
+                            {account.image_gen_daily_limited ? (
+                              <span className="inline-flex rounded border border-amber-500/50 bg-amber-500/15 px-2 py-0.5 text-xs text-amber-800 dark:text-amber-300">
+                                Imagen daily limit · {formatGeminiGenDailyLimitCountdown(account.image_gen_daily_limit_reset_at)}
+                              </span>
+                            ) : null}
+                            {account.grok_image_daily_limited ? (
+                              <span className="inline-flex rounded border border-amber-500/50 bg-amber-500/15 px-2 py-0.5 text-xs text-amber-800 dark:text-amber-300">
+                                Grok Image daily limit · {formatGeminiGenDailyLimitCountdown(account.grok_image_daily_limit_reset_at)}
+                              </span>
+                            ) : null}
+                            {account.video_daily_limited ? (
+                              <span className="inline-flex rounded border border-amber-500/50 bg-amber-500/15 px-2 py-0.5 text-xs text-amber-800 dark:text-amber-300">
+                                Video daily limit · {formatGeminiGenDailyLimitCountdown(account.video_daily_limit_reset_at)}
+                              </span>
+                            ) : null}
+                          </div>
                         </TableCell>
                         <TableCell className="text-xs whitespace-nowrap">
                           <div className="font-medium tabular-nums">{formatNumberValue(account.available_credit)}</div>
@@ -783,6 +862,15 @@ export function TokenManagement() {
                         </TableCell>
                         <TableCell className="text-center tabular-nums">
                           {formatNumberValue(account.image_generated_today ?? 0)}/{formatNumberValue(account.image_generated_total ?? 0)}
+                        </TableCell>
+                        <TableCell className="text-xs whitespace-nowrap">
+                          <div className="space-y-2" title={account.quota_sync_error || account.quota_sync_status || ""}>
+                            <GeminiGenImageQuotaLine label="Imagen" quota={account.image_gen_quota} />
+                            <GeminiGenImageQuotaLine label="Grok Image" quota={account.grok_image_quota} />
+                            <div className="text-[10px] text-muted-foreground">
+                              {account.quota_sync_status || "not synced"} · {formatCompactDateTime(account.quota_synced_at)}
+                            </div>
+                          </div>
                         </TableCell>
                         <TableCell className="text-center tabular-nums">
                           {formatNumberValue(account.video_generated_today ?? 0)}/{formatNumberValue(account.video_generated_total ?? 0)}

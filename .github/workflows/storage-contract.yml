@@ -1,0 +1,62 @@
+name: PostgreSQL and Redis Storage Contract
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  storage-contract:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: flow2api
+          POSTGRES_PASSWORD: flow2api
+          POSTGRES_DB: flow2api
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U flow2api -d flow2api"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+
+    env:
+      FLOW2API_TEST_POSTGRES_URL: postgresql://flow2api:flow2api@127.0.0.1:5432/flow2api
+      FLOW2API_REDIS_URL: redis://127.0.0.1:6379/15
+      FLOW2API_TEST_REDIS_URL: redis://127.0.0.1:6379/15
+      FLOW2API_REDIS_MODE: required
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install PostgreSQL 16 client
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes postgresql-client-16
+      - name: Install backend and test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pytest pytest-asyncio
+      - name: Run storage contract tests
+        run: >-
+          python -m pytest -q
+          tests/test_postgres_bridge.py
+          tests/test_postgres_integration.py
+          tests/test_performance_runtime.py

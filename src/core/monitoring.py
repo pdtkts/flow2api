@@ -268,6 +268,130 @@ REMOTE_BROWSER_TARGET_LATENCY_SECONDS = Gauge(
     "Probe latency of the configured remote_browser target in seconds.",
     registry=MAIN_REGISTRY,
 )
+REDIS_READY = Gauge(
+    "flow2api_redis_ready",
+    "Whether Redis is connected and the Flow2API state marker is valid.",
+    registry=MAIN_REGISTRY,
+)
+REDIS_LATENCY_SECONDS = Gauge(
+    "flow2api_redis_latency_seconds",
+    "Most recent Redis ping latency.",
+    registry=MAIN_REGISTRY,
+)
+REDIS_STREAM_LENGTH = Gauge(
+    "flow2api_redis_stream_length",
+    "Current Flow2API event stream length.",
+    registry=MAIN_REGISTRY,
+)
+REDIS_CONSUMER_BACKLOG = Gauge(
+    "flow2api_redis_consumer_backlog",
+    "Unconsumed Flow2API persistence events.",
+    registry=MAIN_REGISTRY,
+)
+EVENT_CONSUMER_READY = Gauge(
+    "flow2api_event_consumer_ready",
+    "Whether the Redis-to-SQLite persistence worker is ready.",
+    registry=MAIN_REGISTRY,
+)
+WEBSOCKET_CLIENTS = Gauge(
+    "flow2api_websocket_clients",
+    "Connected admin event WebSocket clients.",
+    registry=MAIN_REGISTRY,
+)
+SQLITE_WRITER_WAIT_P95_SECONDS = Gauge(
+    "flow2api_sqlite_writer_wait_p95_seconds",
+    "In-process p95 wait for the persistent SQLite writer.",
+    registry=MAIN_REGISTRY,
+)
+SQLITE_WRITER_WAIT_MAX_SECONDS = Gauge(
+    "flow2api_sqlite_writer_wait_max_seconds",
+    "Maximum sampled in-process SQLite writer wait.",
+    registry=MAIN_REGISTRY,
+)
+POSTGRES_POOL_WAIT_P95_SECONDS = Gauge(
+    "flow2api_postgres_pool_wait_p95_seconds",
+    "Sampled p95 PostgreSQL connection-pool acquisition wait.",
+    registry=MAIN_REGISTRY,
+)
+POSTGRES_QUERY_DURATION_P95_SECONDS = Gauge(
+    "flow2api_postgres_query_duration_p95_seconds",
+    "Sampled p95 PostgreSQL query duration.",
+    registry=MAIN_REGISTRY,
+)
+POSTGRES_QUERY_ERRORS_TOTAL = Gauge(
+    "flow2api_postgres_query_errors_total",
+    "PostgreSQL query errors observed by the storage adapter.",
+    registry=MAIN_REGISTRY,
+)
+POSTGRES_CONNECTION_ERRORS_TOTAL = Gauge(
+    "flow2api_postgres_connection_errors_total",
+    "PostgreSQL connection and pool acquisition errors.",
+    registry=MAIN_REGISTRY,
+)
+POSTGRES_POOL_SIZE = Gauge(
+    "flow2api_postgres_pool_size",
+    "Current PostgreSQL pool size.",
+    registry=MAIN_REGISTRY,
+)
+POSTGRES_POOL_REQUESTS_WAITING = Gauge(
+    "flow2api_postgres_pool_requests_waiting",
+    "Requests currently waiting for a PostgreSQL pool connection.",
+    registry=MAIN_REGISTRY,
+)
+DATABASE_SIZE_BYTES = Gauge(
+    "flow2api_database_size_bytes",
+    "Durable database size in bytes.",
+    registry=MAIN_REGISTRY,
+)
+DATABASE_READY = Gauge(
+    "flow2api_database_ready",
+    "Whether the configured durable database answered its readiness probe.",
+    registry=MAIN_REGISTRY,
+)
+MAINTENANCE_ACTIVE = Gauge(
+    "flow2api_maintenance_active",
+    "Whether Redis-backed maintenance mode is active.",
+    registry=MAIN_REGISTRY,
+)
+EVENT_LOOP_LAG_SECONDS = Gauge(
+    "flow2api_event_loop_lag_seconds",
+    "Most recent event-loop scheduling lag.",
+    registry=MAIN_REGISTRY,
+)
+FAILED_PAYLOAD_QUEUE_DEPTH = Gauge(
+    "flow2api_failed_payload_queue_depth",
+    "Failed payload objects waiting for compression and upload.",
+    registry=MAIN_REGISTRY,
+)
+FAILED_PAYLOAD_PENDING_BYTES = Gauge(
+    "flow2api_failed_payload_pending_bytes",
+    "Bytes held in the bounded in-flight failure payload buffer.",
+    registry=MAIN_REGISTRY,
+)
+BACKGROUND_LOG_QUEUE_DEPTH = Gauge(
+    "flow2api_background_log_queue_depth",
+    "Diagnostic log records waiting for background handlers.",
+    registry=MAIN_REGISTRY,
+)
+BACKGROUND_LOG_DROPPED_TOTAL = Gauge(
+    "flow2api_background_log_dropped_total",
+    "Diagnostic log records dropped because the bounded queue was full.",
+    registry=MAIN_REGISTRY,
+)
+HTTP_ENDPOINT_DURATION_SECONDS = Histogram(
+    "flow2api_http_endpoint_duration_seconds",
+    "Flow2API endpoint duration excluding WebSocket lifetime.",
+    ["method", "route", "status"],
+    buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10),
+    registry=MAIN_REGISTRY,
+)
+HTTP_REQUEST_PAYLOAD_BYTES = Histogram(
+    "flow2api_http_request_payload_bytes",
+    "Declared HTTP request payload size.",
+    ["route"],
+    buckets=(256, 1024, 4096, 16384, 65536, 262144, 1048576, 4194304, 16777216),
+    registry=MAIN_REGISTRY,
+)
 TOKEN_ACTIVE = Gauge(
     "flow2api_token_active",
     "Whether a token is active.",
@@ -377,7 +501,75 @@ def record_token_refresh(kind: str, result: str) -> None:
     TOKEN_REFRESH_TOTAL.labels(kind=normalized_kind, result=normalized_result).inc()
 
 
+def record_endpoint_duration(
+    method: str,
+    route: str,
+    status_code: int,
+    duration_seconds: float,
+    request_size_bytes: int = 0,
+) -> None:
+    route_label = str(route or "unknown")[:160]
+    HTTP_ENDPOINT_DURATION_SECONDS.labels(
+        method=str(method or "UNKNOWN").upper(),
+        route=route_label,
+        status=str(int(status_code or 0)),
+    ).observe(max(0.0, float(duration_seconds)))
+    if request_size_bytes > 0:
+        HTTP_REQUEST_PAYLOAD_BYTES.labels(route=route_label).observe(float(request_size_bytes))
+
+
+def set_event_loop_lag(lag_seconds: float) -> None:
+    EVENT_LOOP_LAG_SECONDS.set(max(0.0, float(lag_seconds)))
+
+
 async def update_main_runtime_metrics(db: Any, concurrency_manager: Optional[Any] = None) -> None:
+    from ..services.failed_payload_store import failed_payload_manager
+    from ..services.redis_runtime import redis_runtime
+    from .logger import debug_logger
+
+    redis_status = redis_runtime.status_snapshot()
+    REDIS_READY.set(1.0 if redis_status["redis_ready"] else 0.0)
+    REDIS_LATENCY_SECONDS.set(float(redis_status["latency_ms"]) / 1000.0)
+    REDIS_STREAM_LENGTH.set(float(redis_status["stream_length"]))
+    REDIS_CONSUMER_BACKLOG.set(float(redis_status["consumer_backlog"]))
+    EVENT_CONSUMER_READY.set(1.0 if redis_status["event_consumer_ready"] else 0.0)
+    WEBSOCKET_CLIENTS.set(float(redis_status["websocket_clients"]))
+    MAINTENANCE_ACTIVE.set(1.0 if (redis_status.get("maintenance") or {}).get("active") else 0.0)
+
+    database_status = db.runtime_metrics()
+    if getattr(db, "backend", "sqlite") == "postgres":
+        SQLITE_WRITER_WAIT_P95_SECONDS.set(0.0)
+        SQLITE_WRITER_WAIT_MAX_SECONDS.set(0.0)
+        POSTGRES_POOL_WAIT_P95_SECONDS.set(database_status["pool_wait_seconds_p95"])
+        POSTGRES_QUERY_DURATION_P95_SECONDS.set(database_status["query_duration_seconds_p95"])
+        POSTGRES_QUERY_ERRORS_TOTAL.set(database_status["query_errors"])
+        POSTGRES_CONNECTION_ERRORS_TOTAL.set(database_status["connection_errors"])
+        POSTGRES_POOL_SIZE.set(database_status["pool_size"])
+        POSTGRES_POOL_REQUESTS_WAITING.set(database_status["pool_requests_waiting"])
+    else:
+        SQLITE_WRITER_WAIT_P95_SECONDS.set(database_status["writer_wait_seconds_p95"])
+        SQLITE_WRITER_WAIT_MAX_SECONDS.set(database_status["writer_wait_seconds_max"])
+        POSTGRES_POOL_WAIT_P95_SECONDS.set(0.0)
+        POSTGRES_QUERY_DURATION_P95_SECONDS.set(0.0)
+        POSTGRES_QUERY_ERRORS_TOTAL.set(0.0)
+        POSTGRES_CONNECTION_ERRORS_TOTAL.set(0.0)
+        POSTGRES_POOL_SIZE.set(0.0)
+        POSTGRES_POOL_REQUESTS_WAITING.set(0.0)
+    try:
+        health = await db.health_snapshot()
+        DATABASE_SIZE_BYTES.set(float(health.get("database_size_bytes") or 0))
+        DATABASE_READY.set(1.0 if health.get("database_ready") else 0.0)
+    except Exception:
+        DATABASE_SIZE_BYTES.set(0.0)
+        DATABASE_READY.set(0.0)
+
+    payload_status = failed_payload_manager.status_snapshot()
+    FAILED_PAYLOAD_QUEUE_DEPTH.set(float(payload_status["queue_depth"]))
+    FAILED_PAYLOAD_PENDING_BYTES.set(float(payload_status["pending_bytes"]))
+    logger_status = debug_logger.queue_status()
+    BACKGROUND_LOG_QUEUE_DEPTH.set(float(logger_status["depth"]))
+    BACKGROUND_LOG_DROPPED_TOTAL.set(float(logger_status["dropped"]))
+
     rows = await db.get_all_tokens_with_stats()
     now = datetime.now(timezone.utc)
 
@@ -512,7 +704,12 @@ async def update_main_runtime_metrics(db: Any, concurrency_manager: Optional[Any
 
 
 async def render_main_metrics(db: Any, concurrency_manager: Optional[Any] = None) -> bytes:
-    await update_main_runtime_metrics(db, concurrency_manager=concurrency_manager)
+    try:
+        await update_main_runtime_metrics(db, concurrency_manager=concurrency_manager)
+    except Exception:
+        # Metrics must remain scrapeable during a database outage. Runtime and
+        # database-ready gauges were updated before database-backed token series.
+        DATABASE_READY.set(0.0)
     return generate_latest(MAIN_REGISTRY)
 
 

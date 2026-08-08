@@ -176,6 +176,18 @@ class FileCache:
         target_free_bytes: Optional[int] = None,
     ) -> Dict[str, int]:
         """Restore the cache-volume reserve by evicting only generated media."""
+        async with self._cleanup_lock:
+            return await asyncio.to_thread(
+                self._reclaim_cache_space_sync,
+                required_bytes,
+                target_free_bytes,
+            )
+
+    def _reclaim_cache_space_sync(
+        self,
+        required_bytes: int = 0,
+        target_free_bytes: Optional[int] = None,
+    ) -> Dict[str, int]:
         if self.provider != "local":
             usage = self._disk_usage()
             return {
@@ -185,63 +197,62 @@ class FileCache:
                 "reclaimed_bytes": 0,
                 "removed_count": 0,
             }
-        async with self._cleanup_lock:
-            usage = self._disk_usage()
-            target = (
-                self._free_space_target(usage.total, required_bytes)
-                if target_free_bytes is None
-                else max(0, int(target_free_bytes)) + max(0, int(required_bytes))
-            )
-            free_before = usage.free
-            reclaimed = 0
-            removed = 0
-            now = time.time()
-            timeout = self.get_timeout()
-            candidates = []
+        usage = self._disk_usage()
+        target = (
+            self._free_space_target(usage.total, required_bytes)
+            if target_free_bytes is None
+            else max(0, int(target_free_bytes)) + max(0, int(required_bytes))
+        )
+        free_before = usage.free
+        reclaimed = 0
+        removed = 0
+        now = time.time()
+        timeout = self.get_timeout()
+        candidates = []
 
-            for path in self._iter_cache_files() or ():
-                try:
-                    if path.is_symlink() or not path.is_file():
-                        continue
-                    stat = path.stat()
-                except OSError:
-                    continue
-                age = now - stat.st_mtime
-                if path.name.endswith(".part"):
-                    if age < STALE_PART_SECONDS:
-                        continue
-                    priority = 0
-                elif self._is_generated_media(path):
-                    priority = 1 if timeout > 0 and age > timeout else 2
-                else:
-                    continue
-                candidates.append((priority, stat.st_mtime, path))
-
-            for _priority, _mtime, path in sorted(candidates, key=lambda item: (item[0], item[1])):
-                if free_before + reclaimed >= target:
-                    break
-                size = self._safe_unlink(path)
-                if size or not path.exists():
-                    reclaimed += size
-                    removed += 1
-
+        for path in self._iter_cache_files() or ():
             try:
-                free_after = self._disk_usage().free
+                if path.is_symlink() or not path.is_file():
+                    continue
+                stat = path.stat()
             except OSError:
-                free_after = free_before + reclaimed
-            result = {
-                "free_before": int(free_before),
-                "free_after": int(free_after),
-                "target_free": int(target),
-                "reclaimed_bytes": int(reclaimed),
-                "removed_count": int(removed),
-            }
-            if removed:
-                debug_logger.log_warning(
-                    "Cache space recovery removed "
-                    f"{removed} file(s) ({reclaimed} bytes); free={free_after}, target={target}"
-                )
-            return result
+                continue
+            age = now - stat.st_mtime
+            if path.name.endswith(".part"):
+                if age < STALE_PART_SECONDS:
+                    continue
+                priority = 0
+            elif self._is_generated_media(path):
+                priority = 1 if timeout > 0 and age > timeout else 2
+            else:
+                continue
+            candidates.append((priority, stat.st_mtime, path))
+
+        for _priority, _mtime, path in sorted(candidates, key=lambda item: (item[0], item[1])):
+            if free_before + reclaimed >= target:
+                break
+            size = self._safe_unlink(path)
+            if size or not path.exists():
+                reclaimed += size
+                removed += 1
+
+        try:
+            free_after = self._disk_usage().free
+        except OSError:
+            free_after = free_before + reclaimed
+        result = {
+            "free_before": int(free_before),
+            "free_after": int(free_after),
+            "target_free": int(target),
+            "reclaimed_bytes": int(reclaimed),
+            "removed_count": int(removed),
+        }
+        if removed:
+            debug_logger.log_warning(
+                "Cache space recovery removed "
+                f"{removed} file(s) ({reclaimed} bytes); free={free_after}, target={target}"
+            )
+        return result
 
     async def ensure_cache_capacity(self, required_bytes: int = 0) -> Dict[str, int]:
         result = await self.reclaim_cache_space(required_bytes)
@@ -610,6 +621,10 @@ class FileCache:
         while True:
             try:
                 await asyncio.sleep(300)  # Check every 5 minutes
+                from .redis_runtime import redis_runtime
+
+                if redis_runtime.maintenance_active:
+                    continue
                 await self._cleanup_expired_files()
                 await self.reclaim_cache_space()
             except asyncio.CancelledError:
@@ -635,33 +650,7 @@ class FileCache:
                 )
                 return {"removed_count": 0, "reclaimed_bytes": 0}
         try:
-            timeout = self.get_timeout()
-            current_time = time.time()
-            removed_count = 0
-            removed_bytes = 0
-
-            for file_path in self.cache_dir.iterdir():
-                try:
-                    if file_path.is_symlink() or not file_path.is_file():
-                        continue
-                    file_age = current_time - file_path.stat().st_mtime
-                except OSError:
-                    continue
-                stale_part = file_path.name.endswith(".part") and file_age >= STALE_PART_SECONDS
-                expired_media = (
-                    timeout > 0 and self._is_generated_media(file_path) and file_age > timeout
-                )
-                if stale_part or expired_media:
-                    size = self._safe_unlink(file_path)
-                    if size or not file_path.exists():
-                        removed_bytes += size
-                        removed_count += 1
-
-            if removed_count > 0:
-                debug_logger.log_info(f"Cleanup: removed {removed_count} expired cache files")
-
-            return {"removed_count": removed_count, "reclaimed_bytes": removed_bytes}
-
+            return await asyncio.to_thread(self._cleanup_local_expired_sync)
         except Exception as e:
             debug_logger.log_error(
                 error_message=f"Failed to cleanup expired files: {str(e)}",
@@ -669,6 +658,29 @@ class FileCache:
                 response_text=""
             )
             return {"removed_count": 0, "reclaimed_bytes": 0}
+
+    def _cleanup_local_expired_sync(self) -> Dict[str, int]:
+        timeout = self.get_timeout()
+        current_time = time.time()
+        removed_count = 0
+        removed_bytes = 0
+        for file_path in self.cache_dir.iterdir():
+            try:
+                if file_path.is_symlink() or not file_path.is_file():
+                    continue
+                file_age = current_time - file_path.stat().st_mtime
+            except OSError:
+                continue
+            stale_part = file_path.name.endswith(".part") and file_age >= STALE_PART_SECONDS
+            expired_media = timeout > 0 and self._is_generated_media(file_path) and file_age > timeout
+            if stale_part or expired_media:
+                size = self._safe_unlink(file_path)
+                if size or not file_path.exists():
+                    removed_bytes += size
+                    removed_count += 1
+        if removed_count > 0:
+            debug_logger.log_info(f"Cleanup: removed {removed_count} expired cache files")
+        return {"removed_count": removed_count, "reclaimed_bytes": removed_bytes}
 
     def _generate_cache_filename(
         self,
@@ -969,7 +981,13 @@ class FileCache:
                         env = None
 
                     wget_cmd.append(url)
-                    result = subprocess.run(wget_cmd, capture_output=True, timeout=90, env=env)
+                    result = await asyncio.to_thread(
+                        subprocess.run,
+                        wget_cmd,
+                        capture_output=True,
+                        timeout=90,
+                        env=env,
+                    )
 
                     if result.returncode == 0 and file_path.exists():
                         file_size = self._validate_cached_file(file_path, media_type)
@@ -1032,7 +1050,12 @@ class FileCache:
                         curl_cmd.extend(["-x", proxy_url])
 
                     curl_cmd.append(url)
-                    result = subprocess.run(curl_cmd, capture_output=True, timeout=90)
+                    result = await asyncio.to_thread(
+                        subprocess.run,
+                        curl_cmd,
+                        capture_output=True,
+                        timeout=90,
+                    )
 
                     if result.returncode == 0 and file_path.exists():
                         file_size = self._validate_cached_file(file_path, media_type)

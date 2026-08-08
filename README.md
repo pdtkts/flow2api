@@ -41,6 +41,7 @@
 - 生产向 **Agent Gateway**（Flow2API → HTTP，用户 PC 通过 WebSocket 接任务）：见 [`docs/agent-gateway.md`](./docs/agent-gateway.md) 与 [`src/agent_gateway/`](./src/agent_gateway/)。
 - 异步任务提交与轮询（`/v1/async/chat/completions`、`/v1/jobs/{job_id}`）：见 [`docs/async-polling.md`](./docs/async-polling.md)。
 - Runway web-task integration is available through the admin `Runway` tab, `runway-*` models, and `/v1/runway/*` routes. See [`docs/runway.md`](./docs/runway.md). It includes a manifest-backed model registry, live feature sync, real Runway uploads/datasets, image/video/audio/upscale task builders, OpenAI-compatible dispatch, voices, estimates, cancel, async polling, and cache mirroring.
+- Production performance, Railway Redis, WebSocket events, and seven-day retention are documented in [`docs/performance-redis-rollout.md`](./docs/performance-redis-rollout.md). The PostgreSQL 16 bridge, migration, encrypted Google Drive backup, cutover, and rollback procedure is in [`docs/postgres-migration-runbook.md`](./docs/postgres-migration-runbook.md).
 
 - 自动更新st浏览器拓展：[Flow2API-Token-Updater](https://github.com/TheSmallHanCat/Flow2API-Token-Updater)
 

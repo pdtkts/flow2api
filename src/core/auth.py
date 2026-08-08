@@ -6,15 +6,57 @@ from fastapi import Header, HTTPException, Query, Security, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from .config import config
 from .api_key_manager import AuthContext
+from ..services.redis_runtime import RedisUnavailableError, is_new_protected_work
 
 security = HTTPBearer()
 optional_security = HTTPBearer(auto_error=False)
 api_key_manager = None
 
 
+def _redis_unavailable_response(exc: RedisUnavailableError) -> HTTPException:
+    return HTTPException(
+        status_code=503,
+        detail="redis_unavailable",
+        headers={"Retry-After": "5"},
+    )
+
+
 def set_api_key_manager(manager):
     global api_key_manager
     api_key_manager = manager
+
+
+async def _record_api_key_audit(
+    *,
+    api_key_id: Optional[int],
+    endpoint: str,
+    account_id: Optional[int],
+    status_code: int,
+    detail: str,
+    request: Request,
+) -> None:
+    if api_key_manager is None:
+        return
+    payload = {
+        "api_key_id": api_key_id,
+        "endpoint": endpoint,
+        "account_id": account_id,
+        "status_code": status_code,
+        "detail": detail,
+        "ip": request.client.host if request.client else "",
+        "user_agent": request.headers.get("user-agent", ""),
+    }
+    runtime = getattr(api_key_manager, "redis_runtime", None)
+    if runtime is not None and runtime.ready:
+        try:
+            await runtime.queue_audit(payload)
+        except RedisUnavailableError:
+            if runtime.required and is_new_protected_work(request.method, endpoint):
+                raise
+        else:
+            if runtime.required:
+                return
+    await api_key_manager.db.insert_api_key_audit_log(**payload)
 
 class AuthManager:
     """Authentication manager"""
@@ -83,44 +125,56 @@ async def verify_api_key_flexible(
         )
 
     try:
+        runtime = getattr(api_key_manager, "redis_runtime", None)
+        require_redis = bool(
+            runtime is not None
+            and runtime.required
+            and is_new_protected_work(request.method, endpoint)
+        )
         context = await api_key_manager.authenticate(
             api_key,
             endpoint=endpoint,
             require_assignment=require_assignment,
+            require_redis=require_redis,
         )
-        await api_key_manager.db.insert_api_key_audit_log(
+        await _record_api_key_audit(
             api_key_id=context.key_id,
             endpoint=endpoint,
             account_id=None,
             status_code=200,
             detail="ok",
-            ip=(request.client.host if request.client else ""),
-            user_agent=request.headers.get("user-agent", ""),
+            request=request,
         )
         return context
+    except RedisUnavailableError as exc:
+        raise _redis_unavailable_response(exc) from exc
     except PermissionError as exc:
-        await api_key_manager.db.insert_api_key_audit_log(
-            api_key_id=None,
-            endpoint=endpoint,
-            account_id=None,
-            status_code=403 if require_assignment else 401,
-            detail=str(exc),
-            ip=(request.client.host if request.client else ""),
-            user_agent=request.headers.get("user-agent", ""),
-        )
+        try:
+            await _record_api_key_audit(
+                api_key_id=None,
+                endpoint=endpoint,
+                account_id=None,
+                status_code=403 if require_assignment else 401,
+                detail=str(exc),
+                request=request,
+            )
+        except RedisUnavailableError as redis_exc:
+            raise _redis_unavailable_response(redis_exc) from redis_exc
         if "accounts assigned" in str(exc).lower():
             raise HTTPException(status_code=403, detail=str(exc))
         raise HTTPException(status_code=401, detail=str(exc))
     except RuntimeError as exc:
-        await api_key_manager.db.insert_api_key_audit_log(
-            api_key_id=None,
-            endpoint=endpoint,
-            account_id=None,
-            status_code=429,
-            detail=str(exc),
-            ip=(request.client.host if request.client else ""),
-            user_agent=request.headers.get("user-agent", ""),
-        )
+        try:
+            await _record_api_key_audit(
+                api_key_id=None,
+                endpoint=endpoint,
+                account_id=None,
+                status_code=429,
+                detail=str(exc),
+                request=request,
+            )
+        except RedisUnavailableError as redis_exc:
+            raise _redis_unavailable_response(redis_exc) from redis_exc
         raise HTTPException(status_code=429, detail=str(exc))
 
 

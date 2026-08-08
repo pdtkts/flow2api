@@ -21,6 +21,7 @@ const CLOUDFLARE_MODELS = [
 ]
 
 const PRESET_MODELS: Record<string, string[]> = {
+  cliproxy: [],
   gemini_native: ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro", "gemini-1.5-flash", "gemini-1.5-pro"],
   openai: ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "gpt-4.1-mini", "gpt-4.1"],
   openrouter: ["moonshotai/kimi-k2.6", "google/gemma-4-26b-a4b-it"],
@@ -29,6 +30,7 @@ const PRESET_MODELS: Record<string, string[]> = {
 }
 
 const CLONING_BACKENDS = [
+  "cliproxy",
   "gemini_native",
   "openai",
   "openrouter",
@@ -43,6 +45,7 @@ export function CloningSettings({ active }: { active: boolean }) {
   const [enabledProviders, setEnabledProviders] = useState<string[]>(["gemini_native"])
   const [providerRetryCount, setProviderRetryCount] = useState(1)
   const [model, setModel] = useState("gemini-2.5-flash")
+  const [gatewayModels, setGatewayModels] = useState<string[]>([])
 
 
   const [geminiKeys, setGeminiKeys] = useState("")
@@ -55,7 +58,14 @@ export function CloningSettings({ active }: { active: boolean }) {
 
   const load = useCallback(async () => {
     if (!token || !active) return
-    const resp = await adminJson<{ success?: boolean; config?: Record<string, unknown> }>("/api/config/generation", token)
+    const [resp, gatewayResp] = await Promise.all([
+      adminJson<{ success?: boolean; config?: Record<string, unknown> }>("/api/config/generation", token),
+      adminJson<Array<{ id: string }>>("/api/admin/cliproxy/models", token),
+    ])
+    const gatewayIds = gatewayResp.ok && gatewayResp.data
+      ? gatewayResp.data.map((entry) => entry.id).filter(Boolean)
+      : []
+    if (gatewayIds.length) setGatewayModels(gatewayIds)
     if (!resp.ok || !resp.data?.success || !resp.data.config) return
     const c = resp.data.config
     const legacyBackend = String(c.flow2api_cloning_backend || "gemini_native").trim() || "gemini_native"
@@ -64,9 +74,11 @@ export function CloningSettings({ active }: { active: boolean }) {
       .map((x) => x.trim())
       .filter(Boolean)
       .filter((x) => CLONING_BACKENDS.includes(x))
+    const configuredOrder = orderFromConfig.length ? orderFromConfig : [legacyBackend]
     const normalizedOrder = [
-      ...(orderFromConfig.length ? orderFromConfig : [legacyBackend]),
-      ...CLONING_BACKENDS.filter((x) => !(orderFromConfig.length ? orderFromConfig : [legacyBackend]).includes(x)),
+      "cliproxy",
+      ...configuredOrder.filter((provider) => provider !== "cliproxy"),
+      ...CLONING_BACKENDS.filter((provider) => provider !== "cliproxy" && !configuredOrder.includes(provider)),
     ]
     const enabledFromConfig = String(c.flow2api_cloning_enabled_providers || "")
       .split(",")
@@ -75,7 +87,7 @@ export function CloningSettings({ active }: { active: boolean }) {
       .filter((x) => normalizedOrder.includes(x))
     const normalizedEnabled = enabledFromConfig.length ? enabledFromConfig : [legacyBackend]
     const selectedProvider = normalizedOrder.find((p) => normalizedEnabled.includes(p)) || normalizedOrder[0] || "gemini_native"
-    const presets = PRESET_MODELS[selectedProvider] || []
+    const presets = selectedProvider === "cliproxy" ? gatewayIds : (PRESET_MODELS[selectedProvider] || [])
     let modelStr = String(c.flow2api_cloning_model || "").trim()
     if (!modelStr) {
       modelStr = presets[0] || "gemini-2.5-flash"
@@ -103,11 +115,11 @@ export function CloningSettings({ active }: { active: boolean }) {
 
   /** Include the persisted model so Radix Select never gets a value missing from items (fixes blank dropdown after load). */
   const backendModels = useMemo(() => {
-    const base = [...(PRESET_MODELS[selectedProvider] || [])]
+    const base = [...(selectedProvider === "cliproxy" ? gatewayModels : (PRESET_MODELS[selectedProvider] || []))]
     const cur = model.trim()
     if (cur && !base.includes(cur)) base.unshift(cur)
     return base
-  }, [selectedProvider, model])
+  }, [gatewayModels, selectedProvider, model])
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -142,7 +154,7 @@ export function CloningSettings({ active }: { active: boolean }) {
 
   const save = async () => {
     if (!token) return
-    const presets = PRESET_MODELS[selectedProvider] || []
+    const presets = selectedProvider === "cliproxy" ? gatewayModels : (PRESET_MODELS[selectedProvider] || [])
     let modelOut = model.trim()
     if (!modelOut) {
       modelOut = presets[0] || "gemini-2.5-flash"

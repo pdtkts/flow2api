@@ -48,9 +48,23 @@ class RailwayRuntimeConfigTests(unittest.TestCase):
 
     def test_railway_volume_mount_sets_runtime_dirs(self):
         with tempfile.TemporaryDirectory() as tmp:
-            with patch.dict(os.environ, {"RAILWAY_VOLUME_MOUNT_PATH": tmp}, clear=False):
+            with patch.dict(
+                os.environ,
+                {"RAILWAY_VOLUME_MOUNT_PATH": tmp, "FLOW2API_TMP_DIR": ""},
+                clear=False,
+            ):
                 self.assertEqual(get_runtime_data_dir(), Path(tmp) / "data")
                 self.assertEqual(get_runtime_tmp_dir(), Path(tmp) / "tmp")
+
+    def test_explicit_tmp_dir_avoids_the_persistent_volume(self):
+        with tempfile.TemporaryDirectory() as volume, tempfile.TemporaryDirectory() as staging:
+            with patch.dict(
+                os.environ,
+                {"RAILWAY_VOLUME_MOUNT_PATH": volume, "FLOW2API_TMP_DIR": staging},
+                clear=False,
+            ):
+                self.assertEqual(get_runtime_data_dir(), Path(volume) / "data")
+                self.assertEqual(get_runtime_tmp_dir(), Path(staging))
 
     def test_database_default_path_uses_railway_volume(self):
         with tempfile.TemporaryDirectory() as tmp:

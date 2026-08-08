@@ -14,6 +14,7 @@ from fastapi import HTTPException
 
 from src.core.database import Database
 from src.core.config import config
+from src.core.api_key_manager import AuthContext
 from src.services.cloning_metadata_service import (
     _cloning_remaining_timeout,
     _ensure_meaningful_image_prompt,
@@ -21,6 +22,7 @@ from src.services.cloning_metadata_service import (
 )
 from src.services.geminigen_service import (
     GEMINIGEN_CAPACITY_ERROR_CODE,
+    GEMINIGEN_DAILY_LIMIT_ERROR_CODE,
     GeminiGenService,
     GeminiGenUpstreamError,
 )
@@ -428,6 +430,33 @@ def _sample_geminigen_me_payload():
     }
 
 
+def _sample_geminigen_quota_payload(path: str):
+    return {
+        "/api/user/quota/image-gen": {
+            "is_image_gen_max": True,
+            "is_image_premium": True,
+            "concurrent_streams": 0,
+            "remaining_image_gen_max_daily_images": 0,
+            "remaining_free_daily_images": 0,
+        },
+        "/api/user/quota/grok-image": {
+            "is_grok_image_max": True,
+            "is_image_premium": True,
+            "concurrent_streams": 0,
+            "remaining_grok_image_max_daily_images": 50,
+            "remaining_free_daily_images": 0,
+        },
+        "/api/user/quota/grok-max": {
+            "is_grok_max": False,
+            "concurrent_streams": 0,
+            "remaining_grok_max_daily_videos": 0,
+            "remaining_grok_max_daily_720p_videos": 0,
+            "remaining_grok_max_daily_10s_videos": 0,
+            "remaining_grok_max_daily_15s_videos": 0,
+        },
+    }[path]
+
+
 def test_geminigen_me_profile_parser_normalizes_user_credit_plan_and_benefits():
     parsed = GeminiGenService.parse_me_profile(_sample_geminigen_me_payload())
     benefits = json.loads(parsed["active_benefits_json"])
@@ -454,6 +483,55 @@ def test_geminigen_me_profile_parser_normalizes_user_credit_plan_and_benefits():
     ]
 
 
+def test_geminigen_quota_parsers_normalize_snapgen_payloads():
+    image_gen = GeminiGenService.parse_image_gen_quota(
+        _sample_geminigen_quota_payload("/api/user/quota/image-gen")
+    )
+    grok_image = GeminiGenService.parse_grok_image_quota(
+        _sample_geminigen_quota_payload("/api/user/quota/grok-image")
+    )
+    grok_max = GeminiGenService.parse_grok_max_quota(
+        _sample_geminigen_quota_payload("/api/user/quota/grok-max")
+    )
+
+    assert image_gen["is_image_gen_max"] is True
+    assert image_gen["remaining_image_gen_max_daily_images"] == 0
+    assert grok_image["remaining_grok_image_max_daily_images"] == 50
+    assert grok_max["remaining_grok_max_daily_15s_videos"] == 0
+
+
+def test_geminigen_and_snapgen_host_normalization_updates_origin_headers():
+    async def run():
+        service = GeminiGenService.__new__(GeminiGenService)
+
+        async def guard(**_kwargs):
+            return "guard"
+
+        service._compute_x_guard_id = guard
+        account = GeminiGenAccount(bearer_token="token")
+        gemini_headers = await service._headers(
+            account,
+            "/api/user/quota/image-gen",
+            base_url="https://api.geminigen.ai",
+        )
+        snap_headers = await service._headers(
+            account,
+            "/api/user/quota/image-gen",
+            base_url="https://snapgen.ai",
+        )
+        return gemini_headers, snap_headers
+
+    gemini_headers, snap_headers = asyncio.run(run())
+
+    assert GeminiGenService._api_base_url("https://geminigen.ai") == "https://api.geminigen.ai"
+    assert GeminiGenService._api_base_url("https://snapgen.ai") == "https://api.snapgen.ai"
+    assert gemini_headers["Origin"] == "https://geminigen.ai"
+    assert gemini_headers["Referer"] == "https://geminigen.ai/"
+    assert snap_headers["Origin"] == "https://snapgen.ai"
+    assert snap_headers["Referer"] == "https://snapgen.ai/"
+    assert snap_headers["x-guard-id"] == "guard"
+
+
 def test_geminigen_account_profile_sync_stores_me_payload():
     async def run():
         tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
@@ -467,14 +545,20 @@ def test_geminigen_account_profile_sync_stores_me_payload():
             async def fetch(_account, _base_url):
                 return _sample_geminigen_me_payload()
 
+            async def fetch_json(_account, _base_url, path):
+                return _sample_geminigen_quota_payload(path)
+
             service._fetch_me_profile_payload = fetch
+            service._fetch_account_json_payload = fetch_json
             result = await service.sync_account_profile(account_id)
             account = await db.get_geminigen_account(account_id)
-            return result, account
+            blocked_imagen = await db.acquire_geminigen_account("image", endpoint_type="imagen")
+            allowed_grok = await db.acquire_geminigen_account("image", endpoint_type="grok-image")
+            return result, account, blocked_imagen, allowed_grok
         finally:
             os.unlink(tmp.name)
 
-    result, account = asyncio.run(run())
+    result, account, blocked_imagen, allowed_grok = asyncio.run(run())
 
     assert result["success"] is True
     assert account.profile_email == "huzaifaphantompak@gmail.com"
@@ -485,6 +569,13 @@ def test_geminigen_account_profile_sync_stores_me_payload():
     assert account.profile_sync_status == "healthy"
     assert account.profile_sync_error == ""
     assert account.profile_synced_at is not None
+    assert account.quota_sync_status == "healthy"
+    assert account.remaining_image_gen_max_daily_images == 0
+    assert account.remaining_grok_image_max_daily_images == 50
+    assert account.image_gen_daily_limit_reset_at is not None
+    assert account.grok_image_daily_limit_reset_at is None
+    assert blocked_imagen is None
+    assert allowed_grok is not None
 
 
 def test_geminigen_account_profile_sync_failure_preserves_saved_profile():
@@ -523,6 +614,48 @@ def test_geminigen_account_profile_sync_failure_preserves_saved_profile():
     assert account.profile_synced_at is not None
 
 
+def test_geminigen_quota_sync_is_best_effort_and_preserves_failed_bucket():
+    async def run():
+        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        tmp.close()
+        db = Database(tmp.name)
+        try:
+            await db.init_db()
+            account_id = await db.create_geminigen_account(label="primary", raw_cookie="", bearer_token="token")
+            await db.update_geminigen_account(
+                account_id,
+                is_image_gen_max=True,
+                remaining_image_gen_max_daily_images=12,
+            )
+            service = GeminiGenService(db, None)
+
+            async def fetch_me(_account, _base_url):
+                return _sample_geminigen_me_payload()
+
+            async def fetch_json(_account, _base_url, path):
+                if path == "/api/user/quota/image-gen":
+                    raise RuntimeError("quota unavailable")
+                return _sample_geminigen_quota_payload(path)
+
+            service._fetch_me_profile_payload = fetch_me
+            service._fetch_account_json_payload = fetch_json
+            result = await service.sync_account_profile(account_id)
+            account = await db.get_geminigen_account(account_id)
+            return result, account
+        finally:
+            os.unlink(tmp.name)
+
+    result, account = asyncio.run(run())
+
+    assert result["success"] is True
+    assert result["quota_status"] == "partial"
+    assert "image_gen: quota unavailable" in result["quota_error"]
+    assert account.profile_sync_status == "healthy"
+    assert account.remaining_image_gen_max_daily_images == 12
+    assert account.remaining_grok_image_max_daily_images == 50
+    assert account.quota_sync_status == "partial"
+
+
 def test_geminigen_account_profile_stale_uses_one_hour_ttl():
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     fresh = GeminiGenAccount(profile_synced_at=now - timedelta(minutes=30))
@@ -559,6 +692,132 @@ def test_geminigen_image_capacity_uses_sum_of_account_slots_not_default_global_c
     assert blocked is None
     assert sorted(account.image_in_flight for account in accounts) == [5, 5]
     assert all(account.image_in_flight <= account.image_concurrency for account in accounts)
+
+
+def test_geminigen_disabled_account_is_excluded_from_pool_capacity():
+    async def run():
+        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        tmp.close()
+        db = Database(tmp.name)
+        try:
+            await db.init_db()
+            enabled_ids = [
+                await db.create_geminigen_account(
+                    label=f"enabled-{index}",
+                    raw_cookie="",
+                    bearer_token=f"token-{index}",
+                    image_concurrency=5,
+                )
+                for index in range(2)
+            ]
+            disabled_id = await db.create_geminigen_account(
+                label="disabled",
+                raw_cookie="",
+                bearer_token="disabled-token",
+                is_active=False,
+                image_concurrency=5,
+            )
+
+            acquired = [await db.acquire_geminigen_account("image") for _ in range(10)]
+            blocked = await db.acquire_geminigen_account("image")
+            accounts = {
+                account_id: await db.get_geminigen_account(account_id)
+                for account_id in [*enabled_ids, disabled_id]
+            }
+            return acquired, blocked, accounts, enabled_ids, disabled_id
+        finally:
+            os.unlink(tmp.name)
+
+    acquired, blocked, accounts, enabled_ids, disabled_id = asyncio.run(run())
+
+    assert len([account for account in acquired if account is not None]) == 10
+    assert {account.id for account in acquired} == set(enabled_ids)
+    assert blocked is None
+    assert sorted(accounts[account_id].image_in_flight for account_id in enabled_ids) == [5, 5]
+    assert accounts[disabled_id].image_in_flight == 0
+
+
+def test_geminigen_account_delete_preserves_task_history_without_foreign_key_error():
+    async def run():
+        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        tmp.close()
+        db = Database(tmp.name)
+        try:
+            await db.init_db()
+            account_id = await db.create_geminigen_account(
+                label="delete-me",
+                raw_cookie="",
+                bearer_token="token",
+            )
+            await db.create_geminigen_task(
+                GeminiGenTask(
+                    job_id="geminigen-delete-history",
+                    account_id=account_id,
+                    public_model_id="geminigen-nano-banana-pro-image-landscape-1k",
+                    kind="image",
+                    endpoint_type="imagen",
+                    status="completed",
+                )
+            )
+
+            deleted = await db.delete_geminigen_account(account_id)
+            account = await db.get_geminigen_account(account_id)
+            task = await db.get_geminigen_task("geminigen-delete-history")
+            return deleted, account, task
+        finally:
+            os.unlink(tmp.name)
+
+    deleted, account, task = asyncio.run(run())
+
+    assert deleted is True
+    assert account is None
+    assert task is not None
+    assert task.account_id is None
+
+
+def test_geminigen_admin_delete_cancels_assigned_jobs_before_removing_account():
+    async def run():
+        from src.api import admin as admin_routes
+
+        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        tmp.close()
+        db = Database(tmp.name)
+        previous_db = admin_routes.db
+        try:
+            await db.init_db()
+            account_id = await db.create_geminigen_account(
+                label="delete-active",
+                raw_cookie="",
+                bearer_token="token",
+            )
+            await db.update_geminigen_account(account_id, image_in_flight=1)
+            await db.create_geminigen_task(
+                GeminiGenTask(
+                    job_id="geminigen-delete-active",
+                    account_id=account_id,
+                    public_model_id="geminigen-nano-banana-pro-image-landscape-1k",
+                    kind="image",
+                    endpoint_type="imagen",
+                    status="processing",
+                )
+            )
+            admin_routes.db = db
+
+            result = await admin_routes.delete_geminigen_account(account_id, token="admin-token")
+            account = await db.get_geminigen_account(account_id)
+            task = await db.get_geminigen_task("geminigen-delete-active")
+            return result, account, task
+        finally:
+            admin_routes.db = previous_db
+            os.unlink(tmp.name)
+
+    result, account, task = asyncio.run(run())
+
+    assert result["success"] is True
+    assert result["tasks_cleared"] == 1
+    assert account is None
+    assert task.status == "cancelled"
+    assert task.account_id is None
 
 
 def test_geminigen_video_capacity_is_independent_from_image_slots():
@@ -628,6 +887,202 @@ def test_geminigen_acquire_respects_excluded_account_cooldown():
     assert second.image_in_flight == 1
 
 
+def test_geminigen_daily_limit_is_persisted_per_endpoint_and_expires():
+    async def run():
+        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        tmp.close()
+        try:
+            db = Database(tmp.name)
+            await db.init_db()
+            account_id = await db.create_geminigen_account(
+                label="daily-limited",
+                raw_cookie="",
+                bearer_token="token",
+                image_concurrency=1,
+                video_concurrency=1,
+            )
+            future_reset = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=2)
+            await db.update_geminigen_account(
+                account_id,
+                image_gen_daily_limit_reset_at=future_reset,
+            )
+
+            blocked_image = await db.acquire_geminigen_account("image", endpoint_type="imagen")
+            allowed_grok = await db.acquire_geminigen_account("image", endpoint_type="grok-image")
+            await db.release_geminigen_account(account_id, "image")
+            allowed_video = await db.acquire_geminigen_account("video")
+            await db.release_geminigen_account(account_id, "video")
+
+            reopened = Database(tmp.name)
+            persisted = await reopened.get_geminigen_account(account_id)
+            state = await reopened.get_geminigen_daily_limit_pool_state("image", endpoint_type="imagen")
+
+            past_reset = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=1)
+            await reopened.update_geminigen_account(
+                account_id,
+                image_gen_daily_limit_reset_at=past_reset,
+            )
+            allowed_after_reset = await reopened.acquire_geminigen_account("image", endpoint_type="imagen")
+            return blocked_image, allowed_grok, allowed_video, persisted, state, allowed_after_reset
+        finally:
+            os.unlink(tmp.name)
+
+    blocked_image, allowed_grok, allowed_video, persisted, state, allowed_after_reset = asyncio.run(run())
+
+    assert blocked_image is None
+    assert allowed_grok is not None
+    assert allowed_video is not None
+    assert persisted.image_gen_daily_limit_reset_at is not None
+    assert state["account_count"] == 1
+    assert state["daily_limited_count"] == 1
+    assert allowed_after_reset is not None
+
+
+def test_geminigen_cached_quota_decrement_is_atomic_and_bucket_specific():
+    async def run():
+        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        tmp.close()
+        db = Database(tmp.name)
+        try:
+            await db.init_db()
+            account_id = await db.create_geminigen_account(
+                label="quota",
+                raw_cookie="",
+                bearer_token="token",
+                image_concurrency=5,
+            )
+            await db.update_geminigen_account(
+                account_id,
+                is_image_gen_max=True,
+                remaining_image_gen_max_daily_images=2,
+                image_gen_quota_synced_at=datetime.now(timezone.utc).replace(tzinfo=None),
+                is_grok_image_max=True,
+                remaining_grok_image_max_daily_images=50,
+            )
+            decremented = await asyncio.gather(
+                db.decrement_geminigen_cached_quota(account_id, "imagen"),
+                db.decrement_geminigen_cached_quota(account_id, "imagen"),
+            )
+            account = await db.get_geminigen_account(account_id)
+            return decremented, account
+        finally:
+            os.unlink(tmp.name)
+
+    decremented, account = asyncio.run(run())
+
+    assert decremented == [True, True]
+    assert account.remaining_image_gen_max_daily_images == 0
+    assert account.remaining_grok_image_max_daily_images == 50
+    assert account.image_gen_daily_limit_reset_at is not None
+    assert account.grok_image_daily_limit_reset_at is None
+
+
+def test_geminigen_cached_quota_is_not_decremented_when_sync_is_stale():
+    async def run():
+        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        tmp.close()
+        db = Database(tmp.name)
+        try:
+            await db.init_db()
+            account_id = await db.create_geminigen_account(label="stale", raw_cookie="", bearer_token="token")
+            await db.update_geminigen_account(
+                account_id,
+                is_grok_image_max=True,
+                remaining_grok_image_max_daily_images=10,
+                grok_image_quota_synced_at=datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=1),
+            )
+            decremented = await db.decrement_geminigen_cached_quota(account_id, "grok-image")
+            account = await db.get_geminigen_account(account_id)
+            return decremented, account
+        finally:
+            os.unlink(tmp.name)
+
+    decremented, account = asyncio.run(run())
+
+    assert decremented is False
+    assert account.remaining_grok_image_max_daily_images == 10
+    assert account.grok_image_daily_limit_reset_at is None
+
+
+def test_geminigen_task_daily_limit_error_fields_are_persisted():
+    async def run():
+        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        tmp.close()
+        try:
+            db = Database(tmp.name)
+            await db.init_db()
+            retry_at = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=1)
+            await db.create_geminigen_task(
+                GeminiGenTask(
+                    job_id="geminigen-daily-error-fields",
+                    public_model_id="geminigen-nano-banana-pro-image-landscape-1k",
+                    kind="image",
+                    endpoint_type="imagen",
+                    status="failed",
+                    error_message="daily limit",
+                    error_code=GEMINIGEN_DAILY_LIMIT_ERROR_CODE,
+                    retry_at=retry_at,
+                )
+            )
+            return await db.get_geminigen_task("geminigen-daily-error-fields")
+        finally:
+            os.unlink(tmp.name)
+
+    task = asyncio.run(run())
+
+    assert task.error_code == GEMINIGEN_DAILY_LIMIT_ERROR_CODE
+    assert task.retry_at is not None
+
+
+def test_geminigen_daily_limit_columns_are_added_to_existing_tables():
+    async def run():
+        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        tmp.close()
+        try:
+            connection = sqlite3.connect(tmp.name)
+            try:
+                connection.execute(
+                    "CREATE TABLE geminigen_accounts (id INTEGER PRIMARY KEY, image_daily_limit_reset_at TIMESTAMP)"
+                )
+                connection.execute("CREATE TABLE geminigen_tasks (id INTEGER PRIMARY KEY, job_id TEXT)")
+                connection.execute(
+                    "INSERT INTO geminigen_accounts (id, image_daily_limit_reset_at) VALUES (1, '2099-01-01 00:00:00')"
+                )
+                connection.commit()
+            finally:
+                connection.close()
+            db = Database(tmp.name)
+            async with db._connect(write=True) as connection:
+                await db._ensure_geminigen_tables(connection)
+                await connection.commit()
+            connection = sqlite3.connect(tmp.name)
+            try:
+                account_columns = {
+                    row[1] for row in connection.execute("PRAGMA table_info(geminigen_accounts)").fetchall()
+                }
+                task_columns = {
+                    row[1] for row in connection.execute("PRAGMA table_info(geminigen_tasks)").fetchall()
+                }
+                migrated_reset = connection.execute(
+                    "SELECT image_gen_daily_limit_reset_at FROM geminigen_accounts WHERE id = 1"
+                ).fetchone()[0]
+            finally:
+                connection.close()
+            return account_columns, task_columns, migrated_reset
+        finally:
+            os.unlink(tmp.name)
+
+    account_columns, task_columns, migrated_reset = asyncio.run(run())
+
+    assert {
+        "image_gen_daily_limit_reset_at",
+        "grok_image_daily_limit_reset_at",
+        "video_daily_limit_reset_at",
+    } <= account_columns
+    assert {"error_code", "retry_at"} <= task_columns
+    assert migrated_reset == "2099-01-01 00:00:00"
+
+
 def test_geminigen_admin_account_payload_includes_profile_fields():
     from src.api.admin import _geminigen_account_payload
 
@@ -642,6 +1097,11 @@ def test_geminigen_admin_account_payload_includes_profile_fields():
         plan_expire_at=datetime(2025, 12, 13, 23, 59, 59),
         active_benefits_json=json.dumps([{"name": "Image Generation 30 days"}]),
         remaining_bulk_videos=100,
+        image_gen_daily_limit_reset_at=datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=2),
+        is_image_gen_max=True,
+        remaining_image_gen_max_daily_images=0,
+        is_grok_image_max=True,
+        remaining_grok_image_max_daily_images=50,
         profile_synced_at=datetime(2026, 7, 7, 12, 0, 0),
         profile_sync_status="healthy",
     )
@@ -655,6 +1115,12 @@ def test_geminigen_admin_account_payload_includes_profile_fields():
     assert payload["plan_expire_at"] == "2025-12-13T23:59:59"
     assert payload["active_benefits"] == [{"name": "Image Generation 30 days"}]
     assert payload["remaining_bulk_videos"] == 100
+    assert payload["image_gen_daily_limited"] is True
+    assert payload["grok_image_daily_limited"] is False
+    assert payload["video_daily_limited"] is False
+    assert payload["image_gen_daily_limit_reset_at"].endswith("Z")
+    assert payload["image_gen_quota"] == {"tier": "max", "remaining": 0, "used": 200, "max": 200}
+    assert payload["grok_image_quota"] == {"tier": "max", "remaining": 50, "used": 0, "max": 50}
     assert payload["profile_synced_at"] == "2026-07-07T12:00:00"
     assert payload["profile_sync_status"] == "healthy"
     assert payload["image_generated_today"] == 0
@@ -681,6 +1147,25 @@ def test_geminigen_admin_account_payload_includes_generation_stats():
     assert payload["image_generated_total"] == 10
     assert payload["video_generated_today"] == 1
     assert payload["video_generated_total"] == 4
+
+
+def test_geminigen_admin_account_payload_uses_remaining_only_for_unknown_caps():
+    from src.api.admin import _geminigen_account_payload
+
+    account = GeminiGenAccount(
+        id=1,
+        label="free",
+        bearer_token="token",
+        is_image_gen_max=False,
+        remaining_image_gen_free_daily_images=7,
+        is_grok_image_max=False,
+        remaining_grok_image_free_daily_images=3,
+    )
+
+    payload = _geminigen_account_payload(account)
+
+    assert payload["image_gen_quota"] == {"tier": "free", "remaining": 7, "used": None, "max": None}
+    assert payload["grok_image_quota"] == {"tier": "free", "remaining": 3, "used": None, "max": None}
 
 
 class _AdminSessionCursor:
@@ -983,6 +1468,49 @@ def test_geminigen_non_capacity_400_is_not_retryable():
     assert error.retryable_capacity is False
     assert error.error_code == "BAD_PROMPT"
     assert "Prompt is invalid" in str(error)
+
+
+def test_geminigen_daily_limit_code_is_classified_and_sanitized():
+    body = json.dumps(
+        {
+            "detail": {
+                "error_code": GEMINIGEN_DAILY_LIMIT_ERROR_CODE,
+                "error_message": "Daily limit reached (main_limit: 200/200). Please try again tomorrow.",
+            }
+        }
+    )
+
+    error = GeminiGenService._extract_upstream_error(422, body)
+
+    assert error.daily_limit_exceeded is True
+    assert error.retryable_capacity is False
+    assert error.error_code == GEMINIGEN_DAILY_LIMIT_ERROR_CODE
+    assert "resets at 00:00 UTC" in str(error)
+    assert "200/200" not in str(error)
+
+
+def test_geminigen_message_only_daily_limit_422_is_classified():
+    body = json.dumps(
+        {
+            "detail": {
+                "error_message": "Daily limit reached. The daily limit resets at 00:00 UTC.",
+            }
+        }
+    )
+
+    error = GeminiGenService._extract_upstream_error(422, body)
+
+    assert error.daily_limit_exceeded is True
+    assert error.error_code is None
+
+
+def test_geminigen_unrelated_422_is_not_daily_limited():
+    body = json.dumps({"detail": {"error_code": "INVALID_INPUT", "error_message": "Invalid aspect ratio"}})
+
+    error = GeminiGenService._extract_upstream_error(422, body)
+
+    assert error.daily_limit_exceeded is False
+    assert error.retryable_capacity is False
 
 
 def test_geminigen_global_image_concurrency_does_not_reduce_account_pool_capacity():
@@ -1411,6 +1939,260 @@ def test_geminigen_capacity_timeout_uses_sanitized_error():
     assert any(1 in excluded for excluded in db.acquire_exclusions)
 
 
+def test_geminigen_daily_limit_releases_account_and_reroutes_same_task():
+    async def run():
+        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        tmp.close()
+        db = Database(tmp.name)
+        try:
+            await db.init_db()
+            first_id = await db.create_geminigen_account(
+                label="first",
+                raw_cookie="",
+                bearer_token="first-token",
+                image_concurrency=1,
+            )
+            second_id = await db.create_geminigen_account(
+                label="second",
+                raw_cookie="",
+                bearer_token="second-token",
+                image_concurrency=1,
+            )
+            fresh_profile = datetime.now(timezone.utc).replace(tzinfo=None)
+            await db.update_geminigen_account(first_id, profile_synced_at=fresh_profile)
+            await db.update_geminigen_account(second_id, profile_synced_at=fresh_profile)
+            await db.create_geminigen_task(
+                GeminiGenTask(
+                    job_id="geminigen-daily-reroute",
+                    public_model_id="geminigen-nano-banana-pro-image-landscape-1k",
+                    kind="image",
+                    endpoint_type="imagen",
+                    prompt="A calm lake",
+                )
+            )
+            service = GeminiGenService(db, None)
+            attempted_accounts = []
+
+            async def post_generation(**kwargs):
+                account = kwargs["account"]
+                attempted_accounts.append(account.id)
+                if account.id == first_id:
+                    raise GeminiGenService._extract_upstream_error(
+                        422,
+                        json.dumps(
+                            {
+                                "detail": {
+                                    "error_code": GEMINIGEN_DAILY_LIMIT_ERROR_CODE,
+                                    "error_message": "Daily limit reached. The daily limit resets at 00:00 UTC.",
+                                }
+                            }
+                        ),
+                    )
+                return {"uuid": "rerouted-upstream-uuid"}
+
+            service._post_generation = post_generation
+            result = await service._start_queued_task(
+                "geminigen-daily-reroute",
+                images=[],
+                options={},
+            )
+            first = await db.get_geminigen_account(first_id)
+            second = await db.get_geminigen_account(second_id)
+            return result, first, second, attempted_accounts
+        finally:
+            os.unlink(tmp.name)
+
+    result, first, second, attempted_accounts = asyncio.run(run())
+
+    assert attempted_accounts == [first.id, second.id]
+    assert first.image_gen_daily_limit_reset_at is not None
+    assert first.grok_image_daily_limit_reset_at is None
+    assert first.image_in_flight == 0
+    assert first.last_status == "daily_limited_image_gen"
+    assert first.last_error == GEMINIGEN_DAILY_LIMIT_ERROR_CODE
+    assert second.image_in_flight == 1
+    assert result.account_id == second.id
+    assert result.upstream_uuid == "rerouted-upstream-uuid"
+
+
+def test_geminigen_grok_daily_limit_reroutes_without_blocking_imagen():
+    async def run():
+        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        tmp.close()
+        db = Database(tmp.name)
+        try:
+            await db.init_db()
+            first_id = await db.create_geminigen_account(
+                label="first",
+                raw_cookie="",
+                bearer_token="first-token",
+                image_concurrency=1,
+            )
+            second_id = await db.create_geminigen_account(
+                label="second",
+                raw_cookie="",
+                bearer_token="second-token",
+                image_concurrency=1,
+            )
+            fresh_profile = datetime.now(timezone.utc).replace(tzinfo=None)
+            await db.update_geminigen_account(first_id, profile_synced_at=fresh_profile)
+            await db.update_geminigen_account(second_id, profile_synced_at=fresh_profile)
+            await db.create_geminigen_task(
+                GeminiGenTask(
+                    job_id="geminigen-grok-daily-reroute",
+                    public_model_id="geminigen-grok-image-landscape-speed",
+                    kind="image",
+                    endpoint_type="grok-image",
+                    prompt="A calm lake",
+                )
+            )
+            service = GeminiGenService(db, None)
+
+            async def post_generation(**kwargs):
+                if kwargs["account"].id == first_id:
+                    raise GeminiGenService._extract_upstream_error(
+                        422,
+                        json.dumps(
+                            {
+                                "detail": {
+                                    "error_code": GEMINIGEN_DAILY_LIMIT_ERROR_CODE,
+                                    "error_message": "Daily limit reached.",
+                                }
+                            }
+                        ),
+                    )
+                return {"uuid": "grok-rerouted-uuid"}
+
+            service._post_generation = post_generation
+            result = await service._start_queued_task(
+                "geminigen-grok-daily-reroute",
+                images=[],
+                options={},
+            )
+            first = await db.get_geminigen_account(first_id)
+            imagen_available = await db.acquire_geminigen_account("image", endpoint_type="imagen")
+            return result, first, imagen_available
+        finally:
+            os.unlink(tmp.name)
+
+    result, first, imagen_available = asyncio.run(run())
+
+    assert result.upstream_uuid == "grok-rerouted-uuid"
+    assert first.grok_image_daily_limit_reset_at is not None
+    assert first.image_gen_daily_limit_reset_at is None
+    assert imagen_available is not None
+
+
+def test_geminigen_all_daily_limited_accounts_fail_fast_with_retry_time():
+    async def run():
+        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        tmp.close()
+        db = Database(tmp.name)
+        try:
+            await db.init_db()
+            reset_at = GeminiGenService._next_utc_midnight()
+            for index in range(2):
+                account_id = await db.create_geminigen_account(
+                    label=f"limited-{index}",
+                    raw_cookie="",
+                    bearer_token=f"token-{index}",
+                )
+                await db.update_geminigen_account(
+                    account_id,
+                    image_gen_daily_limit_reset_at=reset_at,
+                    last_status="daily_limited_image_gen",
+                    last_error=GEMINIGEN_DAILY_LIMIT_ERROR_CODE,
+                )
+            await db.create_geminigen_task(
+                GeminiGenTask(
+                    job_id="geminigen-all-daily-limited",
+                    public_model_id="geminigen-nano-banana-pro-image-landscape-1k",
+                    kind="image",
+                    endpoint_type="imagen",
+                )
+            )
+            service = GeminiGenService(db, None)
+            started = time.monotonic()
+            result = await service._start_queued_task(
+                "geminigen-all-daily-limited",
+                images=[],
+                options={},
+            )
+            return result, service.task_to_openai_payload(result), time.monotonic() - started
+        finally:
+            os.unlink(tmp.name)
+
+    result, payload, elapsed = asyncio.run(run())
+
+    assert elapsed < 1
+    assert result.status == "failed"
+    assert result.error_code == GEMINIGEN_DAILY_LIMIT_ERROR_CODE
+    assert result.retry_at is not None
+    assert payload["error"]["type"] == "rate_limit_error"
+    assert payload["error"]["code"] == GEMINIGEN_DAILY_LIMIT_ERROR_CODE
+    assert payload["error"]["status_code"] == 429
+    assert payload["error"]["retry_at"].endswith("Z")
+
+
+def test_geminigen_concurrent_daily_limit_failures_do_not_leak_slots():
+    async def run():
+        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        tmp.close()
+        db = Database(tmp.name)
+        try:
+            await db.init_db()
+            account_id = await db.create_geminigen_account(
+                label="shared",
+                raw_cookie="",
+                bearer_token="token",
+                image_concurrency=5,
+            )
+            await db.update_geminigen_account(
+                account_id,
+                profile_synced_at=datetime.now(timezone.utc).replace(tzinfo=None),
+            )
+            for suffix in ("one", "two"):
+                await db.create_geminigen_task(
+                    GeminiGenTask(
+                        job_id=f"geminigen-concurrent-daily-{suffix}",
+                        public_model_id="geminigen-nano-banana-pro-image-landscape-1k",
+                        kind="image",
+                        endpoint_type="imagen",
+                    )
+                )
+            service = GeminiGenService(db, None)
+
+            async def post_generation(**kwargs):
+                await asyncio.sleep(0.01)
+                raise GeminiGenService._extract_upstream_error(
+                    422,
+                    json.dumps(
+                        {
+                            "detail": {
+                                "error_code": GEMINIGEN_DAILY_LIMIT_ERROR_CODE,
+                                "error_message": "Daily limit reached.",
+                            }
+                        }
+                    ),
+                )
+
+            service._post_generation = post_generation
+            results = await asyncio.gather(
+                service._start_queued_task("geminigen-concurrent-daily-one", images=[], options={}),
+                service._start_queued_task("geminigen-concurrent-daily-two", images=[], options={}),
+            )
+            account = await db.get_geminigen_account(account_id)
+            return results, account
+        finally:
+            os.unlink(tmp.name)
+
+    results, account = asyncio.run(run())
+
+    assert all(result.error_code == GEMINIGEN_DAILY_LIMIT_ERROR_CODE for result in results)
+    assert account.image_in_flight == 0
+    assert account.image_gen_daily_limit_reset_at is not None
+
+
 def test_geminigen_public_status_dict_exposes_phase_and_terminal_urls():
     queued = GeminiGenTask(
         job_id="geminigen-queued",
@@ -1500,6 +2282,114 @@ def test_geminigen_poll_does_not_query_history_while_submission_is_in_flight():
 
     assert result.status == "processing"
     assert result.upstream_uuid is None
+
+
+def test_geminigen_passive_status_reads_do_not_poll_or_write(monkeypatch):
+    task = GeminiGenTask(
+        job_id="geminigen-passive",
+        api_key_id=42,
+        public_model_id="geminigen-nano-banana-pro-image-landscape-1k",
+        kind="image",
+        endpoint_type="imagen",
+        prompt="status",
+        status="processing",
+        progress=5,
+        upstream_uuid="upstream-uuid",
+    )
+
+    class PassiveDb:
+        def __init__(self):
+            self.reads = 0
+            self.writes = 0
+
+        async def get_geminigen_task(self, job_id):
+            self.reads += 1
+            return task
+
+    db = PassiveDb()
+    poll_task = AsyncMock(side_effect=AssertionError("status reads must not poll GeminiGen"))
+    service = SimpleNamespace(
+        db=db,
+        poll_task=poll_task,
+        task_to_public_dict=GeminiGenService.task_to_public_dict,
+    )
+    monkeypatch.setattr(routes, "geminigen_service", service)
+
+    def unexpected_generic_lookup():
+        raise AssertionError("GeminiGen-prefixed jobs must bypass the generic task table")
+
+    monkeypatch.setattr(routes, "_ensure_generation_handler", unexpected_generic_lookup)
+    auth = AuthContext(
+        key_id=42,
+        key_label="test",
+        is_legacy=False,
+        allowed_accounts=set(),
+        scopes={"generate:geminigen"},
+    )
+
+    async def read_twenty():
+        return await asyncio.gather(
+            *(routes.get_job_status("geminigen-passive", None, auth) for _ in range(20))
+        )
+
+    results = asyncio.run(read_twenty())
+
+    assert len(results) == 20
+    assert all(result["status"] == "processing" for result in results)
+    assert db.reads == 20
+    assert db.writes == 0
+    poll_task.assert_not_awaited()
+
+
+def test_geminigen_unchanged_processing_poll_skips_database_and_request_log_writes():
+    db = FakeGeminiGenDatabase()
+    db.task = db.task.model_copy(
+        update={
+            "status": "processing",
+            "account_id": 1,
+            "upstream_uuid": "upstream-uuid",
+            "progress": 5,
+            "response_payload": json.dumps({"status": "1", "status_percentage": 5}),
+        }
+    )
+    service = build_capacity_test_service(db)
+    request_log_update = AsyncMock()
+    service._update_request_log = request_log_update
+
+    async def get_history(**kwargs):
+        return {"status": "1", "status_percentage": 5}
+
+    service._get_history = get_history
+    result = asyncio.run(service.poll_task("geminigen-test", api_key_id=None, base_url="https://flow.example"))
+
+    assert result.status == "processing"
+    assert result.progress == 5
+    assert db.task_updates == []
+    request_log_update.assert_not_awaited()
+
+
+def test_geminigen_background_completion_is_claimed_once():
+    service = object.__new__(GeminiGenService)
+    service._background_completion_jobs = set()
+    service._background_completion_lock = asyncio.Lock()
+    wait_for_task = AsyncMock()
+
+    async def wait_once(*args, **kwargs):
+        await asyncio.sleep(0.01)
+
+    wait_for_task.side_effect = wait_once
+    service.wait_for_task = wait_for_task
+
+    async def run_duplicate_workers():
+        await asyncio.gather(
+            service.complete_task_in_background("geminigen-test", api_key_id=1, base_url=None),
+            service.complete_task_in_background("geminigen-test", api_key_id=1, base_url=None),
+        )
+
+    asyncio.run(run_duplicate_workers())
+
+    wait_for_task.assert_awaited_once()
+    assert service._background_completion_jobs == set()
 
 
 def test_geminigen_poll_respects_global_cache_kill_switch():

@@ -27,6 +27,7 @@ const CSVGEN_METADATA_MODELS = [
 ]
 
 const PRESET_MODELS: Record<string, string[]> = {
+  cliproxy: [],
   gemini_native: ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro", "gemini-1.5-flash", "gemini-1.5-pro"],
   openai: ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "gpt-4.1-mini", "gpt-4.1"],
   openrouter: ["moonshotai/kimi-k2.6", "google/gemma-4-26b-a4b-it"],
@@ -36,6 +37,7 @@ const PRESET_MODELS: Record<string, string[]> = {
 }
 
 const GLOBAL_BACKENDS = [
+  "cliproxy",
   "gemini_native",
   "openai",
   "openrouter",
@@ -53,6 +55,7 @@ export function AdobeConfigurations({ active }: { active: boolean }) {
   const [model, setModel] = useState("gemini-2.5-flash")
   const [enabledModels, setEnabledModels] = useState<string[]>(["gemini-2.5-flash"])
   const [primaryModel, setPrimaryModel] = useState("gemini-2.5-flash")
+  const [gatewayModels, setGatewayModels] = useState<string[]>([])
 
   const [csvgenCookie, setCsvgenCookie] = useState("")
   const [csvgenApiKeys, setCsvgenApiKeys] = useState("")
@@ -67,7 +70,13 @@ export function AdobeConfigurations({ active }: { active: boolean }) {
 
   const load = useCallback(async () => {
     if (!token || !active) return
-    const resp = await adminJson<{ success?: boolean; config?: Record<string, unknown> }>("/api/config/generation", token)
+    const [resp, gatewayResp] = await Promise.all([
+      adminJson<{ success?: boolean; config?: Record<string, unknown> }>("/api/config/generation", token),
+      adminJson<Array<{ id: string }>>("/api/admin/cliproxy/models", token),
+    ])
+    if (gatewayResp.ok && gatewayResp.data) {
+      setGatewayModels(gatewayResp.data.map((entry) => entry.id).filter(Boolean))
+    }
     if (!resp.ok || !resp.data?.success || !resp.data.config) return
     const c = resp.data.config
     
@@ -83,9 +92,11 @@ export function AdobeConfigurations({ active }: { active: boolean }) {
       .filter(Boolean)
       .filter((x) => GLOBAL_BACKENDS.includes(x))
     
+    const configuredOrder = orderFromConfig.length ? orderFromConfig : ["gemini_native"]
     const normalizedOrder = [
-      ...(orderFromConfig.length ? orderFromConfig : ["gemini_native"]),
-      ...GLOBAL_BACKENDS.filter((x) => !(orderFromConfig.length ? orderFromConfig : ["gemini_native"]).includes(x)),
+      "cliproxy",
+      ...configuredOrder.filter((provider) => provider !== "cliproxy"),
+      ...GLOBAL_BACKENDS.filter((provider) => provider !== "cliproxy" && !configuredOrder.includes(provider)),
     ]
     
     const enabledFromConfig = String(
@@ -143,7 +154,10 @@ export function AdobeConfigurations({ active }: { active: boolean }) {
     [providerOrder, enabledProviders],
   )
 
-  const backendModels = useMemo(() => PRESET_MODELS[selectedProvider] || [], [selectedProvider])
+  const backendModels = useMemo(
+    () => selectedProvider === "cliproxy" ? gatewayModels : (PRESET_MODELS[selectedProvider] || []),
+    [gatewayModels, selectedProvider],
+  )
 
   const allModels = useMemo(() => {
     const fromEnabled = enabledModels.map((m) => m.trim()).filter(Boolean)

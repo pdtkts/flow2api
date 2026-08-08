@@ -25,6 +25,13 @@ type GeminiGenConfig = {
   cache_outputs: boolean
 }
 
+type GeminiGenQuotaSummary = {
+  tier: "max" | "free" | "unknown"
+  remaining: number | null
+  used: number | null
+  max: number | null
+}
+
 type GeminiGenAccount = {
   id: number
   label: string
@@ -37,6 +44,14 @@ type GeminiGenAccount = {
   video_concurrency: number
   image_in_flight: number
   video_in_flight: number
+  image_gen_daily_limited?: boolean
+  grok_image_daily_limited?: boolean
+  video_daily_limited?: boolean
+  image_gen_daily_limit_reset_at?: string | null
+  grok_image_daily_limit_reset_at?: string | null
+  video_daily_limit_reset_at?: string | null
+  image_gen_quota?: GeminiGenQuotaSummary
+  grok_image_quota?: GeminiGenQuotaSummary
   last_status: string
   last_error: string
   profile_email?: string | null
@@ -51,6 +66,10 @@ type GeminiGenAccount = {
   remaining_bulk_videos?: number | null
   remaining_daily_videos?: number | null
   remaining_grok_max_daily_videos?: number | null
+  remaining_grok_max_daily_15s_videos?: number | null
+  quota_synced_at?: string | null
+  quota_sync_status?: string
+  quota_sync_error?: string
   profile_synced_at?: string | null
   profile_sync_status?: string
   profile_sync_error?: string
@@ -140,6 +159,45 @@ function formatNumberValue(value: number | null | undefined) {
   return value === null || value === undefined ? "-" : value.toLocaleString()
 }
 
+function formatDailyLimitCountdown(value: string | null | undefined) {
+  if (!value) return "until 00:00 UTC"
+  const reset = new Date(value)
+  if (Number.isNaN(reset.getTime())) return value
+  const remainingMinutes = Math.max(0, Math.ceil((reset.getTime() - Date.now()) / 60_000))
+  const hours = Math.floor(remainingMinutes / 60)
+  const minutes = remainingMinutes % 60
+  return `resets in ${hours}h ${minutes}m (${reset.toLocaleTimeString("en-US", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+    timeZone: "UTC",
+  })} UTC)`
+}
+
+function ImageQuotaLine({ label, quota }: { label: string; quota?: GeminiGenQuotaSummary }) {
+  const hasKnownMax = quota?.used !== null && quota?.used !== undefined && quota.max !== null && quota.max !== undefined
+  const text = hasKnownMax
+    ? `${quota.used} / ${quota.max}`
+    : quota?.remaining !== null && quota?.remaining !== undefined
+      ? `${quota.remaining} remaining`
+      : "-"
+  const percent = hasKnownMax && quota.max ? Math.max(0, Math.min(100, ((quota.used || 0) / quota.max) * 100)) : 0
+  const exhausted = quota?.remaining === 0
+  return (
+    <div className="min-w-[150px]">
+      <div className="flex items-center justify-between gap-3 text-[11px]">
+        <span className="text-muted-foreground">{label}</span>
+        <span className={exhausted ? "font-medium text-destructive" : "font-medium tabular-nums"}>{text}</span>
+      </div>
+      {hasKnownMax ? (
+        <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-muted">
+          <div className={exhausted ? "h-full bg-destructive" : "h-full bg-emerald-500"} style={{ width: `${percent}%` }} />
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
 function geminiGenVideoQuota(account: GeminiGenAccount) {
   const quotas = [
     account.remaining_daily_videos !== null && account.remaining_daily_videos !== undefined ? `Daily ${account.remaining_daily_videos}` : "",
@@ -147,7 +205,64 @@ function geminiGenVideoQuota(account: GeminiGenAccount) {
     account.remaining_grok_max_daily_videos !== null && account.remaining_grok_max_daily_videos !== undefined
       ? `Grok ${account.remaining_grok_max_daily_videos}`
       : "",
+    account.remaining_grok_max_daily_15s_videos !== null && account.remaining_grok_max_daily_15s_videos !== undefined
+      ? `15s ${account.remaining_grok_max_daily_15s_videos}`
+      : "",
   ].filter(Boolean)
+  return quotas.length ? quotas.join(" / ") : "-"
+}
+
+function geminiGenImageQuotaTotal(
+  accounts: GeminiGenAccount[],
+  getQuota: (account: GeminiGenAccount) => GeminiGenQuotaSummary | undefined,
+) {
+  let used = 0
+  let max = 0
+  let hasUsed = false
+  let hasMax = false
+  let remainingOnly = 0
+  let hasRemainingOnly = false
+
+  accounts.forEach((account) => {
+    const quota = getQuota(account)
+    const quotaHasUsed = quota?.used !== null && quota?.used !== undefined
+    const quotaHasMax = quota?.max !== null && quota?.max !== undefined
+
+    if (quotaHasUsed) {
+      used += quota.used || 0
+      hasUsed = true
+    }
+    if (quotaHasMax) {
+      max += quota.max || 0
+      hasMax = true
+    }
+    if (!quotaHasUsed && !quotaHasMax && quota?.remaining !== null && quota?.remaining !== undefined) {
+      remainingOnly += quota.remaining
+      hasRemainingOnly = true
+    }
+  })
+
+  const totals = []
+  if (hasUsed || hasMax) {
+    totals.push(`${hasUsed ? formatNumberValue(used) : "-"} / ${hasMax ? formatNumberValue(max) : "-"}`)
+  }
+  if (hasRemainingOnly) totals.push(`${formatNumberValue(remainingOnly)} remaining`)
+  return totals.length ? totals.join(" + ") : "-"
+}
+
+function geminiGenVideoQuotaTotal(accounts: GeminiGenAccount[]) {
+  const quotaFields: Array<{ label: string; key: keyof GeminiGenAccount }> = [
+    { label: "Daily", key: "remaining_daily_videos" },
+    { label: "Bulk", key: "remaining_bulk_videos" },
+    { label: "Grok", key: "remaining_grok_max_daily_videos" },
+    { label: "15s", key: "remaining_grok_max_daily_15s_videos" },
+  ]
+  const quotas = quotaFields.flatMap(({ label, key }) => {
+    const values = accounts
+      .map((account) => account[key])
+      .filter((value): value is number => typeof value === "number")
+    return values.length ? [`${label} ${formatNumberValue(values.reduce((sum, value) => sum + value, 0))}`] : []
+  })
   return quotas.length ? quotas.join(" / ") : "-"
 }
 
@@ -168,6 +283,7 @@ export function GeminiGenSettings({ active }: { active: boolean }) {
   const [draft, setDraft] = useState<AccountDraft>(EMPTY_ACCOUNT)
   const [dialogOpen, setDialogOpen] = useState(false)
   const [saving, setSaving] = useState(false)
+  const [updatingAccountIds, setUpdatingAccountIds] = useState<Set<number>>(new Set())
   const [statusLoading, setStatusLoading] = useState(false)
   const [modelStatus, setModelStatus] = useState<GeminiGenStatusResponse | null>(null)
 
@@ -203,6 +319,9 @@ export function GeminiGenSettings({ active }: { active: boolean }) {
       accounts: accounts.length,
       active: accounts.filter((account) => account.is_active).length,
       models: models.length,
+      imagenQuota: geminiGenImageQuotaTotal(accounts, (account) => account.image_gen_quota),
+      grokImageQuota: geminiGenImageQuotaTotal(accounts, (account) => account.grok_image_quota),
+      videoQuota: geminiGenVideoQuotaTotal(accounts),
     }
   }, [accounts, models])
 
@@ -272,13 +391,26 @@ export function GeminiGenSettings({ active }: { active: boolean }) {
     }
   }
 
-  const patchAccount = async (account: GeminiGenAccount, patch: Partial<GeminiGenAccount>) => {
-    const r = await adminFetch(`/api/admin/geminigen/accounts/${account.id}`, token, {
-      method: "PATCH",
-      body: JSON.stringify(patch),
-    })
-    if (r?.ok) await load()
-    else toast.error("Could not update account")
+  const setAccountEnabled = async (account: GeminiGenAccount, is_active: boolean) => {
+    setUpdatingAccountIds((current) => new Set(current).add(account.id))
+    try {
+      const r = await adminFetch(`/api/admin/geminigen/accounts/${account.id}`, token, {
+        method: "PATCH",
+        body: JSON.stringify({ is_active }),
+      })
+      const d = await r?.json().catch(() => null)
+      if (!r?.ok) throw new Error(d?.detail || "Could not update account")
+      toast.success(is_active ? "GeminiGen account enabled" : "GeminiGen account disabled for new jobs")
+      await Promise.all([load(), loadStatus()])
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not update account")
+    } finally {
+      setUpdatingAccountIds((current) => {
+        const next = new Set(current)
+        next.delete(account.id)
+        return next
+      })
+    }
   }
 
   const testAccount = async (account: GeminiGenAccount) => {
@@ -293,10 +425,13 @@ export function GeminiGenSettings({ active }: { active: boolean }) {
     if (!window.confirm(`Delete GeminiGen account "${account.label}"?`)) return
     const r = await adminFetch(`/api/admin/geminigen/accounts/${account.id}`, token, { method: "DELETE" })
     if (r?.ok) {
-      toast.success("GeminiGen account deleted")
-      await load()
+      const d = await r.json().catch(() => null)
+      const cancelled = Number(d?.tasks_cleared || 0)
+      toast.success(cancelled ? `GeminiGen account deleted; ${cancelled} active job(s) cancelled` : "GeminiGen account deleted")
+      await Promise.all([load(), loadStatus()])
     } else {
-      toast.error("Could not delete account")
+      const d = await r?.json().catch(() => null)
+      toast.error(d?.detail || "Could not delete account")
     }
   }
 
@@ -360,6 +495,18 @@ export function GeminiGenSettings({ active }: { active: boolean }) {
           <div className="rounded-md border bg-muted/20 px-3 py-2">
             <div className="text-xs text-muted-foreground">Models</div>
             <div className="text-lg font-semibold tabular-nums">{stats.models}</div>
+          </div>
+          <div className="rounded-md border bg-muted/20 px-3 py-2">
+            <div className="text-xs text-muted-foreground">Imagen quota</div>
+            <div className="text-lg font-semibold tabular-nums">{stats.imagenQuota}</div>
+          </div>
+          <div className="rounded-md border bg-muted/20 px-3 py-2">
+            <div className="text-xs text-muted-foreground">Grok Image quota</div>
+            <div className="text-lg font-semibold tabular-nums">{stats.grokImageQuota}</div>
+          </div>
+          <div className="rounded-md border bg-muted/20 px-3 py-2">
+            <div className="text-xs text-muted-foreground">Video quotas</div>
+            <div className="text-lg font-semibold leading-snug tabular-nums">{stats.videoQuota}</div>
           </div>
         </CardContent>
       </Card>
@@ -503,6 +650,7 @@ export function GeminiGenSettings({ active }: { active: boolean }) {
                 <TableHead>Plan</TableHead>
                 <TableHead>Image</TableHead>
                 <TableHead>Video</TableHead>
+                <TableHead>Image quotas</TableHead>
                 <TableHead>Video quota</TableHead>
                 <TableHead>Benefits</TableHead>
                 <TableHead className="text-right">Actions</TableHead>
@@ -524,13 +672,40 @@ export function GeminiGenSettings({ active }: { active: boolean }) {
                     ) : null}
                   </TableCell>
                   <TableCell>
-                    {!account.is_active ? (
-                      <Badge variant="outline">disabled</Badge>
-                    ) : account.profile_is_active === false ? (
-                      <Badge variant="outline">inactive</Badge>
-                    ) : (
-                      <Badge>enabled</Badge>
-                    )}
+                    <div className="flex items-center gap-2">
+                      <Switch
+                        checked={account.is_active}
+                        disabled={updatingAccountIds.has(account.id)}
+                        onCheckedChange={(enabled) => void setAccountEnabled(account, enabled)}
+                        aria-label={`${account.is_active ? "Disable" : "Enable"} ${account.label}`}
+                      />
+                      {!account.is_active ? (
+                        <Badge variant="outline">disabled</Badge>
+                      ) : account.profile_is_active === false ? (
+                        <Badge variant="outline">inactive</Badge>
+                      ) : (
+                        <Badge>enabled</Badge>
+                      )}
+                    </div>
+                    {account.image_gen_daily_limited || account.grok_image_daily_limited || account.video_daily_limited ? (
+                      <div className="mt-2 flex flex-col items-start gap-1">
+                        {account.image_gen_daily_limited ? (
+                          <Badge variant="outline" className="border-amber-500/50 bg-amber-500/15 text-amber-800 dark:text-amber-300">
+                            Imagen daily limit · {formatDailyLimitCountdown(account.image_gen_daily_limit_reset_at)}
+                          </Badge>
+                        ) : null}
+                        {account.grok_image_daily_limited ? (
+                          <Badge variant="outline" className="border-amber-500/50 bg-amber-500/15 text-amber-800 dark:text-amber-300">
+                            Grok Image daily limit · {formatDailyLimitCountdown(account.grok_image_daily_limit_reset_at)}
+                          </Badge>
+                        ) : null}
+                        {account.video_daily_limited ? (
+                          <Badge variant="outline" className="border-amber-500/50 bg-amber-500/15 text-amber-800 dark:text-amber-300">
+                            Video daily limit · {formatDailyLimitCountdown(account.video_daily_limit_reset_at)}
+                          </Badge>
+                        ) : null}
+                      </div>
+                    ) : null}
                   </TableCell>
                   <TableCell className="text-xs whitespace-nowrap">
                     <div className="font-medium tabular-nums">{formatNumberValue(account.available_credit)}</div>
@@ -545,6 +720,15 @@ export function GeminiGenSettings({ active }: { active: boolean }) {
                   </TableCell>
                   <TableCell className="tabular-nums">{account.image_in_flight}/{account.image_concurrency}</TableCell>
                   <TableCell className="tabular-nums">{account.video_in_flight}/{account.video_concurrency}</TableCell>
+                  <TableCell className="text-xs whitespace-nowrap">
+                    <div className="space-y-2" title={account.quota_sync_error || account.quota_sync_status || ""}>
+                      <ImageQuotaLine label="Imagen" quota={account.image_gen_quota} />
+                      <ImageQuotaLine label="Grok Image" quota={account.grok_image_quota} />
+                      <div className="text-[10px] text-muted-foreground">
+                        {account.quota_sync_status || "not synced"} · {formatCompactDateTime(account.quota_synced_at)}
+                      </div>
+                    </div>
+                  </TableCell>
                   <TableCell className="text-xs whitespace-nowrap">{geminiGenVideoQuota(account)}</TableCell>
                   <TableCell className="max-w-[220px] text-xs">
                     {account.active_benefits?.length ? (
@@ -570,9 +754,6 @@ export function GeminiGenSettings({ active }: { active: boolean }) {
                       <Button size="icon" variant="ghost" onClick={() => clearAccountSlots(account)} title="Clear slots">
                         <RefreshCw className="h-4 w-4" />
                       </Button>
-                      <Button size="icon" variant="ghost" onClick={() => patchAccount(account, { is_active: !account.is_active })} title="Toggle">
-                        <RefreshCw className="h-4 w-4" />
-                      </Button>
                       <Button size="icon" variant="ghost" onClick={() => openEdit(account)} title="Edit">
                         <Edit3 className="h-4 w-4" />
                       </Button>
@@ -584,7 +765,7 @@ export function GeminiGenSettings({ active }: { active: boolean }) {
                 </TableRow>
               )) : (
                 <TableRow>
-                  <TableCell colSpan={9} className="text-center text-muted-foreground">No GeminiGen accounts configured.</TableCell>
+                  <TableCell colSpan={10} className="text-center text-muted-foreground">No GeminiGen accounts configured.</TableCell>
                 </TableRow>
               )}
             </TableBody>

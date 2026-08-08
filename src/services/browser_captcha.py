@@ -651,10 +651,10 @@ class TokenBrowser:
             return True
         deadline = time.time() + timeout_seconds
         while time.time() < deadline:
-            if not self._is_pid_running(pid):
+            if not await asyncio.to_thread(self._is_pid_running, pid):
                 return True
             await asyncio.sleep(0.2)
-        return not self._is_pid_running(pid)
+        return not await asyncio.to_thread(self._is_pid_running, pid)
 
     def _kill_pid(self, pid: Optional[int], reason: str):
         if not pid:
@@ -679,16 +679,16 @@ class TokenBrowser:
         stale_pid = self._read_pid_file()
         if not stale_pid:
             return
-        if not self._is_pid_running(stale_pid):
+        if not await asyncio.to_thread(self._is_pid_running, stale_pid):
             self._write_pid_file(None)
             return
-        if not self._pid_matches_slot(stale_pid):
+        if not await asyncio.to_thread(self._pid_matches_slot, stale_pid):
             debug_logger.log_warning(
                 f"[BrowserCaptcha] Token-{self.token_id} PID file points to a process that does not belong to this slot; ignoring PID={stale_pid}"
             )
             self._write_pid_file(None)
             return
-        self._kill_pid(stale_pid, reason='stale_slot_process')
+        await asyncio.to_thread(self._kill_pid, stale_pid, reason='stale_slot_process')
         await self._wait_pid_exit(stale_pid, timeout_seconds=3)
         self._write_pid_file(None)
 
@@ -1182,7 +1182,7 @@ class TokenBrowser:
         except Exception:
             pass
         if effective_pid and not await self._wait_pid_exit(effective_pid, timeout_seconds=4):
-            self._kill_pid(effective_pid, reason='close_timeout_or_orphan')
+            await asyncio.to_thread(self._kill_pid, effective_pid, reason='close_timeout_or_orphan')
             await self._wait_pid_exit(effective_pid, timeout_seconds=2)
         if clear_slot_pid:
             self._write_pid_file(None)

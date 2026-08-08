@@ -162,6 +162,10 @@ type DriveBackupJob = {
 }
 
 type DriveBackupStatus = {
+  database_backend?: "sqlite" | "postgres"
+  database_revision?: string | null
+  encryption_configured?: boolean
+  encryption_key_id?: string | null
   oauth_configured: boolean
   connected: boolean
   account_email?: string | null
@@ -182,6 +186,10 @@ type DriveBackupFile = {
   size: number
   created_at?: string
   backup_type?: string
+  database_backend?: "sqlite" | "postgres"
+  database_revision?: string | null
+  encryption_key_id?: string | null
+  backup_format?: string
 }
 
 const formatBytes = (value?: number) => {
@@ -1040,9 +1048,22 @@ export function SystemSettings({ active }: { active: boolean }) {
       <Card className="lg:col-span-2">
         <CardHeader>
           <CardTitle>Database migration</CardTitle>
-          <CardDescription>Download or restore the server SQLite database</CardDescription>
+          <CardDescription>
+            {driveStatus?.database_backend === "postgres"
+              ? "PostgreSQL is the durable database; legacy SQLite controls are retired"
+              : "Download or restore the server SQLite database"}
+          </CardDescription>
         </CardHeader>
         <CardContent className="space-y-6">
+          {driveStatus?.database_backend === "postgres" ? (
+            <div className="rounded-md border bg-muted/20 px-4 py-3 text-sm">
+              <div className="font-medium">PostgreSQL · schema revision {driveStatus.database_revision || "unknown"}</div>
+              <p className="mt-1 text-xs text-muted-foreground">
+                Use encrypted Google Drive backups below. Old SQLite artifacts remain visible for rollback but cannot be restored into PostgreSQL.
+              </p>
+            </div>
+          ) : (
+          <>
           <div className="space-y-2">
             <Label>Current database</Label>
             <p className="text-xs text-muted-foreground">
@@ -1076,6 +1097,8 @@ export function SystemSettings({ active }: { active: boolean }) {
             </Button>
             {dbRestoreResult ? <p className="text-xs text-muted-foreground">{dbRestoreResult}</p> : null}
           </div>
+          </>
+          )}
         </CardContent>
       </Card>
 
@@ -1092,7 +1115,12 @@ export function SystemSettings({ active }: { active: boolean }) {
           </Button>
         </CardHeader>
         <CardContent className="space-y-6">
-          <div className="grid gap-3 sm:grid-cols-3 text-sm">
+          <div className="grid gap-3 sm:grid-cols-4 text-sm">
+            <div className="rounded-md border bg-muted/20 px-3 py-2">
+              <div className="text-xs text-muted-foreground">Database</div>
+              <div className="font-medium capitalize">{driveStatus?.database_backend || "unknown"}</div>
+              {driveStatus?.database_revision ? <div className="text-xs text-muted-foreground">revision {driveStatus.database_revision}</div> : null}
+            </div>
             <div className="rounded-md border bg-muted/20 px-3 py-2">
               <div className="text-xs text-muted-foreground">OAuth environment</div>
               <div className="font-medium">{driveStatus?.oauth_configured ? "Configured" : "Missing variables"}</div>
@@ -1115,8 +1143,15 @@ export function SystemSettings({ active }: { active: boolean }) {
             </p>
           ) : null}
           <p className="text-xs text-muted-foreground">
-            Archives are not client-side encrypted and contain Flow tokens, Google cookies, and browser state. Keep the Drive folder private.
+            {driveStatus?.database_backend === "postgres"
+              ? `PostgreSQL archives are AES-256-GCM encrypted before upload${driveStatus.encryption_key_id ? ` with key ${driveStatus.encryption_key_id}` : ""}. Keep every referenced key offline and in Railway.`
+              : "SQLite bridge archives contain Flow tokens, Google cookies, and browser state. Keep the Drive folder private."}
           </p>
+          {driveStatus?.database_backend === "postgres" && !driveStatus.encryption_configured ? (
+            <p className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-700 dark:text-amber-300">
+              Configure FLOW2API_BACKUP_ACTIVE_KEY_ID and FLOW2API_BACKUP_KEYS_JSON before creating PostgreSQL backups.
+            </p>
+          ) : null}
 
           <div className="flex flex-wrap gap-2">
             {!driveStatus?.connected ? (
@@ -1156,7 +1191,7 @@ export function SystemSettings({ active }: { active: boolean }) {
             </div>
             <div className="flex flex-wrap gap-2 md:col-span-4">
               <Button variant="secondary" onClick={saveDriveConfig} disabled={driveBusy || !driveStatus?.connected}>Save backup settings</Button>
-              <Button onClick={startDriveBackup} disabled={driveBusy || !driveStatus?.connected || driveStatus?.job?.status === "running"}>
+              <Button onClick={startDriveBackup} disabled={driveBusy || !driveStatus?.connected || driveStatus?.job?.status === "running" || (driveStatus?.database_backend === "postgres" && !driveStatus.encryption_configured)}>
                 <Upload className="mr-2 h-4 w-4" /> Backup now
               </Button>
             </div>
@@ -1182,7 +1217,7 @@ export function SystemSettings({ active }: { active: boolean }) {
                 </>
               ) : null}
               {driveStatus.job.error ? <p className="text-xs text-destructive">{driveStatus.job.error}</p> : null}
-              {driveStatus.job.restart_required ? <p className="text-xs text-amber-600">Restore completed. Restart the Railway service before continuing normal work.</p> : null}
+              {driveStatus.job.restart_required ? <p className="text-xs text-amber-600">Restore completed. The single Railway replica is restarting and will clear maintenance after readiness checks.</p> : null}
             </div>
           ) : null}
 
@@ -1198,12 +1233,20 @@ export function SystemSettings({ active }: { active: boolean }) {
                     <div className="min-w-0">
                       <div className="truncate text-sm font-medium">{backup.name}</div>
                       <div className="text-xs text-muted-foreground">
+                        <span className="capitalize">{backup.database_backend || "sqlite"}</span>{" · "}
                         {backup.backup_type || "backup"} · {formatBytes(backup.size)}
                         {backup.created_at ? ` · ${new Date(backup.created_at).toLocaleString()}` : ""}
                       </div>
                     </div>
                     <div className="flex gap-2">
-                      <Button size="sm" variant="outline" onClick={() => restoreDriveBackup(backup)} disabled={driveBusy || driveStatus?.job?.status === "running"}>Restore</Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => restoreDriveBackup(backup)}
+                        disabled={driveBusy || driveStatus?.job?.status === "running" || (driveStatus?.database_backend === "postgres" && backup.database_backend !== "postgres")}
+                      >
+                        Restore
+                      </Button>
                       <Button size="sm" variant="ghost" onClick={() => deleteDriveBackup(backup)} disabled={driveBusy || driveStatus?.job?.status === "running"}>
                         <Trash2 className="h-4 w-4" />
                       </Button>
