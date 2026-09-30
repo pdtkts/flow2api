@@ -47,8 +47,11 @@ ENV/
 
 # Node
 node_modules/
+**/node_modules/
 
 # Project specific
+# Regenerated in-image by the frontend-builder stage; a local copy is stale.
+static/
 data/*.db
 data/*.db-journal
 tmp/*

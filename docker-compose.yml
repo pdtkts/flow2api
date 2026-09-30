@@ -24,6 +24,7 @@ services:
       - ./config/setting.toml:/app/config/setting.toml
     environment:
       - PYTHONUNBUFFERED=1
+      - PORT=8000
       - FLOW2API_API_ONLY_HOST=${FLOW2API_API_ONLY_HOST:-flow-api.prismacreative.online}
       - FLOW2API_REDIS_URL=${FLOW2API_REDIS_URL:-redis://redis:6379/0}
       - FLOW2API_REDIS_MODE=${FLOW2API_REDIS_MODE:-shadow}
